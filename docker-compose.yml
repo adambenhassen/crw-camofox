@@ -68,6 +68,7 @@ services:
       - "--remote-allow-origins=*"
       - "--ignore-certificate-errors"
       - "--disable-http2"
+      - "--disable-blink-features=AutomationControlled"
     restart: unless-stopped
     mem_limit: 2g
     memswap_limit: 2g
