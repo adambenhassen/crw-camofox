@@ -20,9 +20,9 @@ pub struct AppConfig {
 
 /// Configuration for the `/v1/search` endpoint and its SearXNG backend.
 ///
-/// When `searxng_url` is unset the endpoint returns a 400 error with code
-/// `search_disabled` — the route remains mounted so that startup doesn't
-/// have to know whether search will ever be configured.
+/// When `searxng_url` is unset the endpoint returns HTTP 503 with
+/// `error_code: "search_disabled"` — the route remains mounted so that
+/// startup doesn't have to know whether search will ever be configured.
 #[derive(Debug, Clone, Deserialize)]
 pub struct SearchConfig {
     /// Master switch. Defaults to `true`; set to `false` to refuse all

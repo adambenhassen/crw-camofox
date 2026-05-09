@@ -7,10 +7,10 @@ use crw_core::types::{GroupedSearchData, ImageResult, SearchResult, SearchSource
 
 use crate::client::{SearxngResponse, SearxngResult};
 
-/// Hard cap on per-source upstream rows we even consider before sort/dedupe.
-/// SearXNG with all default engines tops out a couple of hundred rows; setting
-/// 500 leaves comfortable headroom while preventing a misbehaving engine from
-/// turning a single search into a CPU/memory amplifier.
+/// Hard cap on per-source upstream rows we sort/dedupe. SearXNG with all
+/// default engines tops out a couple of hundred rows per source bucket;
+/// setting 500 leaves comfortable headroom while preventing a misbehaving
+/// engine from turning a single search into a CPU/memory amplifier.
 const MAX_UPSTREAM_ROWS: usize = 500;
 
 fn score_or_zero(r: &SearxngResult) -> f64 {
@@ -21,6 +21,10 @@ fn score_or_zero(r: &SearxngResult) -> f64 {
 /// `title`, `engine`). Real upstreams sometimes emit partial rows — e.g.
 /// when an engine times out mid-page — and one bad row used to fail the
 /// whole search. Now we silently skip them and continue.
+///
+/// Note: this filter does NOT cap the result count — caller applies the
+/// per-source cap *after* filtering by source so a hot bucket (e.g. 600
+/// general results) can't starve a cold one (e.g. 5 news results).
 fn keep_well_formed(items: &[SearxngResult]) -> Vec<SearxngResult> {
     items
         .iter()
@@ -29,7 +33,6 @@ fn keep_well_formed(items: &[SearxngResult]) -> Vec<SearxngResult> {
                 && r.title.as_deref().is_some_and(|s| !s.is_empty())
                 && r.engine.as_deref().is_some_and(|s| !s.is_empty())
         })
-        .take(MAX_UPSTREAM_ROWS)
         .cloned()
         .collect()
 }
@@ -98,11 +101,14 @@ fn to_image_result(r: &SearxngResult, position: u32) -> ImageResult {
 /// Note: SaaS sorts then dedupes, so a higher-scored duplicate wins. We
 /// preserve that order — see `crw-saas/src/lib/search-transform.ts:73`.
 pub fn transform_flat(response: &SearxngResponse, limit: u32) -> Vec<SearchResult> {
-    // Bound the working set up-front: drop malformed rows AND cap at
-    // `MAX_UPSTREAM_ROWS` before clone+sort. A misbehaving SearXNG instance
-    // (or a query that scoops thousands of rows) would otherwise amplify
-    // CPU/memory on every request.
-    let mut results = keep_well_formed(&response.results);
+    // Drop malformed rows, then cap the working set at `MAX_UPSTREAM_ROWS`
+    // before clone+sort. A misbehaving SearXNG instance (or a query that
+    // scoops thousands of rows) would otherwise amplify CPU/memory on every
+    // request.
+    let mut results: Vec<SearxngResult> = keep_well_formed(&response.results)
+        .into_iter()
+        .take(MAX_UPSTREAM_ROWS)
+        .collect();
     sort_by_score(&mut results);
     let deduped = dedupe_by_url(results);
     deduped
@@ -122,19 +128,22 @@ pub fn transform_grouped(
 ) -> GroupedSearchData {
     let mut data = GroupedSearchData::default();
     let cap = limit as usize;
-    // Same upfront bound as `transform_flat` — see `keep_well_formed` doc.
     let well_formed = keep_well_formed(&response.results);
 
+    // Cap is applied AFTER the per-source filter (not on `well_formed`)
+    // because `keep_well_formed` is unbounded — otherwise a hot bucket
+    // (500 web rows) could starve cold ones (5 news rows). Each source
+    // gets its own `MAX_UPSTREAM_ROWS` budget for sort/dedupe.
     if sources.contains(&SearchSource::Web) {
-        let filtered: Vec<SearxngResult> = well_formed
+        let mut sorted: Vec<SearxngResult> = well_formed
             .iter()
             .filter(|r| {
                 let cat = r.category.as_deref();
                 cat == Some("general") || (r.img_src.is_none() && cat != Some("news"))
             })
+            .take(MAX_UPSTREAM_ROWS)
             .cloned()
             .collect();
-        let mut sorted = filtered;
         sort_by_score(&mut sorted);
         let deduped = dedupe_by_url(sorted);
         data.web = Some(
@@ -148,12 +157,12 @@ pub fn transform_grouped(
     }
 
     if sources.contains(&SearchSource::News) {
-        let filtered: Vec<SearxngResult> = well_formed
+        let mut sorted: Vec<SearxngResult> = well_formed
             .iter()
             .filter(|r| r.category.as_deref() == Some("news"))
+            .take(MAX_UPSTREAM_ROWS)
             .cloned()
             .collect();
-        let mut sorted = filtered;
         sort_by_score(&mut sorted);
         let deduped = dedupe_by_url(sorted);
         data.news = Some(
@@ -167,12 +176,12 @@ pub fn transform_grouped(
     }
 
     if sources.contains(&SearchSource::Images) {
-        let filtered: Vec<SearxngResult> = well_formed
+        let mut sorted: Vec<SearxngResult> = well_formed
             .iter()
             .filter(|r| r.category.as_deref() == Some("images") || r.img_src.is_some())
+            .take(MAX_UPSTREAM_ROWS)
             .cloned()
             .collect();
-        let mut sorted = filtered;
         sort_by_score(&mut sorted);
         let deduped = dedupe_by_url(sorted);
         data.images = Some(
@@ -355,6 +364,28 @@ mod tests {
         let res = transform_grouped(&resp(items), &[SearchSource::Web, SearchSource::News], 2);
         assert_eq!(res.web.unwrap().len(), 2);
         assert_eq!(res.news.unwrap().len(), 2);
+    }
+
+    #[test]
+    fn grouped_hot_bucket_does_not_starve_cold_buckets() {
+        // Regression for codex review iteration 2: the well-formed cap used
+        // to be applied globally before per-source filtering, so 600 web
+        // rows could push all the news rows out of the working set. Now the
+        // cap is per-source — both buckets must populate.
+        let mut items = Vec::new();
+        for i in 0..600 {
+            items.push(r(&format!("g{i}"), 1.0 - (i as f64 / 1000.0), ""));
+        }
+        for i in 0..3 {
+            items.push(news(&format!("n{i}"), 0.5));
+        }
+        let res = transform_grouped(&resp(items), &[SearchSource::Web, SearchSource::News], 10);
+        assert_eq!(res.web.unwrap().len(), 10);
+        assert_eq!(
+            res.news.unwrap().len(),
+            3,
+            "cold news bucket must survive a hot web bucket"
+        );
     }
 
     #[test]

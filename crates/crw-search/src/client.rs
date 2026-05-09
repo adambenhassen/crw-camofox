@@ -18,6 +18,34 @@ use crate::params::SearxngParams;
 /// memory-amplification attack, so we abort the read instead of allocating it.
 const MAX_RESPONSE_BYTES: usize = 10 * 1024 * 1024;
 
+/// Tighter cap for non-2xx error bodies. We only surface the first 500 chars
+/// to the caller anyway, so a 64 KiB ceiling is plenty for diagnostics while
+/// closing the door on hostile upstreams that retaliate to invalid params
+/// with multi-megabyte error pages.
+const MAX_ERROR_BODY_BYTES: usize = 64 * 1024;
+
+async fn read_capped(response: reqwest::Response, cap: usize) -> Result<Vec<u8>, SearchError> {
+    if let Some(declared) = response.content_length()
+        && declared as usize > cap
+    {
+        return Err(SearchError::InvalidResponse(format!(
+            "response too large: declared {declared} bytes exceeds {cap} cap"
+        )));
+    }
+    let mut buf: Vec<u8> = Vec::with_capacity(64 * 1024);
+    let mut stream = response.bytes_stream();
+    while let Some(chunk) = stream.next().await {
+        let chunk = chunk.map_err(|e: reqwest::Error| SearchError::Transport(e.to_string()))?;
+        if buf.len() + chunk.len() > cap {
+            return Err(SearchError::InvalidResponse(format!(
+                "response too large: exceeded {cap}-byte cap"
+            )));
+        }
+        buf.extend_from_slice(&chunk);
+    }
+    Ok(buf)
+}
+
 #[derive(Debug, Error)]
 pub enum SearchError {
     #[error("SearXNG request timed out")]
@@ -159,7 +187,14 @@ impl SearxngClient {
 
         let status = response.status();
         if !status.is_success() {
-            let body = response.text().await.unwrap_or_default();
+            // Apply the same streaming cap to the error path. Without it, a
+            // hostile upstream could retaliate to an invalid query with a
+            // multi-megabyte 4xx body and push us into unbounded allocation
+            // — even though we only display the first 500 chars.
+            let body_bytes = read_capped(response, MAX_ERROR_BODY_BYTES)
+                .await
+                .unwrap_or_default();
+            let body = String::from_utf8_lossy(&body_bytes);
             let trimmed: String = body.chars().take(500).collect();
             return Err(SearchError::Upstream {
                 status: status.as_u16(),
@@ -170,25 +205,8 @@ impl SearxngClient {
         // Stream the body with a hard byte cap so a misbehaving upstream
         // can't push us into unbounded allocation. We refuse to parse past
         // `MAX_RESPONSE_BYTES`. `Content-Length` is not trusted (chunked
-        // encoding sets none) — we enforce on the running sum instead.
-        if let Some(declared) = response.content_length()
-            && declared as usize > MAX_RESPONSE_BYTES
-        {
-            return Err(SearchError::InvalidResponse(format!(
-                "response too large: declared {declared} bytes exceeds {MAX_RESPONSE_BYTES} cap"
-            )));
-        }
-        let mut buf: Vec<u8> = Vec::with_capacity(64 * 1024);
-        let mut stream = response.bytes_stream();
-        while let Some(chunk) = stream.next().await {
-            let chunk = chunk.map_err(|e: reqwest::Error| SearchError::Transport(e.to_string()))?;
-            if buf.len() + chunk.len() > MAX_RESPONSE_BYTES {
-                return Err(SearchError::InvalidResponse(format!(
-                    "response too large: exceeded {MAX_RESPONSE_BYTES}-byte cap"
-                )));
-            }
-            buf.extend_from_slice(&chunk);
-        }
+        // encoding sets none) — `read_capped` enforces on the running sum.
+        let buf = read_capped(response, MAX_RESPONSE_BYTES).await?;
         serde_json::from_slice::<SearxngResponse>(&buf)
             .map_err(|e| SearchError::InvalidResponse(e.to_string()))
     }
