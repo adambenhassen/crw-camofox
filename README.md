@@ -107,7 +107,7 @@
 | [**Scrape**](#scrape) | Convert any URL to markdown, HTML, JSON, or links |
 | [**Crawl**](#crawl) | Async BFS website crawler with rate limiting |
 | [**Map**](#map) | Discover all URLs on a site instantly |
-| [**Search**](#search) | Web search + content scraping (cloud) |
+| [**Search**](#search) | Web search + content scraping — bundled SearXNG sidecar, free Tavily alternative |
 
 **More**
 
@@ -272,7 +272,9 @@ curl -X POST http://localhost:3000/v1/map \
 
 Search the web and get full page content from results. Self-hosted CRW
 ships with a SearXNG sidecar (started automatically by `docker compose up`),
-so search works out of the box — no third-party API key needed.
+so search works out of the box — **no Tavily/Serper/Brave API key needed,
+$0/month**. Drop-in replacement for paid search APIs in your RAG / agent
+stack.
 
 ```python
 from crw import CrwClient
@@ -362,7 +364,7 @@ Add CRW to any MCP-compatible client:
 >
 > **Config file locations:** Claude Code — `claude mcp add` (no file edit). Claude Desktop — `~/Library/Application Support/Claude/claude_desktop_config.json`. Cursor — `.cursor/mcp.json`. Windsurf — `~/.codeium/windsurf/mcp_config.json`. [All clients →](https://docs.fastcrw.com/mcp-clients/)
 
-**Cloud mode** — adds `crw_search` for web search:
+**Cloud mode** — point at fastcrw.com for global proxy network and dashboard:
 
 ```json
 {
@@ -387,9 +389,9 @@ Add CRW to any MCP-compatible client:
 | **Embedded + Cloud** | `crw_crawl` | Start async BFS crawl (returns job ID) |
 | **Embedded + Cloud** | `crw_check_crawl_status` | Poll crawl job status (use with `crw_crawl`) |
 | **Embedded + Cloud** | `crw_map` | Discover all URLs on a site |
-| **Cloud only** | `crw_search` | Web search + optional content scraping |
+| **Server + Cloud** | `crw_search` | Web search + optional content scraping (server uses bundled SearXNG sidecar) |
 
-> **Embedded mode** (default): no server, no API key, no setup — the MCP binary runs a self-contained scraping engine. **Cloud mode** (`CRW_API_URL` set): forwards calls to [fastcrw.com](https://fastcrw.com), adds `crw_search`.
+> **Embedded mode** (default): no server, no API key, no setup — the MCP binary runs a self-contained scraping engine (search not available — needs the SearXNG sidecar from `docker compose up`). **Server mode** (`CRW_API_URL=http://localhost:3000`): full API including `crw_search`. **Cloud mode** (`CRW_API_URL=https://fastcrw.com/api`): adds global proxy network and dashboard.
 
 [Full MCP docs →](https://docs.fastcrw.com/mcp/)
 
@@ -572,7 +574,7 @@ pages = client.crawl("https://docs.example.com", max_depth=2, max_pages=50)
 # Map
 urls = client.map("https://example.com")
 
-# Search (cloud only)
+# Search (self-hosted via bundled SearXNG, or cloud)
 results = client.search("AI news", limit=10, sources=["web", "news"])
 ```
 
@@ -696,7 +698,7 @@ See the [self-hosting guide](https://docs.fastcrw.com/#self-hosting) for product
 |---|---|---|
 | Core scraping | ✅ | ✅ |
 | JS rendering | ✅ (LightPanda/Chrome) | ✅ |
-| Web search | ❌ | ✅ |
+| Web search | ✅ (bundled SearXNG sidecar) | ✅ (managed) |
 | Global proxy network | ❌ | ✅ |
 | Dashboard | ❌ | ✅ |
 | Commercial use without open-sourcing | Requires AGPL compliance | ✅ Included |

@@ -133,6 +133,68 @@
 The source of truth is the repository root changelog. Do not edit this docs page manually.
 :::</p>
 <p>All notable changes to CRW are documented here.</p>
+<h2><a href="https://github.com/us/crw/compare/v0.6.0...v0.6.1">0.6.1</a> (2026-05-09)</h2>
+<h3>Features</h3>
+<ul>
+<li><strong>metrics:</strong> cdp_pending_requests, cdp_live_connections, (<a href="https://github.com/us/crw/commit/b5f7bec28308e4f0094b7bbcbbecc5d2f734e385">b5f7bec</a>)</li>
+<li><strong>renderer:</strong> live-connection registry + 60s telemetry sampler (<a href="https://github.com/us/crw/commit/b5f7bec28308e4f0094b7bbcbbecc5d2f734e385">b5f7bec</a>)</li>
+<li><strong>renderer:</strong> target lifecycle metric + leaked detection (<a href="https://github.com/us/crw/commit/b5f7bec28308e4f0094b7bbcbbecc5d2f734e385">b5f7bec</a>)</li>
+<li><strong>server:</strong> /ready endpoint with deep status code (<a href="https://github.com/us/crw/commit/b5f7bec28308e4f0094b7bbcbbecc5d2f734e385">b5f7bec</a>)</li>
+</ul>
+<h3>Bug Fixes</h3>
+<ul>
+<li><strong>release:</strong> bulletproof publish pipeline and drop pdf feature (<a href="https://github.com/us/crw/commit/8fcf2f656aabe1a8a05db7d6c21011e06959e184">8fcf2f6</a>)</li>
+<li><strong>renderer:</strong> invalidate cached chrome WS URL on connect failure (<a href="https://github.com/us/crw/commit/b5f7bec28308e4f0094b7bbcbbecc5d2f734e385">b5f7bec</a>)</li>
+</ul>
+<h2><a href="https://github.com/us/crw/compare/v0.5.0...v0.6.0">0.6.0</a> (2026-05-09)</h2>
+<h3>Features</h3>
+<ul>
+<li><strong>extract:</strong> scale recall to 63.74% on 1000-URL benchmark (<a href="https://github.com/us/crw/commit/5b855554c5f7ba16981fbe2060e25cca4ba81686">5b85555</a>)</li>
+<li><strong>renderer:</strong> add browserless/chromium opt-in stealth profile (+2.5pt) (<a href="https://github.com/us/crw/commit/d2414c9cd89dc01447b9e52501aa26180ce7d326">d2414c9</a>)</li>
+<li><strong>renderer:</strong> chrome-stealth wiring + CDP discovery improvements (<a href="https://github.com/us/crw/commit/6b2e77c2a356ef8fc453560870985819ce75483a">6b2e77c</a>)</li>
+<li><strong>server,core,crawl:</strong> plumb tier timeouts and recall pipeline (<a href="https://github.com/us/crw/commit/7cbee43e5db319f0af39dddea07faccbf0cd25ee">7cbee43</a>)</li>
+</ul>
+<h3>Miscellaneous</h3>
+<ul>
+<li>release 0.6.0 (<a href="https://github.com/us/crw/commit/bd03a352922b293431e49722c052f90c945f1c56">bd03a35</a>)</li>
+</ul>
+<h2><a href="https://github.com/us/crw/compare/v0.4.2...v0.5.0">0.5.0</a> (2026-05-04)</h2>
+<h3>Features</h3>
+<ul>
+<li><strong>core:</strong> add deadline module and request/renderer config scaffolding (<a href="https://github.com/us/crw/commit/5a4e69ae605d15c0090f3d866db0f8f4fa23a715">5a4e69a</a>)</li>
+<li><strong>core:</strong> thread end-to-end Deadline through scrape pipeline (<a href="https://github.com/us/crw/commit/5991986cdac9756500dab40b8bf05ad454dbd21c">5991986</a>)</li>
+<li><strong>crawl:</strong> key per-domain rate limiter by eTLD+1 (<a href="https://github.com/us/crw/commit/39c7954881cfde47e34dad2eaa4141f1f10b1156">39c7954</a>)</li>
+<li><strong>crawl:</strong> per-host concurrency cap on the eTLD+1 limiter (<a href="https://github.com/us/crw/commit/274f462b2755a02fc2485bddc7ac8ad3fd11c0e3">274f462</a>)</li>
+<li><strong>renderer:</strong> add browserless/chromium opt-in stealth profile (<a href="https://github.com/us/crw/commit/236f62682f29011a959bdef5a9770475a809f0a9">236f626</a>)</li>
+<li><strong>renderer:</strong> chrome nav-budget cap + truncated/deadline_exceeded flags (<a href="https://github.com/us/crw/commit/c57cef8c6ad2ba2fefce7f4110685bc779359378">c57cef8</a>)</li>
+<li><strong>renderer:</strong> chrome request-paused interception pump (T27) (<a href="https://github.com/us/crw/commit/13fcaa4c5560f254d67682bff96ba24e39cdf13e">13fcaa4</a>)</li>
+<li><strong>renderer:</strong> leak-through fallback when global breaker open &amp; host clean (<a href="https://github.com/us/crw/commit/86a9e36880f2dddcb3d7b7bd6c993825559cf487">86a9e36</a>)</li>
+<li><strong>renderer:</strong> outcome-aware breaker + extraction and stealth fixes (<a href="https://github.com/us/crw/commit/86dd10fd014235cb9bd107e32c7cf6e04cb03367">86dd10f</a>)</li>
+<li><strong>renderer:</strong> own per-eTLD+1 host limiter in FallbackRenderer (<a href="https://github.com/us/crw/commit/0577516bd41dc284f24cbaf3ed95544504ba50be">0577516</a>)</li>
+<li><strong>renderer:</strong> recover FC-wins URLs to reach 92% bench coverage (<a href="https://github.com/us/crw/commit/ba12424e44c34aa44bb8a41bc1f16d1dd87f498a">ba12424</a>)</li>
+</ul>
+<h3>Bug Fixes</h3>
+<ul>
+<li><strong>compose:</strong> auto-restart and bound memory for renderer containers (<a href="https://github.com/us/crw/commit/dd610ccae2579138d5438795e1d5ac441a0fafc3">dd610cc</a>)</li>
+<li><strong>core:</strong> emit meaningful Timeout value when deadline already expired (<a href="https://github.com/us/crw/commit/607bb27692686f3563af52ea721d7dfb800d0405">607bb27</a>)</li>
+<li><strong>crawl:</strong> prioritize anti-bot detection over placeholder warning (<a href="https://github.com/us/crw/commit/05aa93358f3fa9826eb97db114bef06d1754dae3">05aa933</a>)</li>
+<li>escalate to JS renderer on HTTP failure and empty markdown (<a href="https://github.com/us/crw/commit/9fc79344702e30be0555e63a02aa5377f15cca93">9fc7934</a>)</li>
+<li><strong>mcp:</strong> apply per-endpoint timeouts to proxy client (<a href="https://github.com/us/crw/commit/741f1b245e064b267b4fb0dfb5487099bc86e2e4">741f1b2</a>)</li>
+<li><strong>renderer:</strong> enforce Deadline in HttpFetcher via tokio::time::timeout (<a href="https://github.com/us/crw/commit/b1c4058f47eed204d413a51c56d8ae43f547ff63">b1c4058</a>)</li>
+<li><strong>renderer:</strong> keep larger thin-result HTML when stitching attempts (<a href="https://github.com/us/crw/commit/8147236cc6b94d3c2db34f1128a687d9e110dc35">8147236</a>)</li>
+<li><strong>renderer:</strong> rescue 39 bench failures via UA, retry, and thin-content escalation (<a href="https://github.com/us/crw/commit/ddacb49e92688c3a20c7f7fe32da58d83c620f31">ddacb49</a>)</li>
+<li><strong>server:</strong> classify anti-bot challenges as anti_bot, not no-markdown (<a href="https://github.com/us/crw/commit/3ece4dd5b5318f71fe3744fa9d09948afaa738de">3ece4dd</a>)</li>
+</ul>
+<h3>Performance</h3>
+<ul>
+<li><strong>renderer:</strong> drop fixed 2s JS wait, rely on SPA selector poll (<a href="https://github.com/us/crw/commit/cb043f7754f870df67a3a56e41a552ba7f7867f4">cb043f7</a>)</li>
+<li><strong>renderer:</strong> tighten tier timeouts and bump LP retry threshold (<a href="https://github.com/us/crw/commit/3f93d6052251eb72abee20ea4992ca3cdfc7ddb4">3f93d60</a>)</li>
+<li><strong>renderer:</strong> widen breaker tolerance to 20 failures / 10s cooldown (<a href="https://github.com/us/crw/commit/6525a84c18e2c4fafa92cc0d29203310755d3ef1">6525a84</a>)</li>
+</ul>
+<h3>Miscellaneous</h3>
+<ul>
+<li>release 0.5.0 (<a href="https://github.com/us/crw/commit/3987de1b15b5d7605cc26645d14b74020c8eb7a9">3987de1</a>)</li>
+</ul>
 <h2><a href="https://github.com/us/crw/compare/v0.4.1...v0.4.2">0.4.2</a> (2026-04-29)</h2>
 <h3>Features</h3>
 <ul>

@@ -1,10 +1,11 @@
 <div class="page-intro">
   <div class="page-kicker">Core Endpoint</div>
   <h1>Search</h1>
-  <p class="page-subtitle">Search the web first, then optionally scrape the results you care about. This is the discovery-first workflow for the hosted CRW product.</p>
+  <p class="page-subtitle">Search the web first, then optionally scrape the results you care about. Works out of the box on self-hosted CRW via the bundled SearXNG sidecar — no third-party API key needed. Free, self-hostable alternative to Tavily / Serper / Brave Search.</p>
   <div class="page-capabilities">
     <div class="page-capability"><strong>Best for:</strong> unknown URLs</div>
-    <div class="page-capability"><strong>Hosted:</strong> cloud path</div>
+    <div class="page-capability"><strong>Self-hosted:</strong> bundled SearXNG sidecar</div>
+    <div class="page-capability"><strong>Hosted:</strong> fastcrw.com (managed)</div>
     <div class="page-capability"><strong>Start with:</strong> search only, then add scraping</div>
   </div>
   <div class="page-actions">
@@ -24,7 +25,7 @@
 </div>
 
 :::note
-`search` is a cloud-only feature. On self-hosted open-core deployments, use [Map](#map) or [Scrape](#scraping) when you already know the target site. When using `crw-mcp` with `CRW_API_URL` pointed at [fastcrw.com](https://fastcrw.com), the `crw_search` tool is automatically available to your AI agent.
+**Self-hosted users**: `docker compose up` boots a SearXNG sidecar automatically. `/v1/search` is live on `http://localhost:3000` with no extra setup. To point at an existing SearXNG instance instead, set `CRW_SEARCH__SEARXNG_URL=http://your-host:8080` and remove the `searxng` service from your compose file. To disable search entirely, set `[search].enabled = false` — the route returns a clear `search_disabled` error (HTTP 503).
 :::
 
 ## Searching the web with CRW
@@ -32,13 +33,14 @@
 ### /v1/search
 
 ```http
-POST https://fastcrw.com/api/v1/search
+POST http://localhost:3000/v1/search          # self-hosted
+POST https://fastcrw.com/api/v1/search        # hosted
 ```
 
 Authentication:
 
+- Self-hosted: no auth by default (add a reverse proxy / API key middleware if you expose it publicly)
 - Hosted: send `Authorization: Bearer YOUR_API_KEY`
-- Self-hosted open-core binaries do not expose `search`
 
 ### Installation
 
@@ -60,30 +62,28 @@ Start with this request:
 ```python
 import requests
 
+# Self-hosted
 resp = requests.post(
-    "https://fastcrw.com/api/v1/search",
-    headers={"Authorization": "Bearer YOUR_API_KEY"},
-    json={
-        "query": "web scraping tools",
-        "limit": 5,
-    },
+    "http://localhost:3000/v1/search",
+    json={"query": "web scraping tools", "limit": 5},
 )
+
+# Or hosted (with API key)
+# resp = requests.post(
+#     "https://fastcrw.com/api/v1/search",
+#     headers={"Authorization": "Bearer YOUR_API_KEY"},
+#     json={"query": "web scraping tools", "limit": 5},
+# )
 
 for item in resp.json()["data"]:
     print(item["title"], item["url"])
 ```
 ::tab{title="Node.js"}
 ```javascript
-const resp = await fetch("https://fastcrw.com/api/v1/search", {
+const resp = await fetch("http://localhost:3000/v1/search", {
   method: "POST",
-  headers: {
-    "Authorization": "Bearer YOUR_API_KEY",
-    "Content-Type": "application/json"
-  },
-  body: JSON.stringify({
-    query: "web scraping tools",
-    limit: 5
-  })
+  headers: { "Content-Type": "application/json" },
+  body: JSON.stringify({ query: "web scraping tools", limit: 5 })
 });
 
 const body = await resp.json();
@@ -91,13 +91,16 @@ console.log(body.data);
 ```
 ::tab{title="cURL"}
 ```bash
+# Self-hosted (no auth)
+curl -X POST http://localhost:3000/v1/search \
+  -H "Content-Type: application/json" \
+  -d '{"query": "web scraping tools", "limit": 5}'
+
+# Hosted
 curl -X POST https://fastcrw.com/api/v1/search \
   -H "Authorization: Bearer YOUR_API_KEY" \
   -H "Content-Type: application/json" \
-  -d '{
-    "query": "web scraping tools",
-    "limit": 5
-  }'
+  -d '{"query": "web scraping tools", "limit": 5}'
 ```
 :::
 
@@ -124,8 +127,8 @@ That is the flat response shape used when `sources` is not set.
 
 | Field | Type | Default | Description |
 |---|---|---|---|
-| `query` | string | required | Search query |
-| `limit` | number | `5` | Maximum number of results per source |
+| `query` | string | required | Search query (1–2000 chars) |
+| `limit` | number | `5` | Maximum results per source (max `20`) |
 | `lang` | string | -- | Result language hint such as `"en"` or `"tr"` |
 | `tbs` | string | -- | Recency filter: `qdr:h`, `qdr:d`, `qdr:w`, `qdr:m`, `qdr:y` |
 | `sources` | string[] | -- | Result groups such as `"web"`, `"news"`, `"images"` |
@@ -136,7 +139,7 @@ That is the flat response shape used when `sources` is not set.
 
 | Field | Type | Default | Description |
 |---|---|---|---|
-| `formats` | string[] | required | Which content formats to fetch for each result |
+| `formats` | string[] | `["markdown"]` | Allowed: `markdown`, `html`, `rawHtml`, `links`. `plainText` and `json` (extract) are not supported on `/v1/search` — use `/v1/scrape` for those |
 | `onlyMainContent` | boolean | `true` | Keep content focused on the main body |
 
 ## Search result types
@@ -196,6 +199,18 @@ That enriches eligible results with scraped page content. It is powerful, but it
 
 Good default: add one narrowing control at a time so you can see which one actually improved the results.
 
+## Self-hosting the SearXNG sidecar
+
+The default `docker-compose.yml` ships a hardened SearXNG container:
+
+- Read-only root filesystem with sized tmpfs scratch
+- All Linux capabilities dropped, `no-new-privileges`
+- `mem_limit`, `pids_limit` set
+- Pinned upstream image tag (we never run `:latest`)
+- Config mounted read-only from `config/searxng/settings.yml`
+
+It is mere-aggregation under AGPL — you are running an unmodified upstream SearXNG image with config mounted at runtime, so no §13 corresponding-source obligations attach to the image itself. If you redistribute your CRW deployment publicly, AGPL §13 still requires you to offer the corresponding source of CRW (which is already on GitHub) to your users.
+
 ## Common production patterns
 
 - Start with search only, then add `scrapeOptions` after you verify result quality.
@@ -207,8 +222,8 @@ Good default: add one narrowing control at a time so you can see which one actua
 
 - Adding `scrapeOptions` to every search before you know you need page content
 - Confusing `sources` with `categories`
-- Treating `qdr:h` as truly hourly precision; backend precision can be coarser
-- Assuming search is part of the self-hosted open-core binary
+- Treating `qdr:h` as truly hourly precision; SearXNG collapses it to `day`
+- Sending `plainText` or `json` in `scrapeOptions.formats` — use `/v1/scrape` for those
 
 ## When to use something else
 
