@@ -174,6 +174,10 @@ pub fn tool_definitions(proxy_mode: bool) -> Value {
                     "useSitemap": {
                         "type": "boolean",
                         "description": "Whether to use the site's sitemap.xml (default: true)"
+                    },
+                    "crawlFallback": {
+                        "type": "boolean",
+                        "description": "If true (default), supplements sitemap discovery with a short BFS crawl when the sitemap returns enough URLs. Set false for sitemap-only mode (faster, may miss pages not in the sitemap)."
                     }
                 },
                 "required": ["url"]

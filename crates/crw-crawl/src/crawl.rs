@@ -310,6 +310,9 @@ pub struct DiscoverOptions<'a> {
     pub base_url: &'a str,
     pub max_depth: u32,
     pub use_sitemap: bool,
+    /// Run a short-budget BFS crawl after the sitemap phase to fill gaps.
+    /// When false, returns sitemap-only results.
+    pub crawl_fallback: bool,
     pub renderer: &'a Arc<FallbackRenderer>,
     pub max_concurrency: usize,
     pub requests_per_second: f64,
@@ -324,12 +327,24 @@ pub struct DiscoverOptions<'a> {
     pub per_host_max_concurrent: u32,
 }
 
+/// If the sitemap phase yields at least this many URLs and `crawl_fallback`
+/// is true, the BFS phase still runs but with a much smaller time budget
+/// (we have plenty already; spending the full timeout on slow HTML fetches
+/// would burn time for marginal gain).
+const SITEMAP_SUFFICIENT_THRESHOLD: usize = 50;
+/// Hard ceiling on the BFS crawl phase when sitemap was sufficient.
+const BFS_SHORT_BUDGET_SECS: u64 = 30;
+/// Recursion depth + count caps for the sitemap tree fetch.
+const SITEMAP_MAX_DEPTH: u32 = 3;
+const SITEMAP_MAX_FETCHES: usize = 25;
+
 /// Discover URLs from a site (map endpoint).
 pub async fn discover_urls(opts: DiscoverOptions<'_>) -> CrwResult<Vec<String>> {
     let DiscoverOptions {
         base_url,
         max_depth,
         use_sitemap,
+        crawl_fallback,
         renderer,
         max_concurrency,
         requests_per_second,
@@ -347,17 +362,21 @@ pub async fn discover_urls(opts: DiscoverOptions<'_>) -> CrwResult<Vec<String>> 
         ));
     }
 
-    let origin = match parsed.host_str() {
-        Some(host) => format!("{}://{}", parsed.scheme(), host),
-        None => {
-            return Err(crw_core::error::CrwError::InvalidRequest(
-                "URL has no host".into(),
-            ));
-        }
-    };
+    // Use the URL's full origin (scheme + host + explicit port). Dropping the
+    // port here would silently break sitemap discovery on any non-default-port
+    // host, because `fetch_sitemap_tree` filters seeds against the target
+    // origin tuple including port.
+    if parsed.host_str().is_none() {
+        return Err(crw_core::error::CrwError::InvalidRequest(
+            "URL has no host".into(),
+        ));
+    }
+    let origin = parsed.origin().ascii_serialization();
 
     let mut discover_client_builder = reqwest::Client::builder()
         .user_agent(user_agent)
+        .timeout(std::time::Duration::from_secs(15))
+        .connect_timeout(std::time::Duration::from_secs(5))
         .redirect(crw_core::url_safety::safe_redirect_policy());
     if let Some(ref proxy_url) = proxy
         && let Ok(p) = reqwest::Proxy::all(proxy_url)
@@ -371,31 +390,88 @@ pub async fn discover_urls(opts: DiscoverOptions<'_>) -> CrwResult<Vec<String>> 
     let mut all_urls: HashSet<String> = HashSet::new();
 
     if use_sitemap {
+        // robots.txt fetch is wrapped in the discover client's 15s/5s timeouts —
+        // it can no longer block the entire map call (the original bug).
         let robots = RobotsTxt::fetch(&origin, &client)
             .await
             .unwrap_or_else(|_| RobotsTxt::parse(""));
-        let sitemap_urls: Vec<String> = if robots.sitemaps.is_empty() {
-            vec![format!("{origin}/sitemap.xml")]
-        } else {
+
+        let seeds: Vec<String> = if !robots.sitemaps.is_empty() {
             robots.sitemaps.clone()
+        } else {
+            // robots.txt declared nothing — try the well-known fallback paths.
+            // /sitemap.xml first because it's the standard entry point and most
+            // CMSes (incl. WordPress 5.5+) 301/302 from there to their canonical
+            // sitemap index. HEAD probe filters obvious 404s before bodies fetch.
+            // /sitemap.xml is the spec-required canonical path — always try
+            // it via GET regardless of the HEAD probe (some CDNs return
+            // 405/403 to HEAD but answer GET fine, and we don't want to lose
+            // the canonical sitemap just because another fallback responded
+            // 200 to HEAD). The other fallbacks are CMS-specific guesses; the
+            // HEAD probe avoids paying a body GET on obvious 404s for those.
+            let canonical = format!("{origin}/sitemap.xml");
+            let probe_candidates = [
+                format!("{origin}/wp-sitemap.xml"),
+                format!("{origin}/sitemap_index.xml"),
+                format!("{origin}/sitemap-index.xml"),
+            ];
+            let probes = probe_candidates.iter().map(|u| {
+                let client = client.clone();
+                let u = u.clone();
+                async move { (u.clone(), crate::sitemap::head_probe(&u, &client).await) }
+            });
+            let probe_results = futures::future::join_all(probes).await;
+            let mut seeds: Vec<String> = vec![canonical];
+            seeds.extend(
+                probe_results
+                    .into_iter()
+                    .filter_map(|(u, ok)| ok.then_some(u)),
+            );
+            seeds
         };
 
-        for sm_url in sitemap_urls {
-            if let Ok(urls) = crate::sitemap::fetch_sitemap(&sm_url, &client).await {
-                for u in urls {
-                    if all_urls.len() >= MAX_DISCOVERED_URLS {
-                        break;
-                    }
-                    // Validate sitemap URLs to prevent SSRF via crafted sitemaps.
-                    if let Ok(parsed) = url::Url::parse(&u)
-                        && is_safe_url(&parsed)
-                    {
-                        all_urls.insert(u);
-                    }
-                }
+        // Use the operator's per-host politeness cap for sitemap fanout, not
+        // the global `max_concurrency` — a sitemap-index with many children
+        // is still N requests against the SAME host, and respecting the
+        // configured per-host limit is what an operator who set it expects.
+        // `fetch_sitemap_tree` clamps to a small ceiling internally.
+        let sitemap_urls = crate::sitemap::fetch_sitemap_tree(
+            seeds,
+            &parsed,
+            &client,
+            SITEMAP_MAX_DEPTH,
+            SITEMAP_MAX_FETCHES,
+            MAX_DISCOVERED_URLS,
+            per_host_max_concurrent as usize,
+        )
+        .await;
+        for u in sitemap_urls {
+            if all_urls.len() >= MAX_DISCOVERED_URLS {
+                break;
             }
+            all_urls.insert(u);
         }
     }
+
+    // Sitemap-only mode (or sitemap was empty + crawl_fallback is off).
+    if !crawl_fallback {
+        all_urls.insert(base_url.to_string());
+        let mut urls: Vec<String> = all_urls.into_iter().collect();
+        urls.sort();
+        return Ok(urls);
+    }
+
+    // Sitemap was rich enough → run BFS with a tight budget. Otherwise let it
+    // run to the per-page deadline and the outer route timeout.
+    let bfs_deadline_at = if all_urls.len() >= SITEMAP_SUFFICIENT_THRESHOLD {
+        tracing::info!(
+            sitemap_urls = all_urls.len(),
+            "sitemap sufficient, BFS will run with short budget"
+        );
+        Some(std::time::Instant::now() + std::time::Duration::from_secs(BFS_SHORT_BUDGET_SECS))
+    } else {
+        None
+    };
 
     let max_depth = max_depth.min(10);
     let semaphore = Arc::new(Semaphore::new(max_concurrency));
@@ -409,6 +485,12 @@ pub async fn discover_urls(opts: DiscoverOptions<'_>) -> CrwResult<Vec<String>> 
 
     while let Some((url, depth)) = queue.pop_front() {
         if visited.len() > MAX_DISCOVERED_URLS {
+            break;
+        }
+        if let Some(deadline) = bfs_deadline_at
+            && std::time::Instant::now() >= deadline
+        {
+            tracing::info!("BFS short budget exhausted; returning sitemap+partial results");
             break;
         }
 
@@ -437,9 +519,10 @@ pub async fn discover_urls(opts: DiscoverOptions<'_>) -> CrwResult<Vec<String>> 
                     if !is_safe_url(&link_url) {
                         continue;
                     }
-                    let link_host = link_url.host_str().unwrap_or("");
-                    let link_origin = format!("{}://{}", link_url.scheme(), link_host);
-                    if link_origin != origin {
+                    // Compare full origin (scheme + host + explicit port) so a
+                    // non-default-port target (e.g. https://example.com:8443)
+                    // doesn't reject its own same-origin links.
+                    if link_url.origin().ascii_serialization() != origin {
                         continue;
                     }
                     let normalized = normalize_url(&link);

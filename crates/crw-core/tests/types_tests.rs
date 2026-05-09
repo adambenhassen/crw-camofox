@@ -135,6 +135,7 @@ fn crawl_start_response_serialization() {
 fn map_request_defaults() {
     let req: MapRequest = serde_json::from_str(r#"{"url":"https://example.com"}"#).unwrap();
     assert!(req.use_sitemap);
+    assert!(req.crawl_fallback);
     assert!(req.max_depth.is_none());
 }
 

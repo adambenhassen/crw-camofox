@@ -735,6 +735,7 @@ dependencies = [
  "crw-extract",
  "crw-renderer",
  "dashmap",
+ "flate2",
  "futures",
  "rand 0.9.2",
  "reqwest 0.13.2",
@@ -743,6 +744,7 @@ dependencies = [
  "tracing",
  "url",
  "uuid",
+ "wiremock",
 ]
 
 [[package]]

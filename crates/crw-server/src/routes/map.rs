@@ -36,6 +36,7 @@ pub async fn map(
         proxy: state.config.crawler.proxy.clone(),
         deadline_ms_per_page: state.config.request.deadline_ms_default,
         per_host_max_concurrent: state.config.crawler.per_host_max_concurrent,
+        crawl_fallback: req.crawl_fallback,
     });
 
     let urls = match tokio::time::timeout(Duration::from_secs(timeout_secs), discover_future).await

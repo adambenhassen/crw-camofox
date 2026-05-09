@@ -22,6 +22,8 @@ uuid = { workspace = true }
 futures = { workspace = true }
 dashmap = { workspace = true }
 rand = { workspace = true }
+flate2 = "1"
 
 [dev-dependencies]
 tokio = { workspace = true }
+wiremock = { workspace = true }

@@ -594,6 +594,11 @@ pub struct MapRequest {
     pub max_depth: Option<u32>,
     #[serde(default = "default_true")]
     pub use_sitemap: bool,
+    /// When true (default), fall back to a short-budget BFS crawl after the
+    /// sitemap phase to fill gaps. Set to false for sitemap-only mode — faster
+    /// for sites with rich sitemaps, but may miss pages a sitemap omits.
+    #[serde(default = "default_true")]
+    pub crawl_fallback: bool,
     /// Custom timeout in seconds (default: 120).
     #[serde(default)]
     pub timeout: Option<u64>,
