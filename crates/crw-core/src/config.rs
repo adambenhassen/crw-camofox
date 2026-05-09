@@ -169,6 +169,81 @@ pub struct RendererConfig {
     /// on the 1k bench (false-skip < 2 %, false-escalate < 5 %, churn < 3 / 1k).
     #[serde(default)]
     pub use_predictor: bool,
+    /// Engine escalation policy (firecrawl-shaped: race + on-error). When
+    /// disabled (default), the renderer keeps its current ladder unchanged.
+    #[serde(default)]
+    pub escalation: EscalationConfig,
+    /// Anti-bot detection policy (crawl4ai 3-tier classifier).
+    #[serde(default)]
+    pub antibot: AntibotConfig,
+}
+
+/// Engine escalation policy — adds `ChromeStealth` and `ChromeStealthProxy`
+/// tiers behind a feature flag. See `plans/recall-next-tier.md` Phase 2.
+#[derive(Debug, Clone, Deserialize)]
+pub struct EscalationConfig {
+    /// Master switch. Default `false` — current ladder runs unchanged.
+    #[serde(default)]
+    pub enabled: bool,
+    /// Per-tier waterfall trigger in ms. If the current engine hasn't returned
+    /// after this long, the next tier is started in parallel (firecrawl
+    /// `WaterfallNextEngineSignal`).
+    #[serde(default = "default_waterfall_timeout_ms")]
+    pub waterfall_timeout_ms: u64,
+    /// Hard global cap across the whole ladder.
+    #[serde(default = "default_escalation_global_timeout_ms")]
+    pub global_timeout_ms: u64,
+    /// Send `?proxy=residential&proxyCountry=…` to browserless on the
+    /// `ChromeStealthProxy` tier. Off by default — bears cost.
+    #[serde(default)]
+    pub residential_proxy: bool,
+    /// Country code passed to browserless when `residential_proxy = true`.
+    #[serde(default = "default_proxy_country")]
+    pub proxy_country: String,
+}
+
+impl Default for EscalationConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            waterfall_timeout_ms: default_waterfall_timeout_ms(),
+            global_timeout_ms: default_escalation_global_timeout_ms(),
+            residential_proxy: false,
+            proxy_country: default_proxy_country(),
+        }
+    }
+}
+
+fn default_waterfall_timeout_ms() -> u64 {
+    8_000
+}
+fn default_escalation_global_timeout_ms() -> u64 {
+    60_000
+}
+fn default_proxy_country() -> String {
+    "us".to_string()
+}
+
+/// Anti-bot classifier policy. Default: detect+log only; escalation requires
+/// `escalate_on_signal = true` AND `escalation.enabled = true`.
+#[derive(Debug, Clone, Deserialize)]
+pub struct AntibotConfig {
+    /// Run the classifier on every fetch result. Cheap; default on.
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+    /// When the classifier returns a non-`None` signal, advance to the next
+    /// engine tier (requires `escalation.enabled`).
+    #[serde(default)]
+    pub escalate_on_signal: bool,
+}
+
+impl Default for AntibotConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            escalate_on_signal: false,
+        }
+    }
 }
 
 fn default_chrome_nav_budget_ms() -> u64 {
@@ -194,6 +269,8 @@ impl Default for RendererConfig {
             chrome_nav_budget_ms: default_chrome_nav_budget_ms(),
             chrome_context_pool_enabled: false,
             use_predictor: false,
+            escalation: EscalationConfig::default(),
+            antibot: AntibotConfig::default(),
         }
     }
 }
@@ -364,6 +441,29 @@ pub struct ExtractionConfig {
     pub only_main_content: bool,
     #[serde(default)]
     pub llm: Option<LlmConfig>,
+    /// Hostname → CSS selector overrides applied before readability narrowing.
+    /// Match is exact host (no wildcard); user-supplied selector still wins.
+    #[serde(default)]
+    pub domain_selectors: std::collections::HashMap<String, String>,
+    #[serde(default)]
+    pub llm_fallback: LlmFallbackConfig,
+    /// Bytes below which an HTTP-tier extraction is treated as "thin"
+    /// and triggers a JS-renderer escalation. Default 100.
+    #[serde(default = "default_http_retry_threshold")]
+    pub http_retry_threshold_bytes: usize,
+    /// Bytes below which a LightPanda-tier extraction is treated as
+    /// "thin" and triggers a Chrome escalation. Default 2000 (LP often
+    /// returns SPA husks of 90–500B that pass HTML-shape checks).
+    #[serde(default = "default_lightpanda_retry_threshold")]
+    pub lightpanda_retry_threshold_bytes: usize,
+}
+
+fn default_http_retry_threshold() -> usize {
+    100
+}
+
+fn default_lightpanda_retry_threshold() -> usize {
+    2000
 }
 
 impl Default for ExtractionConfig {
@@ -372,8 +472,46 @@ impl Default for ExtractionConfig {
             default_format: default_format(),
             only_main_content: true,
             llm: None,
+            domain_selectors: std::collections::HashMap::new(),
+            llm_fallback: LlmFallbackConfig::default(),
+            http_retry_threshold_bytes: default_http_retry_threshold(),
+            lightpanda_retry_threshold_bytes: default_lightpanda_retry_threshold(),
         }
     }
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct LlmFallbackConfig {
+    #[serde(default)]
+    pub enable: bool,
+    #[serde(default = "default_llm_quality_threshold")]
+    pub quality_threshold: f32,
+    #[serde(default = "default_llm_max_html_bytes")]
+    pub max_html_bytes: usize,
+    /// When true (and `enable` is true), invoke the LLM on every page rather
+    /// than only when DOM-based extraction scores below `quality_threshold`.
+    /// Mirrors the "LLM as primary extractor" pattern used by Reader-LM,
+    /// Firecrawl, and similar services. Higher cost, higher recall.
+    #[serde(default)]
+    pub always_run: bool,
+}
+
+impl Default for LlmFallbackConfig {
+    fn default() -> Self {
+        Self {
+            enable: false,
+            quality_threshold: default_llm_quality_threshold(),
+            max_html_bytes: default_llm_max_html_bytes(),
+            always_run: false,
+        }
+    }
+}
+
+fn default_llm_quality_threshold() -> f32 {
+    0.3
+}
+fn default_llm_max_html_bytes() -> usize {
+    100_000
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -387,6 +525,10 @@ pub struct LlmConfig {
     pub base_url: Option<String>,
     #[serde(default = "default_llm_max_tokens")]
     pub max_tokens: u32,
+    /// Azure OpenAI API version (e.g. "2024-05-01-preview"). Required when
+    /// `provider = "azure"`; ignored otherwise.
+    #[serde(default)]
+    pub azure_api_version: Option<String>,
 }
 
 fn default_llm_provider() -> String {

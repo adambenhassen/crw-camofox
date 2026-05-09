@@ -165,6 +165,7 @@ fn scrape_data_skip_serializing_none() {
             rendered_with: None,
             elapsed_ms: 50,
         },
+        debug_extraction: None,
     };
 
     let json = serde_json::to_value(&data).unwrap();
@@ -199,4 +200,81 @@ fn scrape_request_with_all_fields() {
     assert_eq!(req.exclude_tags, vec!["nav"]);
     assert!(req.json_schema.is_some());
     assert_eq!(req.headers.get("X-Custom").unwrap(), "value");
+}
+
+#[test]
+fn debug_field_round_trip() {
+    let input = json!({
+        "url": "https://example.com",
+        "debug": true,
+    });
+    let req: ScrapeRequest = serde_json::from_value(input).unwrap();
+    assert_eq!(req.debug, Some(true));
+    let req_default: ScrapeRequest =
+        serde_json::from_value(json!({"url": "https://example.com"})).unwrap();
+    assert_eq!(req_default.debug, None);
+}
+
+#[test]
+fn debug_extraction_camel_case_wire_format() {
+    let de = DebugExtraction {
+        attempts: vec![DebugAttempt {
+            renderer: "http".into(),
+            extracted_via: "readability".into(),
+            candidate_features: Some(json!({"linkDensity": 0.42})),
+            candidates: vec![DebugCandidate {
+                kind: "readability".into(),
+                text: Some("body".into()),
+                text_excerpt: Some("body".into()),
+                cap_chars: Some(200),
+                score: 0.7,
+            }],
+        }],
+    };
+    let v = serde_json::to_value(&de).unwrap();
+    let attempt = &v["attempts"][0];
+    assert!(
+        attempt.get("extractedVia").is_some(),
+        "wire key must be camelCase"
+    );
+    assert!(attempt.get("candidateFeatures").is_some());
+    let cand = &attempt["candidates"][0];
+    assert!(cand.get("textExcerpt").is_some());
+    assert!(cand.get("capChars").is_some());
+}
+
+#[test]
+fn scrape_data_serializes_debug_extraction_as_camel_case() {
+    let mut data = ScrapeData {
+        markdown: None,
+        html: None,
+        raw_html: None,
+        plain_text: None,
+        links: None,
+        json: None,
+        chunks: None,
+        warning: None,
+        warnings: Vec::new(),
+        render_decision: None,
+        credit_cost: 0,
+        metadata: PageMetadata {
+            title: None,
+            description: None,
+            og_title: None,
+            og_description: None,
+            og_image: None,
+            canonical_url: None,
+            source_url: "https://example.com".into(),
+            language: None,
+            status_code: 200,
+            rendered_with: None,
+            elapsed_ms: 0,
+        },
+        debug_extraction: None,
+    };
+    let v = serde_json::to_value(&data).unwrap();
+    assert!(v.get("debugExtraction").is_none(), "absent when None");
+    data.debug_extraction = Some(DebugExtraction::default());
+    let v = serde_json::to_value(&data).unwrap();
+    assert!(v.get("debugExtraction").is_some(), "present when Some");
 }

@@ -1,5 +1,5 @@
 use crw_core::Deadline;
-use crw_core::config::{BUILTIN_UA_POOL, LlmConfig};
+use crw_core::config::{BUILTIN_UA_POOL, ExtractionConfig, LlmConfig};
 use crw_core::error::CrwResult;
 use crw_core::types::{
     FetchResult, OutputFormat, ScrapeData, ScrapeRequest, resolve_pinned_renderer,
@@ -8,7 +8,7 @@ use crw_core::types::{
 use crw_renderer::FallbackRenderer;
 use crw_renderer::http_only::HttpFetcher;
 use crw_renderer::traits::PageFetcher;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 /// Scrape a single URL: fetch → extract → (optional) LLM structured extraction.
 ///
@@ -17,10 +17,12 @@ use std::sync::Arc;
 /// - `render_js_default`: global `[renderer] render_js_default` config; used only
 ///   for the `needs_temp_fetcher` HTTP-only gating. The shared renderer applies
 ///   the same default internally, so we don't forward it to the renderer call.
+#[allow(clippy::too_many_arguments)]
 pub async fn scrape_url(
     req: &ScrapeRequest,
     renderer: &Arc<FallbackRenderer>,
     llm_config: Option<&LlmConfig>,
+    extraction_cfg: &ExtractionConfig,
     user_agent: &str,
     default_stealth: bool,
     render_js_default: Option<bool>,
@@ -156,6 +158,7 @@ pub async fn scrape_url(
                     .unwrap_or_else(|| "claude-sonnet-4-20250514".into()),
                 base_url: None,
                 max_tokens: 4096,
+                azure_api_version: None,
             });
             let effective_llm = byok_config.as_ref().or(llm_config);
 
@@ -183,9 +186,20 @@ pub async fn scrape_url(
     }
 
     let warning = derive_target_warning(&fetch_result);
+    // Per-request debug collector — shared across the multi-attempt JS
+    // escalation so all candidate ladders land in one trace.
+    let debug_enabled = req.debug.unwrap_or(false);
+    let debug_sink: Option<Arc<Mutex<crw_extract::DebugCollector>>> = if debug_enabled {
+        Some(Arc::new(Mutex::new(crw_extract::DebugCollector::new())))
+    } else {
+        None
+    };
     fn build_extract_opts<'a>(
         fr: &'a FetchResult,
         req: &'a ScrapeRequest,
+        extraction_cfg: &'a ExtractionConfig,
+        debug: bool,
+        sink: Option<Arc<Mutex<crw_extract::DebugCollector>>>,
     ) -> crw_extract::ExtractOptions<'a> {
         crw_extract::ExtractOptions {
             raw_html: &fr.html,
@@ -206,9 +220,39 @@ pub async fn scrape_url(
             query: req.query.as_deref(),
             filter_mode: req.filter_mode.as_ref(),
             top_k: req.top_k,
+            domain_selectors: Some(&extraction_cfg.domain_selectors),
+            captured_responses: &fr.captured_responses,
+            llm_fallback: None,
+            debug,
+            debug_sink: sink,
         }
     }
-    let mut data = crw_extract::extract(build_extract_opts(&fetch_result, req))?;
+    let mut data = crw_extract::extract(build_extract_opts(
+        &fetch_result,
+        req,
+        extraction_cfg,
+        debug_enabled,
+        debug_sink.clone(),
+    ))?;
+    // LLM-assisted re-extraction when DOM result is low-quality and the
+    // operator opted in via [extraction.llm_fallback]. Failure paths inside
+    // the helper preserve the original markdown.
+    if extraction_cfg.llm_fallback.enable
+        && let Some(llm_cfg) = llm_config.or(extraction_cfg.llm.as_ref())
+    {
+        let params = crw_extract::LlmFallbackParams {
+            api_key: &llm_cfg.api_key,
+            model: &llm_cfg.model,
+            provider: &llm_cfg.provider,
+            base_url: llm_cfg.base_url.as_deref(),
+            quality_threshold: extraction_cfg.llm_fallback.quality_threshold,
+            max_html_bytes: extraction_cfg.llm_fallback.max_html_bytes,
+            max_tokens: llm_cfg.max_tokens,
+            azure_api_version: llm_cfg.azure_api_version.as_deref(),
+            always_run: extraction_cfg.llm_fallback.always_run,
+        };
+        let _ = crw_extract::maybe_run_llm_fallback(&mut data, &fetch_result.html, &params).await;
+    }
 
     // Post-extract escalation: HTTP-only fetch returned 2xx but extraction
     // produced no markdown. Re-fetch with JS rendering forced. Catches sites
@@ -224,27 +268,31 @@ pub async fn scrape_url(
     //     stub (bandbhdwr, cascadehomecenter, laportehardware, apploi,
     //     indiamart, zujuan.xkw) — bumping the lightpanda-only threshold to
     //     500 captures all of them without changing http-tier behavior.
-    const HTTP_RETRY_THRESHOLD_BYTES: usize = 100;
-    // Bumped 500 → 2000 (May 2026) after bench showed ~12 LP renders that
-    // squeaked past 500B with low-quality SPA husks (header+nav+footer, no
-    // article body) which then suppressed a chrome escalation that would
-    // have produced full-quality content. 2000B is "below this is almost
-    // certainly an SPA chrome / hydration sentinel, not real content."
-    const LIGHTPANDA_RETRY_THRESHOLD_BYTES: usize = 2000;
     // Tier of renderer that produced fetch_result. We always escalate from
     // "below" — http and lightpanda → try chrome — but never re-call chrome
     // when chrome already produced the empty markdown (that would just churn).
+    // Thresholds default to 100B (http) and 2000B (lightpanda); both are
+    // overridable via [extraction] in server config so operators can tune
+    // per-deployment without recompiling.
     let prior_renderer = fetch_result.rendered_with.as_deref();
     let retry_threshold = if prior_renderer == Some("lightpanda") {
-        LIGHTPANDA_RETRY_THRESHOLD_BYTES
+        extraction_cfg.lightpanda_retry_threshold_bytes
     } else {
-        HTTP_RETRY_THRESHOLD_BYTES
+        extraction_cfg.http_retry_threshold_bytes
     };
-    let md_is_empty = data
+    let md_bytes = data
         .markdown
         .as_deref()
-        .map(|s| s.trim().len() < retry_threshold)
-        .unwrap_or(true);
+        .map(|s| s.trim().len())
+        .unwrap_or(0);
+    let md_is_byte_thin = md_bytes < retry_threshold;
+    let md_quality = data
+        .markdown
+        .as_deref()
+        .map(crw_extract::quality::analyze_md_only);
+    let md_is_low_quality = md_quality
+        .as_ref()
+        .is_some_and(crw_extract::quality::is_low_quality);
     let used_low_tier = matches!(
         prior_renderer,
         Some("http") | Some("http_only_fallback") | Some("lightpanda")
@@ -262,7 +310,13 @@ pub async fn scrape_url(
         && req.formats.contains(&OutputFormat::Markdown);
 
     let mut effective_warning = warning;
-    if md_is_empty && used_low_tier && should_escalate_status && escalation_eligible {
+    let escalate_for_quality =
+        !md_is_byte_thin && md_is_low_quality && fetch_result.html.len() > 5000;
+    let should_escalate = (md_is_byte_thin || escalate_for_quality)
+        && used_low_tier
+        && should_escalate_status
+        && escalation_eligible;
+    if should_escalate {
         // If the prior tier was lightpanda (returned 200 with thin/no content
         // that fooled the renderer-level thinness check), force chrome on the
         // escalation. Falling back to "auto" would just hit lightpanda again.
@@ -273,12 +327,16 @@ pub async fn scrape_url(
         } else {
             pinned
         };
+        let quality_score_before = md_quality.as_ref().map(|q| q.score);
         tracing::info!(
             url = %req.url,
             status = fetch_result.status_code,
             html_len = fetch_result.html.len(),
             prior = prior_renderer,
             target = escalation_target,
+            md_bytes,
+            quality_score_before = ?quality_score_before,
+            escalate_for_quality,
             "empty markdown after fetch, escalating to JS renderer"
         );
         match renderer
@@ -299,13 +357,29 @@ pub async fn scrape_url(
                 // is a soft signal, not a content gate.
                 let js_status = js_fetch.status_code;
                 let js_warning = derive_target_warning(&js_fetch);
-                if let Ok(js_data) = crw_extract::extract(build_extract_opts(&js_fetch, req)) {
+                if let Ok(js_data) = crw_extract::extract(build_extract_opts(
+                    &js_fetch,
+                    req,
+                    extraction_cfg,
+                    debug_enabled,
+                    debug_sink.clone(),
+                )) {
                     let js_md_len = js_data
                         .markdown
                         .as_deref()
                         .map(|s| s.trim().len())
                         .unwrap_or(0);
-                    if js_md_len >= retry_threshold {
+                    let js_md_quality = js_data
+                        .markdown
+                        .as_deref()
+                        .map(crw_extract::quality::analyze_md_only);
+                    let js_score = js_md_quality.as_ref().map(|q| q.score).unwrap_or(0.0);
+                    let before_score = md_quality.as_ref().map(|q| q.score).unwrap_or(0.0);
+                    let http_was_thin = md_is_byte_thin;
+                    let quality_improved = js_score > before_score + 0.05;
+                    let accept =
+                        js_md_len >= retry_threshold && (http_was_thin || quality_improved);
+                    if accept {
                         data = js_data;
                         // Replace the original "Target returned 4xx" with the JS
                         // fetch's warning (which is None for a clean 2xx render),
@@ -317,7 +391,16 @@ pub async fn scrape_url(
                             from_status = fetch_result.status_code,
                             to_status = js_status,
                             md_len = js_md_len,
+                            quality_score_before = before_score,
+                            quality_score_after = js_score,
                             "JS escalation recovered content"
+                        );
+                    } else if js_md_len >= retry_threshold && !http_was_thin {
+                        tracing::info!(
+                            url = %req.url,
+                            before = before_score,
+                            after = js_score,
+                            "JS retry returned worse-quality markdown ({before_score} -> {js_score}), keeping HTTP",
                         );
                     }
                 }
@@ -327,6 +410,18 @@ pub async fn scrape_url(
             }
         }
     }
+    // Surface redirect mismatch as warning. Helps detect cases like
+    // northernair.ca/history.htm silently 302'ing to the homepage — extraction
+    // looks "successful" but the user got the wrong page.
+    if let Some(final_url) = fetch_result.final_url.as_deref()
+        && redirect_is_material(&fetch_result.url, final_url)
+    {
+        let warning = format!("redirected_to: {final_url}");
+        if !data.warnings.iter().any(|w| w == &warning) {
+            data.warnings.push(warning);
+        }
+    }
+
     // Merge target warning with any extraction warning (e.g. orphan chunk params).
     data.warning = match (effective_warning, data.warning) {
         (Some(w1), Some(w2)) => Some(format!("{w1}; {w2}")),
@@ -355,6 +450,7 @@ pub async fn scrape_url(
                 .unwrap_or_else(|| "claude-sonnet-4-20250514".into()),
             base_url: None,
             max_tokens: 4096,
+            azure_api_version: None,
         });
         let effective_llm = byok_config.as_ref().or(llm_config);
 
@@ -378,7 +474,41 @@ pub async fn scrape_url(
         }
     }
 
+    // Drain the per-request debug sink into ScrapeData. The sink is the
+    // last shared owner at this point — extract() returned, dropping its
+    // clone — so try_unwrap should succeed; if a stray clone is alive we
+    // fall back to a clone of the inner Vec.
+    if let Some(sink) = debug_sink {
+        // Each extract() call dropped its clone of the Arc, so by this
+        // point we hold the only reference and can unwrap cheaply.
+        let extraction = match Arc::try_unwrap(sink) {
+            Ok(mu) => mu.into_inner().unwrap_or_default().into_extraction(),
+            Err(_) => crw_core::types::DebugExtraction::default(),
+        };
+        data.debug_extraction = Some(extraction);
+    }
+
     Ok(data)
+}
+
+/// Decide whether `final_url` represents a material redirect from `requested`.
+/// Returns true when the host changed, or when the requested path was a
+/// non-root resource (e.g. `/history.htm`) but the final URL collapsed to the
+/// site root (`/` or empty). Pure same-origin path tweaks (trailing slash,
+/// query string changes) are ignored.
+fn redirect_is_material(requested: &str, final_url: &str) -> bool {
+    let Ok(req) = url::Url::parse(requested) else {
+        return false;
+    };
+    let Ok(fin) = url::Url::parse(final_url) else {
+        return false;
+    };
+    if req.host_str() != fin.host_str() {
+        return true;
+    }
+    let req_path = req.path().trim_end_matches('/');
+    let fin_path = fin.path().trim_end_matches('/');
+    !req_path.is_empty() && fin_path.is_empty()
 }
 
 pub(crate) fn derive_target_warning(fetch_result: &FetchResult) -> Option<String> {
@@ -480,6 +610,7 @@ mod tests {
     fn sample_fetch(status_code: u16, html: &str) -> FetchResult {
         FetchResult {
             url: "https://example.com".into(),
+            final_url: None,
             status_code,
             html: html.into(),
             content_type: None,
@@ -492,7 +623,40 @@ mod tests {
             warnings: Vec::new(),
             truncated: false,
             deadline_exceeded: false,
+            captured_responses: Vec::new(),
         }
+    }
+
+    #[test]
+    fn redirect_material_detects_path_to_root_collapse() {
+        assert!(redirect_is_material(
+            "https://northernair.ca/history.htm",
+            "https://northernair.ca/"
+        ));
+    }
+
+    #[test]
+    fn redirect_material_detects_host_change() {
+        assert!(redirect_is_material(
+            "https://example.com/path",
+            "https://other.com/path"
+        ));
+    }
+
+    #[test]
+    fn redirect_material_ignores_trailing_slash() {
+        assert!(!redirect_is_material(
+            "https://example.com/path",
+            "https://example.com/path/"
+        ));
+    }
+
+    #[test]
+    fn redirect_material_ignores_query_only_change() {
+        assert!(!redirect_is_material(
+            "https://example.com/page",
+            "https://example.com/page?utm=x"
+        ));
     }
 
     #[test]

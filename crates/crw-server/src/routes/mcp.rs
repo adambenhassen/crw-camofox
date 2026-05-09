@@ -39,6 +39,7 @@ pub async fn call_tool(state: &AppState, tool_name: &str, args: Value) -> Result
                 &req,
                 &state.renderer,
                 llm_config,
+                &state.config.extraction,
                 user_agent,
                 default_stealth,
                 state.config.renderer.render_js_default,

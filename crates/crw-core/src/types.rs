@@ -194,6 +194,11 @@ pub struct ScrapeRequest {
     /// land in a separate slow-path histogram. Must be in `(0, 60000]`.
     #[serde(default, alias = "deadline_ms")]
     pub deadline_ms: Option<u64>,
+    /// Opt-in extraction debug trace. When true, the response includes a
+    /// `debugExtraction` field describing every candidate the extractor
+    /// considered and why one was selected.
+    #[serde(default)]
+    pub debug: Option<bool>,
 }
 
 fn default_formats() -> Vec<OutputFormat> {
@@ -269,6 +274,40 @@ pub struct ScrapeData {
     #[serde(default, skip_serializing_if = "is_zero_u32")]
     pub credit_cost: u32,
     pub metadata: PageMetadata,
+    /// Extraction debug trace; populated only when the request opts in.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub debug_extraction: Option<DebugExtraction>,
+}
+
+/// Per-request extraction debug trace. One entry per extract() call
+/// (multi-attempt JS escalation produces multiple attempts).
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct DebugExtraction {
+    pub attempts: Vec<DebugAttempt>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DebugAttempt {
+    pub renderer: String,
+    pub extracted_via: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub candidate_features: Option<serde_json::Value>,
+    pub candidates: Vec<DebugCandidate>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DebugCandidate {
+    pub kind: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub text: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub text_excerpt: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cap_chars: Option<usize>,
+    pub score: f64,
 }
 
 fn is_zero_u32(v: &u32) -> bool {
@@ -678,6 +717,9 @@ impl FailoverErrorKind {
 #[derive(Debug, Clone)]
 pub struct FetchResult {
     pub url: String,
+    /// Final URL after redirects, populated only when it differs from the
+    /// requested `url`. None means no redirect or scheme/path was identical.
+    pub final_url: Option<String>,
     pub status_code: u16,
     pub html: String,
     pub content_type: Option<String>,
@@ -698,4 +740,19 @@ pub struct FetchResult {
     /// Set when `Deadline::remaining() == 0` was observed at result-build time.
     /// Stricter than `truncated` — caller's whole budget is spent.
     pub deadline_exceeded: bool,
+    /// XHR/fetch responses captured during navigation. Empty unless the
+    /// renderer ran with network capture enabled. Used by extraction as a
+    /// fallback content source when DOM-based extraction is low quality.
+    pub captured_responses: Vec<CapturedNetworkResponse>,
+}
+
+/// A single XHR/fetch response captured via CDP Network domain.
+#[derive(Debug, Clone)]
+pub struct CapturedNetworkResponse {
+    pub url: String,
+    pub request_id: String,
+    pub status: u16,
+    pub mime_type: Option<String>,
+    pub body: Option<String>,
+    pub body_size_bytes: usize,
 }

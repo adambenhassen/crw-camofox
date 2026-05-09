@@ -58,12 +58,55 @@ job_ttl_secs = 3600
 default_format = "markdown"
 only_main_content = true
 
+# Per-domain CSS selector overrides applied before readability narrowing.
+# User-supplied request `selector` still wins over these defaults. Map key is
+# exact host (no wildcards). Useful for sites where readability misidentifies
+# the article container.
+[extraction.domain_selectors]
+"www.smartcompany.com.au" = ".post-content, .entry-content, article"
+"www.simplyhired.com" = "main, [data-testid='viewJobBodyContainer']"
+"scanpy.readthedocs.io" = ".body, .main-content, article"
+"www.service-public.fr" = "#main-content, .panel-body, article"
+"www.raspberrypi.com" = "article.entry-content, main"
+"news.mingpao.com" = ".article-content, [itemprop=articleBody], .news-content"
+"acpr.banque-france.fr" = "main, .search-results, .content"
+"www.w3schools.com" = "#main, .w3-main"
+"www.xt.com" = "main, [role=main], .article-content"
+"carole-vercheyre-grard.fr" = "article, .entry-content, .post-content"
+"www.floorandecor.com" = "main, [data-testid='product-content']"
+# NOTE: quora.com and niche.com selectors were tried but regressed on the
+# 150-URL diagnose set — readability+heuristics already does better there.
+# Add per-domain overrides only after verifying on representative URLs.
+
+# Optional LLM-assisted extraction fallback. When the top markdown candidate
+# scores below `quality_threshold`, the raw HTML (truncated to `max_html_bytes`)
+# is sent to the configured `[extraction.llm]` provider for re-extraction.
+# Disabled by default — requires an API key in [extraction.llm].
+[extraction.llm_fallback]
+enable = false
+quality_threshold = 0.3
+max_html_bytes = 100000
+# When true (and `enable` true), the LLM is invoked on every page rather
+# than only when the DOM-based score is below `quality_threshold`. This is
+# the "LLM as primary extractor" pattern (Reader-LM, Firecrawl, etc.):
+# higher cost per page, but materially higher recall on JS-heavy pages,
+# paywalls, and sites where readability picks the wrong container.
+always_run = false
+
 [auth]
 # api_keys = ["fc-key-1234"]
 
 # [extraction.llm]
-# provider = "anthropic"        # "anthropic" or "openai"
+# provider = "anthropic"        # "anthropic" | "openai" | "azure"
 # api_key = "sk-..."            # or use CRW_EXTRACTION__LLM__API_KEY env var
 # model = "claude-sonnet-4-20250514"
 # max_tokens = 4096
 # base_url = "https://custom-endpoint.example.com"  # optional, for OpenAI-compatible APIs
+#
+# Azure OpenAI example:
+#   provider = "azure"
+#   api_key = "..."                                     # or CRW_EXTRACTION__LLM__API_KEY
+#   model = "gpt-4o-mini"                               # Azure deployment name
+#   base_url = "https://<resource>.openai.azure.com"    # endpoint, no trailing path
+#   azure_api_version = "2024-05-01-preview"
+#   max_tokens = 4096

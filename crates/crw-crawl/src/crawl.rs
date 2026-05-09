@@ -298,6 +298,11 @@ pub async fn run_crawl(opts: CrawlOptions<'_>) {
             query: None,
             filter_mode: None,
             top_k: None,
+            domain_selectors: None,
+            captured_responses: &fetch_result.captured_responses,
+            llm_fallback: None,
+            debug: false,
+            debug_sink: None,
         }) {
             Ok(data) => data,
             Err(err) => {

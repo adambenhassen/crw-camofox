@@ -1,6 +1,15 @@
 # Docker-specific overrides (layered on top of config.default.toml).
 # Renderer failover order: HTTP → LightPanda → Chrome.
 
+[request]
+# Bench analysis (May 2026): 12 of 14 zero-byte misses on the 150-URL diagnose
+# bench were hitting the default 8s deadline cap (latency ~8000ms,
+# structural_failure: 0 bytes with HTTP 200) — chrome had loaded but
+# post-navigate snapshot was killed mid-flight. clover.com confirms a 30s
+# deadline yields a 264kb response. 15s is the budget that recovers the
+# stragglers without ballooning p50 on healthy pages.
+deadline_ms_default = 15000
+
 [server]
 # Disable global rps cap for benchmark + production load — the bench fires
 # 8-concurrency for 5-10s and gets rate-limited at the default 10 rps.

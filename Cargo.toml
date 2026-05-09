@@ -43,6 +43,9 @@ toml = "0.8"
 lol_html = "2"
 scraper = "0.25"
 htmd = "0.5"
+ego-tree = "0.10"
+xxhash-rust = { version = "0.8", features = ["xxh3"] }
+once_cell = "1"
 
 # PDF processing
 pdf-inspector = { git = "https://github.com/firecrawl/pdf-inspector", rev = "35445c3" }

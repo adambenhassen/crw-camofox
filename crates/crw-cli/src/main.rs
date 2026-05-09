@@ -158,13 +158,16 @@ async fn main() {
         llm_model: None,
         renderer: None,
         deadline_ms: None,
+        debug: None,
     };
 
     let cli_deadline = crw_core::Deadline::from_request_ms(req.deadline_ms.unwrap_or(8000));
+    let cli_extraction_cfg = crw_core::config::ExtractionConfig::default();
     let data = match scrape_url(
         &req,
         &renderer,
         None,
+        &cli_extraction_cfg,
         "crw/0.0.3",
         cli.stealth,
         None,
