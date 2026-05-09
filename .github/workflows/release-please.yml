@@ -43,29 +43,54 @@ jobs:
       - name: Update README What's New
         if: ${{ steps.release.outputs.release_created }}
         run: |
-          # Extract the latest 3 version sections from CHANGELOG.md
-          # Each section starts with "## " (h2) — skip the first line ("# Changelog")
-          awk '
-            /^## / { count++ }
-            count >= 1 && count <= 3 { print }
-            count > 3 { exit }
-          ' CHANGELOG.md > /tmp/latest_changes.md
-
-          # Replace the What's New section in README.md
-          # Section is between "## What's New" and the next "## " heading
+          # Render only the LATEST release section, cap bullets per
+          # subsection (Features, Bug Fixes, ...) to MAX_BULLETS. Anything
+          # beyond becomes a single "...and N more" line pointing at the
+          # full changelog. Older releases live only in CHANGELOG.md.
           python3 - <<'PYEOF'
           import re
+
+          MAX_BULLETS = 5
+
+          with open("CHANGELOG.md", "r") as f:
+              changelog = f.read()
+
+          # Grab everything from the first "## " up to (but not including) the second "## "
+          sections = re.split(r"(?m)^## ", changelog)
+          # sections[0] is the "# Changelog" preamble; sections[1] is the latest release body
+          latest = "## " + sections[1].rstrip()
+
+          # Walk subsections (### ...) and truncate their bullet lists
+          out_lines = []
+          current_bullets = []
+
+          def flush(buf):
+              if not buf:
+                  return []
+              if len(buf) <= MAX_BULLETS:
+                  return buf
+              kept = buf[:MAX_BULLETS]
+              extra = len(buf) - MAX_BULLETS
+              kept.append(f"* …and {extra} more — see [full changelog](CHANGELOG.md)")
+              return kept
+
+          for line in latest.splitlines():
+              if line.startswith("* "):
+                  current_bullets.append(line)
+              else:
+                  out_lines.extend(flush(current_bullets))
+                  current_bullets = []
+                  out_lines.append(line)
+          out_lines.extend(flush(current_bullets))
+
+          changes = "\n".join(out_lines).strip()
+          # Convert CHANGELOG h2 (## v0.x.x) to h3 (### v0.x.x) for README
+          changes = re.sub(r"^## ", "### ", changes, flags=re.MULTILINE)
 
           with open("README.md", "r") as f:
               readme = f.read()
 
-          with open("/tmp/latest_changes.md", "r") as f:
-              changes = f.read().strip()
-
-          # Convert CHANGELOG h2 (## v0.x.x) to h3 (### v0.x.x) for README
-          changes = re.sub(r'^## ', '### ', changes, flags=re.MULTILINE)
-
-          # Replace everything between "## What's New" and the next "## " or "[Full changelog"
+          # Replace everything between "## What's New" and "[Full changelog"
           pattern = r"(## What's New\n\n).*?(\n\[Full changelog)"
           replacement = rf"\1{changes}\n\2"
           readme = re.sub(pattern, replacement, readme, flags=re.DOTALL)
