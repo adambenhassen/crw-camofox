@@ -45,6 +45,21 @@
 
 ## What's New
 
+### [0.6.0](https://github.com/us/crw/compare/v0.5.0...v0.6.0) (2026-05-09)
+
+
+### Features
+
+* **extract:** scale recall to 63.74% on 1000-URL benchmark ([5b85555](https://github.com/us/crw/commit/5b855554c5f7ba16981fbe2060e25cca4ba81686))
+* **renderer:** add browserless/chromium opt-in stealth profile (+2.5pt) ([d2414c9](https://github.com/us/crw/commit/d2414c9cd89dc01447b9e52501aa26180ce7d326))
+* **renderer:** chrome-stealth wiring + CDP discovery improvements ([6b2e77c](https://github.com/us/crw/commit/6b2e77c2a356ef8fc453560870985819ce75483a))
+* **server,core,crawl:** plumb tier timeouts and recall pipeline ([7cbee43](https://github.com/us/crw/commit/7cbee43e5db319f0af39dddea07faccbf0cd25ee))
+
+
+### Miscellaneous
+
+* release 0.6.0 ([bd03a35](https://github.com/us/crw/commit/bd03a352922b293431e49722c052f90c945f1c56))
+
 ### [0.5.0](https://github.com/us/crw/compare/v0.4.2...v0.5.0) (2026-05-04)
 
 
@@ -103,22 +118,6 @@
 * **core,renderer:** surface render metadata and harden host normalization ([ee4130b](https://github.com/us/crw/commit/ee4130b62467defb61c5b85bf267c767b3bd909a))
 * **renderer:** correct failure classification and routing decisions ([4d684bd](https://github.com/us/crw/commit/4d684bdaa0cd1a27f011d73322099258a0f713be))
 * **renderer:** probe lifecycle, RAII guard, breaker counter ([02044f5](https://github.com/us/crw/commit/02044f573cd6274231b3856cd799d7e74d61f9ba))
-
-### [0.4.1](https://github.com/us/crw/compare/v0.4.0...v0.4.1) (2026-04-28)
-
-
-### Features
-
-* add per-request renderer field for scrape and crawl APIs ([#29](https://github.com/us/crw/issues/29)) ([f1e0b63](https://github.com/us/crw/commit/f1e0b63fd28be0ceb38342086a309f92bbbc1e53))
-* **crw-browse:** add interactive browser MCP server with phase-2 tools ([e78879d](https://github.com/us/crw/commit/e78879db18c7c4b3df2a4984349a65b4493b1cda))
-* honor renderer mode and force_js in config (fixes [#28](https://github.com/us/crw/issues/28)) ([b76e473](https://github.com/us/crw/commit/b76e473facbce08a841ef8bd9fdfac97a552a8fd))
-
-
-### Bug Fixes
-
-* detect failed JS renders and fail over to next renderer ([fca8fd5](https://github.com/us/crw/commit/fca8fd5cadb4fa3c96bf5a315f96ab6d1e63989c))
-* **docs:** use absolute logo paths in site.config.js ([c5c9321](https://github.com/us/crw/commit/c5c93215561094a35038ab6af2b21e91c16199f4))
-* **docs:** use absolute paths for logo and favicon assets ([cdb1451](https://github.com/us/crw/commit/cdb14517da6425c105b95749dec35bbc9e977f5e))
 
 [Full changelog →](CHANGELOG.md)
 
