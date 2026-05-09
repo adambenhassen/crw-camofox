@@ -18,6 +18,11 @@ search:
     - json
 
 server:
+  # Required by SearXNG. The SEARXNG_SECRET_KEY env var on the container will
+  # override this at startup via the upstream image's templating; the literal
+  # below is only a fallback that lets the container boot in dev without env.
+  # In production, generate one with `openssl rand -hex 32` and set it in `.env`.
+  secret_key: "change-me-with-openssl-rand-hex-32-please"
   bind_address: "0.0.0.0"
   port: 8080
   # Rate limiting is handled by crw-server's own middleware, so SearXNG's

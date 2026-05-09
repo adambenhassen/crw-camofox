@@ -44,7 +44,7 @@ services:
   # /v1/search. To debug directly, add `ports: ["127.0.0.1:8888:8080"]` in
   # docker-compose.override.yml.
   searxng:
-    image: searxng/searxng:2025.10.14-13a5051
+    image: searxng/searxng:2026.5.9-0cba32c15
     restart: unless-stopped
     environment:
       - SEARXNG_BASE_URL=http://searxng:8080/
