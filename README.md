@@ -45,12 +45,12 @@
 
 ## What's New
 
-### [0.6.4](https://github.com/us/crw/compare/v0.6.3...v0.6.4) (2026-05-12)
+### [0.7.0](https://github.com/us/crw/compare/v0.6.4...v0.7.0) (2026-05-12)
 
 
 ### Features
 
-* **renderer:** add bounded browser-context pool for Chrome tier ([#43](https://github.com/us/crw/issues/43)) ([69b4861](https://github.com/us/crw/commit/69b48610d269c37fa043bcd58855b3970f554f94))
+* LLM summary and search answer (BYOK) ([#45](https://github.com/us/crw/issues/45)) ([ffcc2a5](https://github.com/us/crw/commit/ffcc2a52cd273dc334dd46b663be24fd45df4711))
 
 [Full changelog →](CHANGELOG.md)
 
