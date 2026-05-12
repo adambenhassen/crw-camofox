@@ -45,22 +45,12 @@
 
 ## What's New
 
-### [0.6.2](https://github.com/us/crw/compare/v0.6.1...v0.6.2) (2026-05-10)
+### [0.6.3](https://github.com/us/crw/compare/v0.6.2...v0.6.3) (2026-05-12)
 
 
 ### Features
 
-* **search:** add /v1/search endpoint backed by bundled SearXNG sidecar ([f4bd7f4](https://github.com/us/crw/commit/f4bd7f46db9f286e3c49be95a968951802a90710))
-
-
-### Bug Fixes
-
-* **antibot:** drop bare 'captcha'/'access denied' markers — false positives ([fae6c09](https://github.com/us/crw/commit/fae6c09537cf286bfb08cb9ebefab0c723c4160f))
-* **crawl:** drop redundant `.into_iter()` for clippy 1.95 ([#39](https://github.com/us/crw/issues/39)) ([fb4032b](https://github.com/us/crw/commit/fb4032b86a5c0095e7e69b198ac2017aa7003000))
-* **map:** WordPress sitemap-index timeout (closes [#33](https://github.com/us/crw/issues/33)) ([c3dfd6c](https://github.com/us/crw/commit/c3dfd6c66ff6bdbbaf3d2ce1646dbb9d7ac6dd5a))
-* **release:** register crw-search crate in release manifest ([9074761](https://github.com/us/crw/commit/907476163c69c5fd8e421e5063686a750c10ce24))
-* **search:** codex iteration-1 hardening — error mapping, resource bounds, container ([5acba7b](https://github.com/us/crw/commit/5acba7bbf1be2cc147e5c25ad9fca80e9bce757d))
-* …and 3 more — see [full changelog](CHANGELOG.md)
+* **map:** drop action URLs and strip tracking params (closes [#40](https://github.com/us/crw/issues/40)) ([#41](https://github.com/us/crw/issues/41)) ([6d9ed39](https://github.com/us/crw/commit/6d9ed39f67e4d92cc51ca16ccc21e451c4bb0373))
 
 [Full changelog →](CHANGELOG.md)
 
