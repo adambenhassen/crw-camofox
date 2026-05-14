@@ -2,6 +2,13 @@
 
 All notable changes to CRW are documented here.
 
+## [0.8.0](https://github.com/us/crw/compare/v0.7.1...v0.8.0) (2026-05-14)
+
+
+### Features
+
+* **cli:** add interactive setup wizard ([a5613b9](https://github.com/us/crw/commit/a5613b965d3444ab0ad214b976cbf6e56747e523))
+
 ## [0.7.1](https://github.com/us/crw/compare/v0.7.0...v0.7.1) (2026-05-12)
 
 
