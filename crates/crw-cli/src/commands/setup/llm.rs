@@ -368,32 +368,6 @@ pub fn add_to_shell_config(config: &mut ShellConfig, result: &LlmSetupResult) {
     }
 }
 
-/// Generate TOML config content for LLM.
-pub fn generate_toml_config(result: &LlmSetupResult) -> String {
-    let mut config = String::new();
-
-    config.push_str("[extraction.llm]\n");
-    config.push_str(&format!(
-        "provider = \"{}\"\n",
-        result.provider.config_value()
-    ));
-    config.push_str(&format!("api_key = \"{}\"\n", result.api_key));
-    config.push_str(&format!("model = \"{}\"\n", result.model));
-
-    if let Some(ref url) = result.base_url {
-        config.push_str(&format!("base_url = \"{}\"\n", url));
-    }
-
-    if let Some(ref version) = result.azure_api_version {
-        config.push_str(&format!("azure_api_version = \"{}\"\n", version));
-    }
-
-    config.push_str("max_tokens = 4096\n");
-    config.push_str("max_concurrency = 4\n");
-
-    config
-}
-
 /// Mask an API key for display (show first 4 and last 4 chars).
 fn mask_api_key(key: &str) -> String {
     if key.len() <= 12 {

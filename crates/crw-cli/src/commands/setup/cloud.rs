@@ -1,5 +1,8 @@
 //! Cloud setup flow for CRW.
 
+use crate::commands::setup::config_file::{
+    self, ClientSection, ExtractionSection, LlmSection, UserConfig,
+};
 use crate::commands::setup::llm::{self, LlmSetupResult};
 use crate::commands::setup::shell::{self, Shell, ShellConfig};
 use crate::commands::setup::ui::{self, SetupError, SummaryItem};
@@ -53,6 +56,15 @@ pub async fn run() -> Result<(), SetupError> {
     ui::print_info(&format!("Detected shell: {}", shell));
     println!();
 
+    // Always persist canonical state to ~/.config/crw/config.toml. The shell
+    // rc / manual options below are *additional* convenience layers, not
+    // alternatives — env vars (CRW_*) still take precedence over the file
+    // for CI/Docker users.
+    let cfg_path =
+        config_file::write_user_config(build_user_config(&api_key, llm_result.as_ref()))?;
+    ui::print_success(&format!("Saved {}", cfg_path.display()));
+    println!();
+
     let save_location = prompt_save_location(shell)?;
 
     match save_location {
@@ -60,7 +72,9 @@ pub async fn run() -> Result<(), SetupError> {
             save_to_shell_rc(shell, &api_key, llm_result.as_ref())?;
         }
         SaveLocation::ConfigFile => {
-            save_to_config_file(&api_key, llm_result.as_ref())?;
+            // Already written above — nothing extra to do beyond the success line.
+            ui::print_info("Config file is the source of truth for these settings.");
+            println!();
         }
         SaveLocation::Manual => {
             show_manual_instructions(&api_key, llm_result.as_ref());
@@ -95,10 +109,6 @@ pub async fn run() -> Result<(), SetupError> {
         "crw example.com              # Scrape a page",
         "crw search \"rust tutorials\"  # Web search",
     ];
-
-    if llm_result.is_some() {
-        quick_start.push("crw example.com -f summary   # AI-powered summary");
-    }
 
     quick_start.push("crw --help                   # See all commands");
 
@@ -246,7 +256,11 @@ enum SaveLocation {
     Manual,
 }
 
-/// Prompt user for save location.
+/// Prompt for any extra export step on top of the already-written config.toml.
+///
+/// Re-ordered so `ConfigFile` (do-nothing-extra) is the default: the file
+/// is already the canonical state. Shell exports are only useful when env
+/// vars need to win over the file (CI / Docker / scripts).
 fn prompt_save_location(shell: Shell) -> Result<SaveLocation, SetupError> {
     let rc_file = shell::get_rc_file(shell);
     let rc_name = rc_file
@@ -256,13 +270,16 @@ fn prompt_save_location(shell: Shell) -> Result<SaveLocation, SetupError> {
         .unwrap_or("shell rc");
 
     let items = vec![
-        format!("~/{} (recommended)", rc_name),
-        "~/.config/crw/config.toml".to_string(),
-        "Environment variable only (I'll set it myself)".to_string(),
+        "Nothing extra — config.toml is enough (recommended)".to_string(),
+        format!(
+            "Also append `export CRW_*` to ~/{} (for CI/Docker)",
+            rc_name
+        ),
+        "Print env vars to copy/paste manually".to_string(),
     ];
 
     let choice = Select::with_theme(&ui::select_style())
-        .with_prompt("  Where should I save your API key?")
+        .with_prompt("  Anything else?")
         .items(&items)
         .default(0)
         .interact_opt()
@@ -270,8 +287,8 @@ fn prompt_save_location(shell: Shell) -> Result<SaveLocation, SetupError> {
         .ok_or(SetupError::Cancelled)?;
 
     Ok(match choice {
-        0 => SaveLocation::ShellRc,
-        1 => SaveLocation::ConfigFile,
+        0 => SaveLocation::ConfigFile,
+        1 => SaveLocation::ShellRc,
         2 => SaveLocation::Manual,
         _ => unreachable!(),
     })
@@ -313,29 +330,6 @@ fn save_to_shell_rc(
     Ok(())
 }
 
-/// Write content to a file with secure permissions (0600 on Unix).
-#[cfg(unix)]
-fn write_secure(path: &std::path::PathBuf, content: &str) -> std::io::Result<()> {
-    use std::io::Write;
-    use std::os::unix::fs::OpenOptionsExt;
-
-    let file = std::fs::OpenOptions::new()
-        .write(true)
-        .create(true)
-        .truncate(true)
-        .mode(0o600) // Owner read/write only
-        .open(path)?;
-
-    let mut writer = std::io::BufWriter::new(file);
-    writer.write_all(content.as_bytes())?;
-    Ok(())
-}
-
-#[cfg(not(unix))]
-fn write_secure(path: &std::path::PathBuf, content: &str) -> std::io::Result<()> {
-    std::fs::write(path, content)
-}
-
 /// Mask an API key for display (show first 4 and last 4 chars).
 fn mask_api_key(key: &str) -> String {
     if key.len() <= 12 {
@@ -344,42 +338,28 @@ fn mask_api_key(key: &str) -> String {
     format!("{}...{}", &key[..4], &key[key.len() - 4..])
 }
 
-/// Save configuration to config file.
-fn save_to_config_file(api_key: &str, llm_result: Option<&LlmSetupResult>) -> Result<(), String> {
-    let config_dir = shell::home_dir()
-        .ok_or_else(|| "Could not determine home directory".to_string())?
-        .join(".config")
-        .join("crw");
-
-    std::fs::create_dir_all(&config_dir)
-        .map_err(|e| format!("Failed to create config directory: {}", e))?;
-
-    let config_path = config_dir.join("config.toml");
-
-    let mut content = format!(
-        r#"# CRW Configuration
-# Generated by crw setup
-
-[api]
-url = "{}"
-key = "{}"
-"#,
-        API_BASE_URL, api_key
-    );
-
-    // Add LLM config if provided
-    if let Some(llm) = llm_result {
-        content.push('\n');
-        content.push_str(&llm::generate_toml_config(llm));
+/// Build the `UserConfig` we'll persist to `~/.config/crw/config.toml`.
+///
+/// Only sections the wizard actually touched are filled in. Anything else
+/// (search, etc.) is left as `None` so a previous run's value survives the
+/// merge in `config_file::write_user_config`.
+fn build_user_config(api_key: &str, llm_result: Option<&LlmSetupResult>) -> UserConfig {
+    UserConfig {
+        client: Some(ClientSection {
+            api_url: Some(API_BASE_URL.to_string()),
+            api_key: Some(api_key.to_string()),
+        }),
+        search: None,
+        extraction: llm_result.map(|llm| ExtractionSection {
+            llm: Some(LlmSection {
+                provider: Some(llm.provider.config_value().to_string()),
+                api_key: Some(llm.api_key.clone()),
+                model: Some(llm.model.clone()),
+                base_url: llm.base_url.clone(),
+                azure_api_version: llm.azure_api_version.clone(),
+            }),
+        }),
     }
-
-    write_secure(&config_path, &content)
-        .map_err(|e| format!("Failed to write config file: {}", e))?;
-
-    ui::print_success(&format!("Created {}", config_path.display()));
-    println!();
-
-    Ok(())
 }
 
 /// Show manual configuration instructions.

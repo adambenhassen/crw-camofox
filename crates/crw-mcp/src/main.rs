@@ -260,7 +260,13 @@ async fn main() {
 
     let cli = Cli::parse();
 
-    let backend = if let Some(api_url) = cli.api_url {
+    // Resolve api_url / api_key with the standard precedence chain:
+    //   1. CLI flag / env (already merged by clap)
+    //   2. `client.api_url` / `client.api_key` in ~/.config/crw/config.toml
+    //   3. None — falls through to embedded mode
+    let (resolved_api_url, resolved_api_key) = resolve_client_credentials(cli.api_url, cli.api_key);
+
+    let backend = if let Some(api_url) = resolved_api_url {
         tracing::info!("Starting {SERVER_NAME} v{SERVER_VERSION} (proxy mode)");
         tracing::info!("API URL: {api_url}");
 
@@ -275,7 +281,7 @@ async fn main() {
         Backend::Proxy {
             client,
             base_url: api_url,
-            api_key: cli.api_key,
+            api_key: resolved_api_key,
         }
     } else {
         #[cfg(feature = "embedded")]
@@ -300,6 +306,7 @@ async fn main() {
                     request: Default::default(),
                     search: Default::default(),
                     map: Default::default(),
+                    client: Default::default(),
                 }
             });
 
@@ -414,5 +421,26 @@ async fn run_stdio_loop(backend: Backend) {
             let _ = stdout.write_all(b"\n").await;
             let _ = stdout.flush().await;
         }
+    }
+}
+
+/// Resolve proxy-mode credentials. CLI / env values (already merged by clap)
+/// win; otherwise consult `client.{api_url,api_key}` from
+/// `~/.config/crw/config.toml`. Mirrors the same chain `crw mcp` uses so the
+/// standalone `crw-mcp` binary behaves identically.
+fn resolve_client_credentials(
+    cli_url: Option<String>,
+    cli_key: Option<String>,
+) -> (Option<String>, Option<String>) {
+    if cli_url.is_some() {
+        return (cli_url, cli_key);
+    }
+    match crw_core::config::AppConfig::load() {
+        Ok(cfg) => {
+            let file_url = cfg.client.api_url;
+            let file_key = cli_key.or(cfg.client.api_key);
+            (file_url, file_key)
+        }
+        Err(_) => (None, cli_key),
     }
 }

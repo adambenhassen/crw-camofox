@@ -18,6 +18,23 @@ pub struct AppConfig {
     pub search: SearchConfig,
     #[serde(default)]
     pub map: MapConfig,
+    /// `[client]` — settings for the local CLI/MCP when it proxies to the
+    /// hosted SaaS. Written by `crw setup` into the user-config file.
+    #[serde(default)]
+    pub client: ClientConfig,
+}
+
+/// `[client]` — cloud-proxy credentials populated by `crw setup` and read by
+/// `crw mcp` / `crw-mcp`. Both fields are `Option` so an unconfigured user runs
+/// in local mode without surprise overrides.
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct ClientConfig {
+    /// Base URL of the hosted CRW API, e.g. `https://api.fastcrw.com`.
+    #[serde(default)]
+    pub api_url: Option<String>,
+    /// API key for the hosted CRW API.
+    #[serde(default)]
+    pub api_key: Option<String>,
 }
 
 /// `[map]` section — currently only carries `[map.url_filter]`.
@@ -893,12 +910,46 @@ pub struct AuthConfig {
     pub api_keys: Vec<String>,
 }
 
+/// Path of the per-user config file written by `crw setup`. Returns `None` if
+/// the home directory cannot be resolved (e.g. headless container with no
+/// `$HOME`). Honors `$CRW_USER_CONFIG_DIR` for tests so we don't have to
+/// monkey-patch `$HOME`.
+pub fn user_config_path() -> Option<std::path::PathBuf> {
+    if let Ok(dir) = std::env::var("CRW_USER_CONFIG_DIR") {
+        return Some(std::path::PathBuf::from(dir).join("config.toml"));
+    }
+    let home = std::env::var_os("HOME")?;
+    Some(
+        std::path::PathBuf::from(home)
+            .join(".config")
+            .join("crw")
+            .join("config.toml"),
+    )
+}
+
 impl AppConfig {
-    /// Load config from config.default.toml + environment variable overrides.
-    /// Env vars use `CRW_` prefix, `__` as separator. E.g. `CRW_SERVER__PORT=8080`.
+    /// Load config from config.default.toml + per-user config + environment
+    /// variable overrides.
+    ///
+    /// Precedence (highest wins):
+    ///   1. `CRW_*` env vars (CI/Docker)
+    ///   2. `$CRW_CONFIG` file (or `config.local.toml` in cwd)
+    ///   3. `~/.config/crw/config.toml` (written by `crw setup`)
+    ///   4. `config.default.toml` (bundled defaults)
+    ///
+    /// Env stays on top so a one-off `CRW_FOO=bar crw …` always wins over
+    /// whatever the user has saved, matching how every other shell tool works.
     pub fn load() -> Result<Self, config::ConfigError> {
         let mut builder = config::Config::builder()
             .add_source(config::File::with_name("config.default").required(false));
+
+        // User-level config — written atomically by `crw setup`. Optional, so
+        // a never-configured machine simply reads defaults + env.
+        if let Some(user_cfg) = user_config_path()
+            && user_cfg.exists()
+        {
+            builder = builder.add_source(config::File::from(user_cfg).required(false));
+        }
 
         // Load optional override config file (e.g. config.docker.toml in containers).
         if let Ok(extra) = std::env::var("CRW_CONFIG") {
@@ -1398,6 +1449,101 @@ mod tests {
             cfg.renderer.lightpanda.as_ref().unwrap().ws_url,
             "ws://test:9999/",
             "env var should override renderer.lightpanda.ws_url"
+        );
+    }
+
+    #[test]
+    fn user_config_path_honors_override_env() {
+        let _g = ENV_LOCK.lock().unwrap();
+        let tmp = std::env::temp_dir().join(format!("crw-cfg-test-{}", std::process::id()));
+        unsafe {
+            std::env::set_var("CRW_USER_CONFIG_DIR", &tmp);
+        }
+        let p = user_config_path().unwrap();
+        unsafe {
+            std::env::remove_var("CRW_USER_CONFIG_DIR");
+        }
+        assert_eq!(p, tmp.join("config.toml"));
+    }
+
+    #[test]
+    fn user_config_file_is_picked_up_by_load() {
+        let _g = ENV_LOCK.lock().unwrap();
+        clear_renderer_env();
+        let tmp = std::env::temp_dir().join(format!("crw-load-test-{}", std::process::id()));
+        std::fs::create_dir_all(&tmp).unwrap();
+        let cfg_path = tmp.join("config.toml");
+        std::fs::write(
+            &cfg_path,
+            r#"
+[client]
+api_url = "https://api.example.com"
+api_key = "test-key-123"
+
+[search]
+searxng_url = "http://localhost:9999"
+
+[extraction.llm]
+provider = "deepseek"
+api_key = "sk-test"
+model = "deepseek-chat"
+"#,
+        )
+        .unwrap();
+
+        unsafe {
+            std::env::set_var("CRW_USER_CONFIG_DIR", &tmp);
+        }
+        let cfg = AppConfig::load().unwrap();
+        unsafe {
+            std::env::remove_var("CRW_USER_CONFIG_DIR");
+        }
+        std::fs::remove_dir_all(&tmp).ok();
+
+        assert_eq!(
+            cfg.client.api_url.as_deref(),
+            Some("https://api.example.com")
+        );
+        assert_eq!(cfg.client.api_key.as_deref(), Some("test-key-123"));
+        assert_eq!(
+            cfg.search.searxng_url.as_deref(),
+            Some("http://localhost:9999")
+        );
+        let llm = cfg.extraction.llm.expect("llm config present");
+        assert_eq!(llm.provider, "deepseek");
+        assert_eq!(llm.api_key, "sk-test");
+    }
+
+    #[test]
+    fn env_var_beats_user_config() {
+        let _g = ENV_LOCK.lock().unwrap();
+        clear_renderer_env();
+        let tmp = std::env::temp_dir().join(format!("crw-prec-test-{}", std::process::id()));
+        std::fs::create_dir_all(&tmp).unwrap();
+        std::fs::write(
+            tmp.join("config.toml"),
+            r#"
+[search]
+searxng_url = "http://from-file:8080"
+"#,
+        )
+        .unwrap();
+
+        unsafe {
+            std::env::set_var("CRW_USER_CONFIG_DIR", &tmp);
+            std::env::set_var("CRW_SEARCH__SEARXNG_URL", "http://from-env:8080");
+        }
+        let cfg = AppConfig::load().unwrap();
+        unsafe {
+            std::env::remove_var("CRW_USER_CONFIG_DIR");
+            std::env::remove_var("CRW_SEARCH__SEARXNG_URL");
+        }
+        std::fs::remove_dir_all(&tmp).ok();
+
+        assert_eq!(
+            cfg.search.searxng_url.as_deref(),
+            Some("http://from-env:8080"),
+            "env var must win over user config file"
         );
     }
 }

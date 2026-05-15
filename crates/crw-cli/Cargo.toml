@@ -80,3 +80,9 @@ indicatif = "0.17"
 # Crypto (for checksum verification)
 sha2 = { workspace = true }
 hex = { workspace = true }
+
+# SearXNG settings file (random secret_key)
+rand = { workspace = true }
+
+# User config (~/.config/crw/config.toml) written by setup wizard
+toml = { workspace = true }

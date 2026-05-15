@@ -26,9 +26,12 @@ pub struct SearchArgs {
     #[arg(short, long, default_value = "10")]
     pub limit: u32,
 
-    /// SearXNG instance URL
-    #[arg(long, env = "CRW_SEARXNG_URL", default_value = "http://localhost:8080")]
-    pub searxng_url: String,
+    /// SearXNG instance URL.
+    ///
+    /// Resolution order: this flag > `CRW_SEARXNG_URL` env > `search.searxng_url`
+    /// in `~/.config/crw/config.toml` > `http://localhost:8080`.
+    #[arg(long, env = "CRW_SEARXNG_URL")]
+    pub searxng_url: Option<String>,
 
     /// Output format
     #[arg(short, long, value_enum, default_value = "text")]
@@ -63,7 +66,9 @@ pub async fn run(args: SearchArgs) {
             .expect("failed to build HTTP client"),
     );
 
-    let client = SearxngClient::new(http, &args.searxng_url, Duration::from_secs(args.timeout));
+    let searxng_url = resolve_searxng_url(args.searxng_url.as_deref());
+
+    let client = SearxngClient::new(http, &searxng_url, Duration::from_secs(args.timeout));
 
     let params = SearxngParams {
         q: args.query.clone(),
@@ -80,7 +85,7 @@ pub async fn run(args: SearchArgs) {
         Err(e) => {
             eprintln!("error: search failed: {e}");
             eprintln!();
-            eprintln!("hint: Make sure SearXNG is running at {}", args.searxng_url);
+            eprintln!("hint: Make sure SearXNG is running at {}", searxng_url);
             eprintln!("      You can start it with: docker run -p 8080:8080 searxng/searxng");
             std::process::exit(1);
         }
@@ -132,4 +137,23 @@ pub async fn run(args: SearchArgs) {
             }
         }
     }
+}
+
+/// Pick the SearXNG URL from (in priority order):
+///   1. CLI flag / env (already merged by clap into `cli`)
+///   2. `search.searxng_url` from `~/.config/crw/config.toml`
+///   3. The hardcoded `http://localhost:8080` fallback
+///
+/// Step 2 is what makes `crw setup` -> `crw search` work without the user
+/// having to `source ~/.zshrc` first.
+fn resolve_searxng_url(cli: Option<&str>) -> String {
+    if let Some(url) = cli {
+        return url.to_string();
+    }
+    if let Ok(cfg) = crw_core::config::AppConfig::load()
+        && let Some(url) = cfg.search.searxng_url
+    {
+        return url;
+    }
+    "http://localhost:8080".to_string()
 }
