@@ -316,6 +316,18 @@ pub struct RendererConfig {
     pub playwright: Option<CdpEndpoint>,
     #[serde(default)]
     pub chrome: Option<CdpEndpoint>,
+    /// Residential-proxy Chrome tier (opt-in 4th renderer). Same Chromium
+    /// browser as `chrome`, but egress routed through a forwarder that adds
+    /// upstream proxy auth (e.g. DataImpulse). Tried after Chrome fails —
+    /// covers IP-blocked targets where the browser fingerprint is fine but
+    /// the VPS egress IP is flagged.
+    #[serde(default)]
+    pub chrome_proxy: Option<CdpEndpoint>,
+    /// Per-tier nav timeout override for `chrome_proxy`. When unset, defaults
+    /// to `chrome_timeout() + 15_000` — the proxy hop adds latency, so the
+    /// fallback tier needs more headroom than direct Chrome.
+    #[serde(default)]
+    pub chrome_proxy_timeout_ms: Option<u64>,
     /// Enable Chrome resource interception (`Fetch.enable` blocking of media,
     /// fonts, trackers). Default `false`; flipped after the CDP-fake suite
     /// validates pump + cleanup behaviour. See plan Phase 2.
@@ -517,6 +529,8 @@ impl Default for RendererConfig {
             lightpanda: None,
             playwright: None,
             chrome: None,
+            chrome_proxy: None,
+            chrome_proxy_timeout_ms: None,
             chrome_intercept_resources: false,
             chrome_intercept_stylesheets: false,
             chrome_host_intercept_disable: Vec::new(),
@@ -552,6 +566,10 @@ impl RendererConfig {
     }
     pub fn chrome_timeout(&self) -> u64 {
         self.chrome_timeout_ms.unwrap_or(self.page_timeout_ms)
+    }
+    pub fn chrome_proxy_timeout(&self) -> u64 {
+        self.chrome_proxy_timeout_ms
+            .unwrap_or_else(|| self.chrome_timeout().saturating_add(15_000))
     }
 
     /// Number of active CDP tiers (lightpanda + playwright + chrome) under

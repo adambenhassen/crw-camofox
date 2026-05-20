@@ -494,7 +494,7 @@ const REGISTRY_TTL: Duration = Duration::from_secs(24 * 60 * 60);
 #[derive(Clone)]
 pub struct BreakerRegistry {
     config: BreakerConfig,
-    global: Arc<[(RendererKind, Arc<CircuitBreaker>); 3]>,
+    global: Arc<[(RendererKind, Arc<CircuitBreaker>); 4]>,
     host: Cache<(String, RendererKind), Arc<CircuitBreaker>>,
 }
 
@@ -507,6 +507,10 @@ impl BreakerRegistry {
                 Arc::new(CircuitBreaker::new(config)),
             ),
             (RendererKind::Chrome, Arc::new(CircuitBreaker::new(config))),
+            (
+                RendererKind::ChromeProxy,
+                Arc::new(CircuitBreaker::new(config)),
+            ),
         ]);
         let host = Cache::builder()
             .max_capacity(REGISTRY_CAPACITY)
@@ -533,7 +537,7 @@ impl BreakerRegistry {
                 return Arc::clone(breaker);
             }
         }
-        unreachable!("RendererKind is closed: Http | Lightpanda | Chrome")
+        unreachable!("RendererKind is closed: Http | Lightpanda | Chrome | ChromeProxy")
     }
 
     pub async fn host_for(&self, host: &str, renderer: RendererKind) -> Arc<CircuitBreaker> {
@@ -1073,5 +1077,12 @@ mod tests {
         let ctx = AttemptContext::capture(Duration::from_millis(8000), Duration::from_millis(2500));
         let outcome = classify_outcome(true, true, false, &ctx);
         assert_eq!(outcome, BreakerOutcome::Truncated);
+    }
+
+    #[test]
+    fn registry_has_breaker_for_chrome_proxy() {
+        let reg = BreakerRegistry::with_defaults();
+        // Must not panic: global_for iterates a fixed 4-element array now.
+        let _ = reg.global_for(RendererKind::ChromeProxy);
     }
 }

@@ -74,6 +74,7 @@ fn renderer_kind_for(name: &str) -> Option<RendererKind> {
         "http" | "http_only_fallback" => Some(RendererKind::Http),
         "lightpanda" => Some(RendererKind::Lightpanda),
         "chrome" => Some(RendererKind::Chrome),
+        "chrome_proxy" => Some(RendererKind::ChromeProxy),
         _ => None,
     }
 }
@@ -117,6 +118,10 @@ fn tier_timeouts_from(
         RendererKind::Chrome,
         std::time::Duration::from_millis(config.chrome_timeout()),
     );
+    m.insert(
+        RendererKind::ChromeProxy,
+        std::time::Duration::from_millis(config.chrome_proxy_timeout()),
+    );
     m
 }
 
@@ -127,6 +132,9 @@ fn credit_for(kind: RendererKind) -> u32 {
         RendererKind::Http => 1,
         RendererKind::Lightpanda => 1,
         RendererKind::Chrome => 2,
+        // Engine-internal cost only. SaaS billing reads request-body
+        // `renderer` string and still charges 1 credit per scrape regardless.
+        RendererKind::ChromeProxy => 2,
     }
 }
 
@@ -383,6 +391,38 @@ impl FallbackRenderer {
                         "renderer.mode = \"chrome\" but [renderer.chrome] ws_url is not configured"
                             .into(),
                     ));
+                }
+                // Residential-proxy Chrome tier: opt-in 4th renderer. Pushed
+                // after `chrome` so the existing in-request fallback loop
+                // (`for renderer in renderers` in fetch_with_js) tries Chrome
+                // direct first and falls through to chrome_proxy on failure.
+                // Skipped when [renderer.chrome_proxy] is unset OR when
+                // `ws_url` is empty (docker-compose passes empty env vars
+                // even when --profile proxy is inactive).
+                if let Some(cp) = config
+                    .chrome_proxy
+                    .as_ref()
+                    .filter(|c| !c.ws_url.trim().is_empty())
+                {
+                    let blocklist = blocklist::Blocklist::defaults()
+                        .with_stylesheets(config.chrome_intercept_stylesheets);
+                    let renderer = cdp::CdpRenderer::new(
+                        "chrome_proxy",
+                        &cp.ws_url,
+                        config.chrome_proxy_timeout(),
+                        config.pool_size,
+                    )
+                    .with_nav_budget(config.chrome_nav_budget_ms)
+                    .with_interception(
+                        config.chrome_intercept_resources,
+                        blocklist,
+                        config.chrome_host_intercept_disable.clone(),
+                    );
+                    tracing::info!(
+                        ws_url = %cp.ws_url,
+                        "chrome_proxy tier enabled"
+                    );
+                    js_renderers.push(Arc::new(renderer));
                 }
             }
         }
@@ -1299,6 +1339,46 @@ mod tests {
         };
         let r = FallbackRenderer::new(&cfg, "crw-test", None, &StealthConfig::default()).unwrap();
         assert_eq!(r.js_renderer_names(), vec!["lightpanda", "chrome"]);
+    }
+
+    #[cfg(feature = "cdp")]
+    #[test]
+    fn ladder_includes_chrome_proxy_when_configured() {
+        let cfg = RendererConfig {
+            mode: RendererMode::Auto,
+            lightpanda: Some(CdpEndpoint {
+                ws_url: "ws://127.0.0.1:9222/".into(),
+            }),
+            chrome: Some(CdpEndpoint {
+                ws_url: "ws://127.0.0.1:9223/".into(),
+            }),
+            chrome_proxy: Some(CdpEndpoint {
+                ws_url: "ws://127.0.0.1:9224/".into(),
+            }),
+            ..Default::default()
+        };
+        let r = FallbackRenderer::new(&cfg, "crw-test", None, &StealthConfig::default()).unwrap();
+        // chrome_proxy must be the LAST tier — fallback chain tries Chrome
+        // direct first and only falls through to the proxy on Chrome failure.
+        assert_eq!(
+            r.js_renderer_names(),
+            vec!["lightpanda", "chrome", "chrome_proxy"]
+        );
+    }
+
+    #[cfg(feature = "cdp")]
+    #[test]
+    fn ladder_omits_chrome_proxy_when_not_configured() {
+        let cfg = RendererConfig {
+            mode: RendererMode::Auto,
+            chrome: Some(CdpEndpoint {
+                ws_url: "ws://127.0.0.1:9223/".into(),
+            }),
+            chrome_proxy: None,
+            ..Default::default()
+        };
+        let r = FallbackRenderer::new(&cfg, "crw-test", None, &StealthConfig::default()).unwrap();
+        assert!(!r.js_renderer_names().contains(&"chrome_proxy"));
     }
 
     #[cfg(not(feature = "cdp"))]

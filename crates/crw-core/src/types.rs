@@ -593,6 +593,23 @@ mod tests {
             Some("playwright")
         );
     }
+
+    #[test]
+    fn chrome_proxy_serializes_with_underscore() {
+        let json = serde_json::to_string(&RendererKind::ChromeProxy).unwrap();
+        assert_eq!(json, "\"chrome_proxy\"");
+    }
+
+    #[test]
+    fn chrome_proxy_deserializes_from_underscore() {
+        let k: RendererKind = serde_json::from_str("\"chrome_proxy\"").unwrap();
+        assert_eq!(k, RendererKind::ChromeProxy);
+    }
+
+    #[test]
+    fn chrome_proxy_as_str() {
+        assert_eq!(RendererKind::ChromeProxy.as_str(), "chrome_proxy");
+    }
 }
 
 /// Status of an async crawl job.
@@ -963,6 +980,8 @@ pub enum RendererKind {
     Http,
     Lightpanda,
     Chrome,
+    #[serde(rename = "chrome_proxy")]
+    ChromeProxy,
 }
 
 impl RendererKind {
@@ -971,6 +990,7 @@ impl RendererKind {
             RendererKind::Http => "http",
             RendererKind::Lightpanda => "lightpanda",
             RendererKind::Chrome => "chrome",
+            RendererKind::ChromeProxy => "chrome_proxy",
         }
     }
 }
