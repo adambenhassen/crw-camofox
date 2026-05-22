@@ -201,6 +201,11 @@ static SCRIPT_BLOCK_RE: Lazy<Regex> =
     Lazy::new(|| Regex::new(r"(?is)<script\b[\s\S]*?</script>").unwrap());
 static STYLE_BLOCK_RE: Lazy<Regex> =
     Lazy::new(|| Regex::new(r"(?is)<style\b[\s\S]*?</style>").unwrap());
+/// Inline base64 `data:` URIs (e.g. an embedded logo) can be tens of KB of
+/// opaque payload that pushes real block-page text past the deep-scan window.
+/// Stripping them keeps the scanned snippet dense with meaningful markup.
+static DATA_URI_RE: Lazy<Regex> =
+    Lazy::new(|| Regex::new(r"(?i)data:[a-z0-9.+-]*/[a-z0-9.+-]*;base64,[a-z0-9+/=]+").unwrap());
 static TAG_RE: Lazy<Regex> = Lazy::new(|| Regex::new(r"<[^>]+>").unwrap());
 static BODY_OPEN_RE: Lazy<Regex> = Lazy::new(|| Regex::new(r"(?i)<body\b").unwrap());
 static BODY_INNER_RE: Lazy<Regex> =
@@ -210,6 +215,16 @@ static CONTENT_ELEMENTS_RE: Lazy<Regex> =
     Lazy::new(|| Regex::new(r"(?i)<(?:p|h[1-6]|article|section|li|td|a|pre)\b").unwrap());
 static JSON_PRE_RE: Lazy<Regex> =
     Lazy::new(|| Regex::new(r#"(?is)<body[^>]*>\s*<pre[^>]*>\s*[{\[]"#).unwrap());
+
+/// Strip the three high-volume / low-signal regions — `<script>` and `<style>`
+/// blocks plus inline base64 `data:` URIs — so the deep-scan snippet window
+/// reaches real block-page text instead of being exhausted by embedded assets.
+fn strip_noise(src: &str) -> String {
+    let stripped = SCRIPT_BLOCK_RE.replace_all(src, "");
+    let stripped = STYLE_BLOCK_RE.replace_all(&stripped, "");
+    let stripped = DATA_URI_RE.replace_all(&stripped, "");
+    stripped.into_owned()
+}
 
 fn looks_like_data(html: &str) -> bool {
     let stripped = html.trim();
@@ -331,8 +346,7 @@ pub fn classify(status: Option<u16>, html: &str) -> AntibotResult {
             .map(|(i, _)| i)
             .unwrap_or(html.len());
         let deep_src = &html[..deep_end];
-        let stripped = SCRIPT_BLOCK_RE.replace_all(deep_src, "");
-        let stripped = STYLE_BLOCK_RE.replace_all(&stripped, "");
+        let stripped = strip_noise(deep_src);
         let snippet_end = stripped
             .char_indices()
             .nth(DEEP_SCAN_SNIPPET_BYTES)
@@ -360,8 +374,7 @@ pub fn classify(status: Option<u16>, html: &str) -> AntibotResult {
                 .nth(DEEP_SCAN_HEAD_BYTES)
                 .map(|(i, _)| i)
                 .unwrap_or(html.len());
-            let stripped = SCRIPT_BLOCK_RE.replace_all(&html[..deep_end], "");
-            let stripped = STYLE_BLOCK_RE.replace_all(&stripped, "");
+            let stripped = strip_noise(&html[..deep_end]);
             let snippet_end = stripped
                 .char_indices()
                 .nth(DEEP_SCAN_SNIPPET_BYTES)
@@ -486,6 +499,23 @@ mod tests {
         let html =
             "<html><body>You've been blocked by network security. Contact support.</body></html>";
         let r = classify(Some(200), html);
+        assert_eq!(r.signal, AntibotSignal::NetworkSecurity);
+    }
+
+    #[test]
+    fn network_security_block_detected_behind_large_data_uri() {
+        // Reddit-class WAF page in the wild: the "blocked by network security"
+        // text sits *after* a ~90KB inline base64 data-URI (an embedded logo).
+        // Without stripping the data-URI the phrase lands past the deep-scan
+        // snippet window and the block goes undetected — the bug this guards.
+        let data_uri = format!("data:image/png;base64,{}", "A".repeat(90_000));
+        let html = format!(
+            "<html><body><img src=\"{data_uri}\"/>\
+             <p>You've been blocked by network security. Contact support.</p>\
+             </body></html>"
+        );
+        assert!(html.len() > DEEP_SCAN_SNIPPET_BYTES);
+        let r = classify(Some(200), &html);
         assert_eq!(r.signal, AntibotSignal::NetworkSecurity);
     }
 
