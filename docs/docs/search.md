@@ -34,7 +34,7 @@
 
 ```http
 POST http://localhost:3000/v1/search          # self-hosted
-POST https://fastcrw.com/api/v1/search        # hosted
+POST https://api.fastcrw.com/v1/search        # hosted
 ```
 
 Authentication:
@@ -70,13 +70,16 @@ resp = requests.post(
 
 # Or hosted (with API key)
 # resp = requests.post(
-#     "https://fastcrw.com/api/v1/search",
+#     "https://api.fastcrw.com/v1/search",
 #     headers={"Authorization": "Bearer YOUR_API_KEY"},
 #     json={"query": "web scraping tools", "limit": 5},
 # )
 
+# Each result row has: title, url, snippet, description, position, score.
+# `snippet` is the LLM-ready summary line (Firecrawl-compatible name);
+# `description` is the same value, kept as an alias.
 for item in resp.json()["data"]:
-    print(item["title"], item["url"])
+    print(item["title"], item["url"], item["snippet"])
 ```
 ::tab{title="Node.js"}
 ```javascript
@@ -97,7 +100,7 @@ curl -X POST http://localhost:3000/v1/search \
   -d '{"query": "web scraping tools", "limit": 5}'
 
 # Hosted
-curl -X POST https://fastcrw.com/api/v1/search \
+curl -X POST https://api.fastcrw.com/v1/search \
   -H "Authorization: Bearer YOUR_API_KEY" \
   -H "Content-Type: application/json" \
   -d '{"query": "web scraping tools", "limit": 5}'
@@ -113,13 +116,18 @@ curl -X POST https://fastcrw.com/api/v1/search \
     {
       "url": "https://example.com/article",
       "title": "Article Title",
-      "description": "A snippet from the search result...",
+      "snippet": "A summary line from the search result...",
+      "description": "A summary line from the search result...",
       "position": 1,
       "score": 9.5
     }
   ]
 }
 ```
+
+`snippet` is the LLM-ready summary line — name kept identical to Firecrawl
+so existing pipelines work unchanged. `description` is the same value
+under the SearXNG-native name. Pick whichever; both are emitted.
 
 That is the flat response shape used when `sources` is not set.
 
@@ -164,7 +172,8 @@ Without `sources`, CRW returns a flat list:
     {
       "url": "https://example.com/article",
       "title": "Article Title",
-      "description": "Search snippet...",
+      "snippet": "Search summary line...",
+      "description": "Search summary line...",
       "position": 1,
       "score": 9.5
     }
@@ -178,8 +187,8 @@ With `sources`, CRW returns grouped results:
 {
   "success": true,
   "data": {
-    "web": [{ "url": "...", "title": "...", "description": "..." }],
-    "news": [{ "url": "...", "title": "...", "publishedDate": "2026-04-02T14:00:00" }],
+    "web": [{ "url": "...", "title": "...", "snippet": "...", "description": "..." }],
+    "news": [{ "url": "...", "title": "...", "snippet": "...", "description": "...", "publishedDate": "2026-04-02T14:00:00" }],
     "images": [{ "url": "...", "imageUrl": "...", "thumbnailUrl": "..." }]
   }
 }
