@@ -84,6 +84,14 @@ pub fn create_app(state: AppState) -> Router {
             get(routes::health::health).fallback(method_not_allowed),
         )
         .route(
+            "/openapi.json",
+            get(routes::openapi::serve_openapi_3_1).fallback(method_not_allowed),
+        )
+        .route(
+            "/openapi-3.0.json",
+            get(routes::openapi::serve_openapi_3_0).fallback(method_not_allowed),
+        )
+        .route(
             "/ready",
             get(routes::health::ready).fallback(method_not_allowed),
         )
