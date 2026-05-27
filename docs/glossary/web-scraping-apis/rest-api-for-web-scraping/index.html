@@ -1,0 +1,38 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>REST API for web scraping — fastCRW glossary</title>
+<meta name="description" content="A REST API for web scraping accepts a URL via POST and returns content as JSON. Bearer-token auth, stateless requests, language-agnostic clients.">
+<link rel="canonical" href="https://docs.fastcrw.com/glossary/web-scraping-apis/rest-api-for-web-scraping/">
+</head>
+<body>
+<h1>REST API for web scraping</h1>
+<p><strong>Short answer:</strong> A REST API for web scraping is an HTTP service that accepts a URL via POST and returns the page's content as JSON. Each call is stateless, the request and response bodies are JSON, and authentication is typically a bearer token in the <code>Authorization</code> header. Any language with an HTTP client can use it without an SDK.</p>
+
+<h2>What "REST" means for scraping</h2>
+<p>REST (Representational State Transfer) is an architectural style where each HTTP method maps to an action on a resource and each request stands alone. For a scraping API the resource is the page you want, the action is <code>POST /v1/scrape</code> (or <code>/extract</code>, <code>/crawl</code>, <code>/map</code>, <code>/search</code>), and the response is JSON containing the extracted content. Statelessness means the server does not remember your previous calls — you pass everything you need in the body each time. This is what makes the API trivial to load-balance, retry, and call from edge functions or background jobs.</p>
+
+<h2>Why developers prefer REST scrapers</h2>
+<p>The alternative is a library-based scraper (BeautifulSoup, Playwright, Scrapy) you embed in your own process. Libraries give you maximum control but require browser binaries, proxy management, and renderer upgrades on every host that runs your code. A REST scraping API hides all of that behind one endpoint. You curl it from a CI job, call it from a Cloudflare Worker, or fan out from a serverless function — the operational surface is one URL and one secret. JSON in, JSON out, language-agnostic.</p>
+
+<h2>How fastCRW does it</h2>
+<p>fastCRW exposes five REST endpoints under <code>https://api.fastcrw.com</code> (hosted) or <code>http://localhost:3000</code> (self-hosted): <code>/v1/scrape</code>, <code>/v1/crawl</code>, <code>/v1/extract</code>, <code>/v1/map</code>, and <code>/v1/search</code>. All accept JSON bodies, all return <code>{success, data}</code> shapes, and all use <code>Authorization: Bearer $CRW_API_KEY</code> on hosted. Self-hosted requires no auth by default. See the <a href="/rest-api/">REST API guide</a> for end-to-end usage and the <a href="/api-reference/">API reference</a> for per-endpoint body schemas. The OpenAPI 3.1 description at <code>/openapi.json</code> is the machine-readable contract.</p>
+
+<h2>Frequently asked</h2>
+<dl>
+  <dt>What is the difference between a REST scraping API and a scraping library?</dt><dd>A REST scraping API is a hosted HTTP service you call; a library is code you embed in your own process. The API hides browser binaries, proxies, and renderer upgrades; the library gives you direct control at the cost of running infrastructure.</dd>
+  <dt>How do I authenticate?</dt><dd>Send <code>Authorization: Bearer $CRW_API_KEY</code> on hosted fastCRW. Self-hosted instances require no auth by default but can be configured to require it.</dd>
+  <dt>Is there an OpenAPI spec?</dt><dd>Yes. fastCRW publishes an OpenAPI 3.1 description at <code>/openapi.json</code> so SDK generators, agents, and IDEs can consume the contract directly.</dd>
+</dl>
+
+<script type="application/ld+json">
+{"@context":"https://schema.org","@type":"FAQPage","mainEntity":[
+  {"@type":"Question","name":"What is the difference between a REST scraping API and a scraping library?","acceptedAnswer":{"@type":"Answer","text":"A REST scraping API is a hosted HTTP service you call; a library is code you embed in your own process. The API hides browser binaries, proxies, and renderer upgrades; the library gives you direct control at the cost of running infrastructure."}},
+  {"@type":"Question","name":"How do I authenticate?","acceptedAnswer":{"@type":"Answer","text":"Send Authorization: Bearer $CRW_API_KEY on hosted fastCRW. Self-hosted instances require no auth by default but can be configured to require it."}},
+  {"@type":"Question","name":"Is there an OpenAPI spec?","acceptedAnswer":{"@type":"Answer","text":"Yes. fastCRW publishes an OpenAPI 3.1 description at /openapi.json so SDK generators, agents, and IDEs can consume the contract directly."}}
+]}
+</script>
+<p>← <a href="/">CRW docs home</a></p>
+</body>
+</html>

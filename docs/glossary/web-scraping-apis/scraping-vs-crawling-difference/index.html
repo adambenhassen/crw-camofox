@@ -1,0 +1,59 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>What is the difference between web scraping and web crawling? — fastCRW glossary</title>
+<meta name="description" content="Web scraping extracts content from one known URL; web crawling discovers and traverses many URLs, handling dedup, politeness, and frontier management.">
+<link rel="canonical" href="https://docs.fastcrw.com/glossary/web-scraping-apis/scraping-vs-crawling-difference/">
+</head>
+<body>
+<h1>What is the difference between web scraping and web crawling?</h1>
+
+<p><strong>Short answer:</strong> Web scraping extracts the content of a single, known URL — you give it a link, it returns markdown, HTML, or structured JSON. Web crawling discovers and traverses many URLs starting from one or more seeds, deduplicating links, respecting politeness, and managing a frontier. Scraping is the per-page operation; crawling is the multi-page operation that calls scraping in a loop.</p>
+
+<h2>What scraping owns</h2>
+<p>A scrape is bounded: one HTTP request in, one document out. It decides whether to use a plain HTTP client or a headless browser, runs readability extraction, and returns clean output. Scraping does not concern itself with which URL to fetch next — the caller decides. This makes scraping cheap to reason about: the input is a URL, the output is content, and the cost is one credit (or two if a browser is involved).</p>
+
+<h2>What crawling adds</h2>
+<p>Crawling is scraping plus four extra responsibilities: a <strong>frontier</strong> (the queue of URLs to visit), <strong>dedup</strong> (don't re-fetch the same URL twice), <strong>politeness</strong> (rate limit per host, honour robots.txt), and <strong>traversal policy</strong> (max depth, max pages, allow-list patterns, BFS vs DFS). Crawling typically runs asynchronously because a site of any size takes minutes to hours to complete, so the API shape is "start a job, poll for status, collect results" rather than a single synchronous call.</p>
+
+<h2>How fastCRW does it</h2>
+<p>fastCRW exposes both operations as separate REST endpoints: <a href="/api-reference/scrape/">/v1/scrape</a> for single-URL extraction (synchronous, returns markdown/HTML/JSON immediately) and <a href="/api-reference/crawl/">/v1/crawl</a> for multi-page traversal (async, returns a job ID you poll). The crawl endpoint accepts <code>maxDepth</code> (cap 10) and <code>maxPages</code> (cap 1000), honours robots.txt by default, and uses the same scrape pipeline under the hood — so a crawl result has the same shape as a scrape result, just many of them. See also <a href="/api-reference/map/">/v1/map</a> for URL discovery without content fetching.</p>
+
+<h2>Frequently asked</h2>
+<dl>
+  <dt>Should I use scraping or crawling for a single product page?</dt>
+  <dd>Scraping. If you already know the URL and want the content, /v1/scrape is the right call — it returns synchronously in one request and costs one credit. Crawling adds frontier and traversal overhead you do not need.</dd>
+  <dt>Can I crawl an entire site with one scrape call?</dt>
+  <dd>No. A scrape call returns content for exactly one URL. To traverse a whole site, use a crawl endpoint, which scrapes each discovered page internally and aggregates the results into a single job.</dd>
+  <dt>What is the difference between crawling and mapping?</dt>
+  <dd>Mapping discovers URLs on a site without fetching their content — it returns a list of links from sitemaps and lightweight HTML scans. Crawling discovers URLs and fetches each one's content. Mapping is cheaper and faster when you only need the URL inventory.</dd>
+</dl>
+
+<script type="application/ld+json">
+{
+  "@context": "https://schema.org",
+  "@type": "FAQPage",
+  "mainEntity": [
+    {
+      "@type": "Question",
+      "name": "Should I use scraping or crawling for a single product page?",
+      "acceptedAnswer": {"@type":"Answer","text":"Scraping. If you already know the URL and want the content, /v1/scrape is the right call — it returns synchronously in one request and costs one credit. Crawling adds frontier and traversal overhead you do not need."}
+    },
+    {
+      "@type": "Question",
+      "name": "Can I crawl an entire site with one scrape call?",
+      "acceptedAnswer": {"@type":"Answer","text":"No. A scrape call returns content for exactly one URL. To traverse a whole site, use a crawl endpoint, which scrapes each discovered page internally and aggregates the results into a single job."}
+    },
+    {
+      "@type": "Question",
+      "name": "What is the difference between crawling and mapping?",
+      "acceptedAnswer": {"@type":"Answer","text":"Mapping discovers URLs on a site without fetching their content — it returns a list of links from sitemaps and lightweight HTML scans. Crawling discovers URLs and fetches each one's content. Mapping is cheaper and faster when you only need the URL inventory."}
+    }
+  ]
+}
+</script>
+
+<p>← <a href="/">CRW docs home</a></p>
+</body>
+</html>

@@ -1,0 +1,45 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Structured extraction with LLM — fastCRW glossary</title>
+<meta name="description" content="Structured extraction with LLM means passing a JSON Schema and constraining model output to it. fastCRW /v1/extract accepts schema plus optional prompt.">
+<link rel="canonical" href="https://docs.fastcrw.com/glossary/web-extraction-apis/structured-extraction-with-llm/">
+</head>
+<body>
+<h1>Structured extraction with LLM</h1>
+<p><strong>Short answer:</strong> Structured extraction with an LLM is the technique of giving the model a JSON Schema and forcing its output to validate against that schema, so the result is machine-readable on the first try. Combined with a web scraper, it turns any page — contact page, product card, job listing — into a typed JSON object via one HTTP call.</p>
+
+<h2>How it works</h2>
+<p>The server fetches and renders the page, converts the rendered DOM to markdown or plain text, and hands that text plus your JSON Schema to an LLM. The model is constrained by one of three mechanisms: OpenAI-style tool calling with the schema as the tool definition, JSON-mode with grammar-guided sampling, or post-validation with retry. The schema acts as both prompt scaffolding and output contract; the caller never has to write a regex, an XPath, or a BeautifulSoup selector.</p>
+
+<h2>When to use it</h2>
+<p>Structured extraction is the right tool whenever the target page is unstable, varies in layout across the site, or carries information you want typed rather than free-form. Concrete use cases:</p>
+<ul>
+  <li><strong>Contact pages</strong> — pull <code>{email, phone, address}</code> regardless of markup.</li>
+  <li><strong>Product cards</strong> — pull <code>{title, price, currency, in_stock, sku}</code> across thousands of listings.</li>
+  <li><strong>Job listings</strong> — pull <code>{title, company, location, salary_range, remote}</code> from ATS pages with no shared template.</li>
+  <li><strong>Pricing pages</strong> — pull a list of plan objects when each vendor's HTML is different.</li>
+</ul>
+<p>When the page is rigid and well-templated, a selector-based scrape is faster and cheaper. When you don't know the layout in advance, LLM extraction wins.</p>
+
+<h2>How fastCRW does it</h2>
+<p>POST a JSON body with <code>url</code>, a <code>schema</code> (any valid JSON Schema), and an optional <code>prompt</code> for natural-language hints to <a href="/api-reference/extract/">/v1/extract</a>. Both fields can coexist — the prompt steers and the schema constrains. BYOK is supported via <code>llmApiKey</code>, <code>llmProvider</code>, and <code>llmModel</code>, so your billing relationship is with the LLM vendor directly. See the <a href="/extract/">extract guide</a> for end-to-end examples.</p>
+
+<h2>Frequently asked</h2>
+<dl>
+  <dt>Is the schema or the prompt more important?</dt><dd>The schema. The prompt nudges the model toward the right fields; the schema constrains the output shape. A schema with no prompt usually works; a prompt with no schema returns free-form text.</dd>
+  <dt>What JSON Schema features are supported?</dt><dd>Object, array, string, number, boolean, enum, and nested types. Required fields and descriptions are passed through to the model and improve accuracy.</dd>
+  <dt>How is this different from regular scraping?</dt><dd>Regular scraping returns raw markdown or HTML and leaves parsing to you. Structured extraction returns typed JSON validated against your schema, so the parsing step is server-side.</dd>
+</dl>
+
+<script type="application/ld+json">
+{"@context":"https://schema.org","@type":"FAQPage","mainEntity":[
+  {"@type":"Question","name":"Is the schema or the prompt more important?","acceptedAnswer":{"@type":"Answer","text":"The schema. The prompt nudges the model toward the right fields; the schema constrains the output shape. A schema with no prompt usually works; a prompt with no schema returns free-form text."}},
+  {"@type":"Question","name":"What JSON Schema features are supported?","acceptedAnswer":{"@type":"Answer","text":"Object, array, string, number, boolean, enum, and nested types. Required fields and descriptions are passed through to the model and improve accuracy."}},
+  {"@type":"Question","name":"How is this different from regular scraping?","acceptedAnswer":{"@type":"Answer","text":"Regular scraping returns raw markdown or HTML and leaves parsing to you. Structured extraction returns typed JSON validated against your schema, so the parsing step is server-side."}}
+]}
+</script>
+<p>← <a href="/">CRW docs home</a></p>
+</body>
+</html>

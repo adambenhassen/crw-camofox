@@ -1,0 +1,47 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Self-hosted vs cloud web scraper: what are the tradeoffs? — fastCRW glossary</title>
+<meta name="description" content="Cloud scrapers absorb proxy and anti-bot maintenance; self-hosted scrapers give cost control, data sovereignty, and lower latency. Most teams want both.">
+<link rel="canonical" href="https://docs.fastcrw.com/glossary/web-scraping-apis/self-hosted-vs-cloud-scraper-tradeoffs/">
+</head>
+<body>
+<h1>Self-hosted vs cloud web scraper: what are the tradeoffs?</h1>
+<p><strong>Short answer:</strong> Cloud scrapers trade dollars for managed proxies, anti-bot maintenance, and zero ops. Self-hosted scrapers trade ops time for predictable cost, data sovereignty, and lower egress latency. The right answer depends on volume, regulated data, and whether your team already runs Kubernetes-shaped infrastructure.</p>
+
+<h2>What cloud buys you</h2>
+<p>A managed scraping API absorbs three operational categories that are otherwise full-time work:</p>
+<ul>
+  <li><strong>Proxy and IP rotation:</strong> the provider maintains residential, datacenter, and mobile pools across regions. You never see an IP ban.</li>
+  <li><strong>Anti-bot drift:</strong> Cloudflare, PerimeterX, DataDome, and similar systems change weekly. The cloud provider's full-time job is to keep up with that drift.</li>
+  <li><strong>Capacity bursts:</strong> a one-day 100x crawl spike does not require provisioning new boxes. You pay per page and the provider handles concurrency.</li>
+</ul>
+
+<h2>What self-hosting buys you</h2>
+<ul>
+  <li><strong>Cost control at volume:</strong> at high page counts the marginal cost of self-hosted CPU and bandwidth beats per-credit pricing. The crossover depends on render mix.</li>
+  <li><strong>Data sovereignty:</strong> scraped content never leaves your VPC. For regulated industries (health, finance, EU PII) this can be the only acceptable option.</li>
+  <li><strong>Latency:</strong> co-locating the scraper next to your downstream pipeline (RAG indexer, ETL, LLM endpoint) removes a public-internet hop and cuts tail latency.</li>
+  <li><strong>Customisation:</strong> you can swap the renderer, add domain-specific selectors, or wire in private proxy pools without waiting on a vendor roadmap.</li>
+</ul>
+
+<h2>How fastCRW does it</h2>
+<p>fastCRW ships both modes from the same codebase. The managed endpoint at <code>https://api.fastcrw.com</code> handles proxy rotation and anti-bot drift for you. The same binary self-hosts under AGPL-3.0 at <code>http://localhost:3000</code>, single static Rust binary, ~50 MB RAM idle. The request and response contracts are identical, so the same client code works against either, and you can route a percentage of traffic each way. See <a href="/self-hosting/">the self-hosting guide</a> and the credit math at <a href="/credit-costs/">credit costs</a>.</p>
+
+<h2>Frequently asked</h2>
+<dl>
+  <dt>When is self-hosting cheaper than cloud?</dt><dd>Once your monthly page volume is high enough that managed credit cost exceeds a small VM plus bandwidth. Compute the crossover from your render mix — HTTP-only pages are cheap to self-host; heavy headless-browser workloads narrow the gap.</dd>
+  <dt>Can I use both at the same time?</dt><dd>Yes. Because fastCRW's self-hosted and managed surfaces are contract-identical, you can route public-web crawls to the cloud (for proxies) and regulated-domain crawls to your own VPC (for sovereignty) from the same client.</dd>
+  <dt>What ops burden does self-hosting actually add?</dt><dd>One Rust binary or Docker container, plus a periodic update when the upstream Chromium or LightPanda renderer ships fixes. There is no database, no queue, and no orchestration layer required for single-node operation.</dd>
+</dl>
+<script type="application/ld+json">
+{"@context":"https://schema.org","@type":"FAQPage","mainEntity":[
+  {"@type":"Question","name":"When is self-hosting cheaper than cloud?","acceptedAnswer":{"@type":"Answer","text":"Once your monthly page volume is high enough that managed credit cost exceeds a small VM plus bandwidth. Compute the crossover from your render mix — HTTP-only pages are cheap to self-host; heavy headless-browser workloads narrow the gap."}},
+  {"@type":"Question","name":"Can I use both at the same time?","acceptedAnswer":{"@type":"Answer","text":"Yes. Because fastCRW's self-hosted and managed surfaces are contract-identical, you can route public-web crawls to the cloud (for proxies) and regulated-domain crawls to your own VPC (for sovereignty) from the same client."}},
+  {"@type":"Question","name":"What ops burden does self-hosting actually add?","acceptedAnswer":{"@type":"Answer","text":"One Rust binary or Docker container, plus a periodic update when the upstream Chromium or LightPanda renderer ships fixes. There is no database, no queue, and no orchestration layer required for single-node operation."}}
+]}
+</script>
+<p>← <a href="/">CRW docs home</a></p>
+</body>
+</html>

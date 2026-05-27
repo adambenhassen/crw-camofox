@@ -1,0 +1,59 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>What is self-hosted scraping with managed proxy rotation? — fastCRW glossary</title>
+<meta name="description" content="Self-hosted scraping with managed proxy rotation pairs an on-prem scraper binary with a third-party residential proxy pool to keep IP risk outsourced.">
+<link rel="canonical" href="https://docs.fastcrw.com/glossary/web-scraping-apis/self-hosted-scraping-with-managed-proxy-rotation/">
+</head>
+<body>
+<h1>What is self-hosted scraping with managed proxy rotation?</h1>
+
+<p><strong>Short answer:</strong> Self-hosted scraping with managed proxy rotation is the hybrid model where you run the scraper binary on your own server but route its outbound fetches through a third-party residential or datacenter proxy pool (Bright Data, Oxylabs, IPRoyal, Smartproxy). You keep ownership of the scraping logic and data; you outsource only the IP rotation problem.</p>
+
+<h2>Why split the stack this way</h2>
+<p>Running your own residential proxy network is uneconomic for most teams — the legal and supply-chain overhead of acquiring clean residential IPs is a full business by itself. Conversely, handing the entire scrape to a SaaS vendor means giving up control of the response body, the extraction prompt, and the audit trail. The hybrid model keeps the expensive-to-build proxy pool with a specialist while keeping the easy-to-build (and sensitive) scraping logic in-house.</p>
+
+<h2>How the configuration looks</h2>
+<p>A managed proxy is just an HTTP proxy URL with credentials: <code>http://user-session-abc:pass@brd.superproxy.io:22225</code>. You pass that URL to the scraper per request, and the scraper forwards every outbound fetch through it. Sticky sessions, geo-targeting, and country-level rotation are controlled by encoding session tokens into the username — every major provider supports this pattern. Rotation happens entirely inside the proxy network; the scraper doesn't have to know.</p>
+
+<h2>How fastCRW does it</h2>
+<p>fastCRW accepts a per-request <code>proxy</code> parameter on <a href="/api-reference/scrape/">/v1/scrape</a> and <a href="/api-reference/crawl/">/v1/crawl</a>. Pass the proxy URL — including credentials — and the Rust client uses it for the outbound fetch; sticky-session usernames work transparently. The same self-hosted binary can be pointed at a different proxy per request, so you can route by target hostname, by tenant, or by geo. See <a href="/scraping/">scraping</a> and <a href="/configuration/">configuration</a> for the full request shape.</p>
+
+<h2>Frequently asked</h2>
+<dl>
+  <dt>Which managed proxy providers work with self-hosted scrapers?</dt>
+  <dd>Any provider that exposes a standard HTTP or SOCKS5 proxy endpoint works — Bright Data, Oxylabs, IPRoyal, Smartproxy, NetNut, and most others. The scraper does not need a provider-specific SDK; the proxy URL with credentials is enough.</dd>
+  <dt>Does the proxy provider see the scraped page content?</dt>
+  <dd>The proxy provider sees the destination URL and the encrypted TLS traffic, just like any HTTP forward proxy. They can see request volume and target hostnames; they cannot read response bodies inside HTTPS without active TLS interception, which reputable providers do not do.</dd>
+  <dt>Can I rotate proxies per request without restarting the scraper?</dt>
+  <dd>Yes. A self-hosted scraper that accepts a per-request proxy parameter — fastCRW does — can route every call through a different upstream proxy URL without any process restart, which is essential for high-volume rotating residential pools.</dd>
+</dl>
+
+<script type="application/ld+json">
+{
+  "@context": "https://schema.org",
+  "@type": "FAQPage",
+  "mainEntity": [
+    {
+      "@type": "Question",
+      "name": "Which managed proxy providers work with self-hosted scrapers?",
+      "acceptedAnswer": {"@type":"Answer","text":"Any provider that exposes a standard HTTP or SOCKS5 proxy endpoint works — Bright Data, Oxylabs, IPRoyal, Smartproxy, NetNut, and most others. The scraper does not need a provider-specific SDK; the proxy URL with credentials is enough."}
+    },
+    {
+      "@type": "Question",
+      "name": "Does the proxy provider see the scraped page content?",
+      "acceptedAnswer": {"@type":"Answer","text":"The proxy provider sees the destination URL and the encrypted TLS traffic, just like any HTTP forward proxy. They can see request volume and target hostnames; they cannot read response bodies inside HTTPS without active TLS interception, which reputable providers do not do."}
+    },
+    {
+      "@type": "Question",
+      "name": "Can I rotate proxies per request without restarting the scraper?",
+      "acceptedAnswer": {"@type":"Answer","text":"Yes. A self-hosted scraper that accepts a per-request proxy parameter — fastCRW does — can route every call through a different upstream proxy URL without any process restart, which is essential for high-volume rotating residential pools."}
+    }
+  ]
+}
+</script>
+
+<p>← <a href="/">CRW docs home</a></p>
+</body>
+</html>

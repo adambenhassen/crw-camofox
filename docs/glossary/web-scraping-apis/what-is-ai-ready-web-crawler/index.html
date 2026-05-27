@@ -1,0 +1,59 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>What is an AI-ready web crawler? — fastCRW glossary</title>
+<meta name="description" content="An AI-ready web crawler outputs clean markdown, supports structured LLM extraction, exposes an MCP transport, and keeps latency tight for agent loops.">
+<link rel="canonical" href="https://docs.fastcrw.com/glossary/web-scraping-apis/what-is-ai-ready-web-crawler/">
+</head>
+<body>
+<h1>What is an AI-ready web crawler?</h1>
+
+<p><strong>Short answer:</strong> An AI-ready web crawler is a crawler whose output is shaped for LLM and agent consumption — clean markdown by default, optional structured JSON extraction via a schema or prompt, chunking-friendly metadata, an MCP transport for agent tool-use, and latency low enough that an agent loop does not stall waiting on a fetch.</p>
+
+<h2>What "AI-ready" actually means</h2>
+<p>Traditional crawlers (Scrapy, Heritrix, Common Crawl tooling) return raw HTML and let you write XPath or BeautifulSoup selectors. That works for fixed-schema scraping; it is the wrong shape for an LLM, which wants prose, headings, and lists — not <code>&lt;div class="content"&gt;</code>. An AI-ready crawler does the readability extraction, boilerplate removal, and Markdown conversion server-side so the agent receives a few kilobytes of clean text instead of a few hundred kilobytes of nav, footer, and ad markup.</p>
+
+<h2>The four traits that matter</h2>
+<p>First, <strong>clean output formats</strong>: markdown, plainText, and structured JSON, not raw HTML by default. Second, <strong>LLM extraction modes</strong>: a schema (JSON Schema) or a free-text prompt that the crawler resolves into typed JSON before returning. Third, <strong>MCP support</strong>: the Model Context Protocol exposes crawl/scrape/search as tools an agent can call directly. Fourth, <strong>low p50 latency</strong>: an agent loop with a 2-second median tool call feels different from one with a 200-ms median, even if both succeed.</p>
+
+<h2>How fastCRW does it</h2>
+<p>fastCRW returns markdown by default on every <a href="/api-reference/scrape/">/v1/scrape</a> call; structured extraction is exposed via <a href="/api-reference/extract/">/v1/extract</a> with either a <code>jsonSchema</code> or a natural-language <code>prompt</code> (BYOK: OpenAI, Anthropic, DeepSeek). A <a href="/mcp/">streamable MCP transport</a> at <code>/mcp</code> exposes scrape, crawl, map, and search as agent tools. p50 latency is 1914 ms on Firecrawl's public 1,000-URL dataset (<code>diagnose_3way.py</code>, 2026-05-08) — fastCRW carries the median speed win against Crawl4AI and Firecrawl in that head-to-head.</p>
+
+<h2>Frequently asked</h2>
+<dl>
+  <dt>Is an AI-ready crawler different from an LLM scraper?</dt>
+  <dd>The terms overlap. "AI-ready crawler" emphasises that the crawl traversal and the LLM-friendly output live in one tool; "LLM scraper" often refers to a single-page extractor without crawl traversal. A modern stack like fastCRW is both.</dd>
+  <dt>Why is markdown the right default output for AI?</dt>
+  <dd>Markdown preserves heading hierarchy and list structure while stripping boilerplate, which lines up exactly with how LLMs tokenize and reason about documents. Raw HTML wastes tokens on tags and attributes the model does not need.</dd>
+  <dt>Do I need an MCP server to use an AI-ready crawler from an agent?</dt>
+  <dd>No — a REST API works fine from any agent framework. MCP is convenient because it standardises tool-call schemas across Claude Desktop, Cursor, and other clients, but plain HTTP calls remain a fully supported integration path.</dd>
+</dl>
+
+<script type="application/ld+json">
+{
+  "@context": "https://schema.org",
+  "@type": "FAQPage",
+  "mainEntity": [
+    {
+      "@type": "Question",
+      "name": "Is an AI-ready crawler different from an LLM scraper?",
+      "acceptedAnswer": {"@type":"Answer","text":"The terms overlap. \"AI-ready crawler\" emphasises that the crawl traversal and the LLM-friendly output live in one tool; \"LLM scraper\" often refers to a single-page extractor without crawl traversal. A modern stack like fastCRW is both."}
+    },
+    {
+      "@type": "Question",
+      "name": "Why is markdown the right default output for AI?",
+      "acceptedAnswer": {"@type":"Answer","text":"Markdown preserves heading hierarchy and list structure while stripping boilerplate, which lines up exactly with how LLMs tokenize and reason about documents. Raw HTML wastes tokens on tags and attributes the model does not need."}
+    },
+    {
+      "@type": "Question",
+      "name": "Do I need an MCP server to use an AI-ready crawler from an agent?",
+      "acceptedAnswer": {"@type":"Answer","text":"No — a REST API works fine from any agent framework. MCP is convenient because it standardises tool-call schemas across Claude Desktop, Cursor, and other clients, but plain HTTP calls remain a fully supported integration path."}
+    }
+  ]
+}
+</script>
+
+<p>← <a href="/">CRW docs home</a></p>
+</body>
+</html>

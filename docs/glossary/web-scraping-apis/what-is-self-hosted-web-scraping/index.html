@@ -1,0 +1,59 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>What is self-hosted web scraping? — fastCRW glossary</title>
+<meta name="description" content="Self-hosted web scraping runs the scraper binary on your own infrastructure so proxy, browser, and extraction logic stay under your control.">
+<link rel="canonical" href="https://docs.fastcrw.com/glossary/web-scraping-apis/what-is-self-hosted-web-scraping/">
+</head>
+<body>
+<h1>What is self-hosted web scraping?</h1>
+
+<p><strong>Short answer:</strong> Self-hosted web scraping means running the scraper process on infrastructure you control — usually a single binary, container, or Docker Compose stack — instead of calling a vendor's hosted API. You own the proxy configuration, the browser fleet, the extraction logic, the rate limits, and every byte of fetched HTML.</p>
+
+<h2>How self-hosted differs from SaaS scraping</h2>
+<p>A SaaS scraper (Firecrawl Cloud, ScrapingBee, Apify) terminates the HTTP request inside the vendor's network. You receive markdown or JSON; the vendor sees the source URL, the response body, and your usage patterns. Self-hosted scraping inverts that boundary: your server makes the outbound fetch, your disk holds the cache, and only you see what was scraped. For regulated workloads (PII, healthcare, internal-only sources), legal teams typically require this posture.</p>
+
+<h2>What you take on when you self-host</h2>
+<p>Self-hosting trades vendor lock-in for operational surface. You become responsible for browser updates (Chromium, LightPanda), JS rendering stability, residential or datacenter proxy procurement, robots.txt compliance, retry budgets, and observability. Modern self-hosted stacks ship as a single static binary to keep that surface small — no Redis, no Node sidecar, no Postgres — so the only things to monitor are CPU, RAM, and outbound bandwidth.</p>
+
+<h2>How fastCRW does it</h2>
+<p>fastCRW ships a single Rust binary under AGPL-3.0 — roughly ~50 MB RAM idle (structural footprint per <code>crw-opencore/README.md</code>) — that exposes the same Firecrawl-compatible REST surface as our hosted API: <a href="/api-reference/scrape/">/v1/scrape</a>, <a href="/api-reference/crawl/">/v1/crawl</a>, <a href="/api-reference/map/">/v1/map</a>, <a href="/api-reference/search/">/v1/search</a>. No auth is required by default in self-hosted mode. See <a href="/self-hosting/">self-hosting</a> and <a href="/configuration/">configuration</a> for the full setup.</p>
+
+<h2>Frequently asked</h2>
+<dl>
+  <dt>Do I need Docker to self-host a scraper?</dt>
+  <dd>No. A well-designed self-hosted scraper ships as a single static binary you can run directly on Linux, macOS, or in a minimal container. Docker is convenient for orchestration but not a hard requirement.</dd>
+  <dt>Is self-hosted scraping free?</dt>
+  <dd>The software can be free under an open-source license such as AGPL-3.0, but you still pay for the server, outbound bandwidth, and any residential proxies you plug in. The vendor margin is what disappears, not the underlying infrastructure cost.</dd>
+  <dt>Can I use the same code against a self-hosted scraper and a hosted API?</dt>
+  <dd>Yes, when the self-hosted engine implements the same REST surface as the hosted vendor. fastCRW mirrors the Firecrawl REST shape, so client code only changes its base URL when switching between localhost and api.fastcrw.com.</dd>
+</dl>
+
+<script type="application/ld+json">
+{
+  "@context": "https://schema.org",
+  "@type": "FAQPage",
+  "mainEntity": [
+    {
+      "@type": "Question",
+      "name": "Do I need Docker to self-host a scraper?",
+      "acceptedAnswer": {"@type":"Answer","text":"No. A well-designed self-hosted scraper ships as a single static binary you can run directly on Linux, macOS, or in a minimal container. Docker is convenient for orchestration but not a hard requirement."}
+    },
+    {
+      "@type": "Question",
+      "name": "Is self-hosted scraping free?",
+      "acceptedAnswer": {"@type":"Answer","text":"The software can be free under an open-source license such as AGPL-3.0, but you still pay for the server, outbound bandwidth, and any residential proxies you plug in. The vendor margin is what disappears, not the underlying infrastructure cost."}
+    },
+    {
+      "@type": "Question",
+      "name": "Can I use the same code against a self-hosted scraper and a hosted API?",
+      "acceptedAnswer": {"@type":"Answer","text":"Yes, when the self-hosted engine implements the same REST surface as the hosted vendor. fastCRW mirrors the Firecrawl REST shape, so client code only changes its base URL when switching between localhost and api.fastcrw.com."}
+    }
+  ]
+}
+</script>
+
+<p>← <a href="/">CRW docs home</a></p>
+</body>
+</html>

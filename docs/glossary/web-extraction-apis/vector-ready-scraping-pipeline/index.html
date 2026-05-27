@@ -1,0 +1,46 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Vector-ready scraping pipeline — fastCRW glossary</title>
+<meta name="description" content="A vector-ready scraping pipeline outputs clean markdown chunks suitable for embedding. Stable URL to chunk to vector flow, with LangChain document loaders.">
+<link rel="canonical" href="https://docs.fastcrw.com/glossary/web-extraction-apis/vector-ready-scraping-pipeline/">
+</head>
+<body>
+<h1>Vector-ready scraping pipeline</h1>
+<p><strong>Short answer:</strong> A vector-ready scraping pipeline is one whose output can be embedded into a vector database with no intermediate cleaning step. The scraper returns clean markdown rather than raw HTML, preserves a stable source URL per chunk, and emits a structure that chunkers and document loaders can ingest directly.</p>
+
+<h2>What "vector-ready" means in practice</h2>
+<p>Embedding models work best on coherent prose with little markup noise. Raw HTML, with its navigation chrome, script tags, and styling attributes, blows out the context window and pollutes similarity scores. A vector-ready output strips those, keeps headings as section anchors, preserves code blocks and lists, and links every chunk back to its source URL so retrieval can cite where an answer came from. The four properties that matter: clean markdown, deterministic ordering, stable URLs, and per-chunk metadata (title, h1, lastmod).</p>
+
+<h2>The URL → chunk → embedding flow</h2>
+<p>A working RAG pipeline looks like this:</p>
+<ol>
+  <li><strong>Discover</strong> — map a domain to the set of URLs you care about (sitemap parse or BFS crawl).</li>
+  <li><strong>Scrape</strong> — fetch each URL and return clean markdown.</li>
+  <li><strong>Chunk</strong> — split markdown by heading or by token window (e.g. 800 tokens with 100 overlap).</li>
+  <li><strong>Embed</strong> — call your embedding model per chunk.</li>
+  <li><strong>Upsert</strong> — write <code>{id, vector, source_url, title, text}</code> to your vector store.</li>
+</ol>
+<p>The scraper is the bottleneck for quality. If it returns HTML, you spend engineering time writing readability heuristics; if it returns clean markdown, the rest of the pipeline is glue code.</p>
+
+<h2>How fastCRW does it</h2>
+<p>fastCRW returns markdown as the default <code>formats</code> value on <a href="/api-reference/scrape/">/v1/scrape</a>, with HTML, raw HTML, plain text, and links available as additional formats in the same response. The Rust-native engine runs at ~50 MB RAM idle, which matters when you're scraping at scale into a vector store on a single node. For framework integration, see <a href="/integrations/">/integrations</a> — fastCRW outputs are accepted by LangChain document loaders, LlamaIndex readers, and Haystack components without an adapter layer.</p>
+
+<h2>Frequently asked</h2>
+<dl>
+  <dt>Why markdown and not plain text?</dt><dd>Markdown preserves heading structure, code blocks, and lists, which are strong signals for chunk boundaries. Plain text loses that structure and forces the chunker to guess.</dd>
+  <dt>How big should each chunk be?</dt><dd>A common default is 800 tokens with 100-token overlap for prose. For code-heavy pages, smaller chunks (300-500 tokens) prevent semantically unrelated sections from being averaged together.</dd>
+  <dt>Should I store the raw HTML too?</dt><dd>Yes if you need to re-chunk later with different rules. Otherwise markdown plus the source URL is enough; you can re-fetch on demand.</dd>
+</dl>
+
+<script type="application/ld+json">
+{"@context":"https://schema.org","@type":"FAQPage","mainEntity":[
+  {"@type":"Question","name":"Why markdown and not plain text?","acceptedAnswer":{"@type":"Answer","text":"Markdown preserves heading structure, code blocks, and lists, which are strong signals for chunk boundaries. Plain text loses that structure and forces the chunker to guess."}},
+  {"@type":"Question","name":"How big should each chunk be?","acceptedAnswer":{"@type":"Answer","text":"A common default is 800 tokens with 100-token overlap for prose. For code-heavy pages, smaller chunks (300-500 tokens) prevent semantically unrelated sections from being averaged together."}},
+  {"@type":"Question","name":"Should I store the raw HTML too?","acceptedAnswer":{"@type":"Answer","text":"Yes if you need to re-chunk later with different rules. Otherwise markdown plus the source URL is enough; you can re-fetch on demand."}}
+]}
+</script>
+<p>← <a href="/">CRW docs home</a></p>
+</body>
+</html>

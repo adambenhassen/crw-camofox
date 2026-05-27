@@ -18,6 +18,24 @@
 - [POST /v1/crawl](https://docs.fastcrw.com/api-reference/crawl/) + GET /v1/crawl/{id}: Async multi-page crawl
 - [API reference index](https://docs.fastcrw.com/api-reference/): One-page chooser
 
+## Glossary
+
+- [What is self-hosted web scraping?](https://docs.fastcrw.com/glossary/web-scraping-apis/what-is-self-hosted-web-scraping/)
+- [When to use a scraping API vs building your own scraper](https://docs.fastcrw.com/glossary/web-scraping-apis/when-use-api-vs-building-own-scraper/)
+- [Self-hosted scraping with managed proxy rotation](https://docs.fastcrw.com/glossary/web-scraping-apis/self-hosted-scraping-with-managed-proxy-rotation/)
+- [What is an AI-ready web crawler?](https://docs.fastcrw.com/glossary/web-scraping-apis/what-is-ai-ready-web-crawler/)
+- [Scraping vs crawling: what's the difference?](https://docs.fastcrw.com/glossary/web-scraping-apis/scraping-vs-crawling-difference/)
+- [Firecrawl-compatible API explained](https://docs.fastcrw.com/glossary/web-scraping-apis/firecrawl-compatible-api-explained/)
+- [What does "Firecrawl-compatible" mean for migration?](https://docs.fastcrw.com/glossary/web-scraping-apis/what-does-firecrawl-compatible-mean-migration/)
+- [Self-hosted vs cloud scraper tradeoffs](https://docs.fastcrw.com/glossary/web-scraping-apis/self-hosted-vs-cloud-scraper-tradeoffs/)
+- [Scraping JavaScript-rendered pages](https://docs.fastcrw.com/glossary/web-scraping-apis/javascript-rendered-pages-scraping/)
+- [MCP server for web scraping](https://docs.fastcrw.com/glossary/web-scraping-apis/mcp-server-web-scraping/)
+- [REST API for web scraping](https://docs.fastcrw.com/glossary/web-scraping-apis/rest-api-for-web-scraping/)
+- [Best AI-driven data extraction systems for developers](https://docs.fastcrw.com/glossary/web-extraction-apis/best-ai-driven-data-extraction-systems-developers/)
+- [Structured extraction with LLMs](https://docs.fastcrw.com/glossary/web-extraction-apis/structured-extraction-with-llm/)
+- [Vector-ready scraping pipeline](https://docs.fastcrw.com/glossary/web-extraction-apis/vector-ready-scraping-pipeline/)
+- [LLM BYOK extraction explained](https://docs.fastcrw.com/glossary/web-extraction-apis/llm-byok-extraction-explained/)
+
 ## Get Started
 - [Introduction](https://raw.githubusercontent.com/us/crw/main/docs/docs/introduction.md): The fastest way to understand what CRW does and where to start
 - [Quick Start](https://raw.githubusercontent.com/us/crw/main/docs/docs/quick-start.md): Make your first successful request in under a minute

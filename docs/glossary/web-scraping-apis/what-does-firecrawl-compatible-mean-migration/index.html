@@ -1,0 +1,44 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>What does "Firecrawl-compatible" mean for migration? — fastCRW glossary</title>
+<meta name="description" content="Migrating off Firecrawl on a compatible API takes one change: swap the base URL. Endpoints, auth header, request body, and response wrapper stay the same.">
+<link rel="canonical" href="https://docs.fastcrw.com/glossary/web-scraping-apis/what-does-firecrawl-compatible-mean-migration/">
+</head>
+<body>
+<h1>What does "Firecrawl-compatible" mean for migration?</h1>
+<p><strong>Short answer:</strong> In migration terms, "Firecrawl-compatible" means you change exactly one thing in your code — the base URL — and everything else (endpoint paths, auth header name, request body keys, response wrapper shape) stays the same. A migration that would normally take days of client refactor becomes a one-line config change.</p>
+
+<h2>The one-line migration</h2>
+<p>Concretely, migrating from Firecrawl Cloud to fastCRW Cloud is:</p>
+<pre><code>- BASE_URL = "https://api.firecrawl.dev"
++ BASE_URL = "https://api.fastcrw.com"</code></pre>
+<p>The auth header name (<code>Authorization: Bearer ...</code>) does not change. The request body for <code>POST /v1/scrape</code>, <code>/v1/crawl</code>, <code>/v1/extract</code>, <code>/v1/map</code>, and <code>/v1/search</code> uses the same field names. The response is still wrapped in <code>{"success": true, "data": {...}}</code> so callers reading <code>response.data.markdown</code> or <code>response.data.links</code> need no changes.</p>
+
+<h2>What does change</h2>
+<ul>
+  <li><strong>API key:</strong> fastCRW issues its own keys — the header name and scheme are identical, but the secret value is new. Rotate via env var, not code.</li>
+  <li><strong>Optional self-hosting:</strong> migration unlocks an option Firecrawl users do not have — point the same client at <code>http://localhost:3000</code> running the AGPL-3.0 binary, with no auth required by default. Same endpoints, same request and response shapes.</li>
+  <li><strong>Extra response fields:</strong> responses include additive fields like <code>renderDecision</code> and <code>creditCost</code>. Existing clients ignore them; new clients can use them for cost telemetry.</li>
+</ul>
+
+<h2>How fastCRW does it</h2>
+<p>Every endpoint listed in the <a href="/compatibility/">compatibility matrix</a> ships under <code>/v1/</code> with the Firecrawl-shaped contract. Detailed per-endpoint request/response examples live under <a href="/api-reference/">the API reference</a>. The self-hosted binary is AGPL-3.0 and ~50 MB RAM idle, so the same code path works against a managed endpoint or a local one.</p>
+
+<h2>Frequently asked</h2>
+<dl>
+  <dt>Do I have to rewrite my Firecrawl SDK calls?</dt><dd>No. Change the base URL and keep the existing code. The SDK's request building and response parsing already match fastCRW's shape.</dd>
+  <dt>Will my crawl polling code keep working?</dt><dd>Yes. <code>POST /v1/crawl</code> returns a job id and <code>GET /v1/crawl/{id}</code> returns the same status fields and accumulated <code>data</code> entries, so existing poll loops continue to work without changes.</dd>
+  <dt>Can I run fastCRW and Firecrawl side by side during migration?</dt><dd>Yes. Because the contract is identical, you can route a percentage of traffic to each base URL and compare responses field by field before cutting over.</dd>
+</dl>
+<script type="application/ld+json">
+{"@context":"https://schema.org","@type":"FAQPage","mainEntity":[
+  {"@type":"Question","name":"Do I have to rewrite my Firecrawl SDK calls?","acceptedAnswer":{"@type":"Answer","text":"No. Change the base URL and keep the existing code. The SDK's request building and response parsing already match fastCRW's shape."}},
+  {"@type":"Question","name":"Will my crawl polling code keep working?","acceptedAnswer":{"@type":"Answer","text":"Yes. POST /v1/crawl returns a job id and GET /v1/crawl/{id} returns the same status fields and accumulated data entries, so existing poll loops continue to work without changes."}},
+  {"@type":"Question","name":"Can I run fastCRW and Firecrawl side by side during migration?","acceptedAnswer":{"@type":"Answer","text":"Yes. Because the contract is identical, you can route a percentage of traffic to each base URL and compare responses field by field before cutting over."}}
+]}
+</script>
+<p>← <a href="/">CRW docs home</a></p>
+</body>
+</html>

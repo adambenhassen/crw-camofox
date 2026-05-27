@@ -1,0 +1,38 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>LLM BYOK extraction explained — fastCRW glossary</title>
+<meta name="description" content="BYOK (Bring Your Own Key) extraction means the scraper uses your OpenAI, Anthropic, or other LLM API key. Own billing, own rate limits, own model choice.">
+<link rel="canonical" href="https://docs.fastcrw.com/glossary/web-extraction-apis/llm-byok-extraction-explained/">
+</head>
+<body>
+<h1>LLM BYOK extraction explained</h1>
+<p><strong>Short answer:</strong> BYOK ("Bring Your Own Key") extraction means the scraping service calls the LLM with your API key rather than its own. You keep the direct billing relationship with the model vendor, you control which model is used, and your rate limits are the vendor's limits — not a re-sold quota.</p>
+
+<h2>Why BYOK matters</h2>
+<p>When an extraction service bundles LLM usage into its credit system, three things go wrong at scale. First, you pay a markup on every token because the service is reselling the model. Second, you cannot choose your model — you get whatever the service decided to deploy. Third, your effective rate limit is whatever fraction of the service's pooled quota you happen to grab; large jobs throttle unpredictably. BYOK fixes all three: own billing, own rate limits, own model choice. It also makes spend observable in one place (your model vendor dashboard) and lets you negotiate enterprise rates directly.</p>
+
+<h2>Trade-offs</h2>
+<p>BYOK shifts operational responsibility back to the caller. You must rotate keys, monitor model-vendor outages, and set per-key spend caps yourself. For one-off prototypes a bundled-credit model is simpler; for production pipelines BYOK pays for itself within the first thousand calls.</p>
+
+<h2>How fastCRW does it</h2>
+<p>fastCRW's <a href="/api-reference/extract/">/v1/extract</a> endpoint accepts three BYOK fields in the request body: <code>llmApiKey</code> (your secret key), <code>llmProvider</code> (e.g. <code>openai</code>, <code>anthropic</code>, <code>groq</code>, <code>openrouter</code>), and <code>llmModel</code> (e.g. <code>gpt-4o-mini</code>, <code>claude-haiku-4-5</code>). The key never leaves the request path — it is used once to make the LLM call and is not persisted server-side. Supported providers include OpenAI, Anthropic, Groq, and OpenRouter (which itself fans out to Mistral, Cohere, Together, and others). Minimum 2 credits per extract call cover the orchestration; the LLM cost is billed to your provider account.</p>
+
+<h2>Frequently asked</h2>
+<dl>
+  <dt>Is my API key stored?</dt><dd>No. The key is used in-flight for the single extract call and is not persisted to disk or logs.</dd>
+  <dt>What if I do not provide a key?</dt><dd>Hosted fastCRW falls back to its server-configured provider key when one is set. Self-hosted instances require BYOK or a configured provider key — there is no implicit free tier.</dd>
+  <dt>Which provider should I pick?</dt><dd>For cheapest structured extraction at scale, OpenAI gpt-4o-mini or Groq Llama 3.1 8B work well. For complex nested schemas or long pages, larger models (Claude Sonnet, GPT-4.1) reduce retries enough to be cheaper end-to-end.</dd>
+</dl>
+
+<script type="application/ld+json">
+{"@context":"https://schema.org","@type":"FAQPage","mainEntity":[
+  {"@type":"Question","name":"Is my API key stored?","acceptedAnswer":{"@type":"Answer","text":"No. The key is used in-flight for the single extract call and is not persisted to disk or logs."}},
+  {"@type":"Question","name":"What if I do not provide a key?","acceptedAnswer":{"@type":"Answer","text":"Hosted fastCRW falls back to its server-configured provider key when one is set. Self-hosted instances require BYOK or a configured provider key — there is no implicit free tier."}},
+  {"@type":"Question","name":"Which provider should I pick?","acceptedAnswer":{"@type":"Answer","text":"For cheapest structured extraction at scale, OpenAI gpt-4o-mini or Groq Llama 3.1 8B work well. For complex nested schemas or long pages, larger models (Claude Sonnet, GPT-4.1) reduce retries enough to be cheaper end-to-end."}}
+]}
+</script>
+<p>← <a href="/">CRW docs home</a></p>
+</body>
+</html>

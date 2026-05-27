@@ -1,0 +1,45 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>What is an MCP server for web scraping? — fastCRW glossary</title>
+<meta name="description" content="An MCP scraping server exposes scrape, crawl, map, and extract as Model Context Protocol tools that Claude Desktop, Cursor, and other AI clients can call directly.">
+<link rel="canonical" href="https://docs.fastcrw.com/glossary/web-scraping-apis/mcp-server-web-scraping/">
+</head>
+<body>
+<h1>What is an MCP server for web scraping?</h1>
+<p><strong>Short answer:</strong> An MCP (Model Context Protocol) server for web scraping is a small process that exposes scrape, crawl, map, and extract as standardised tools an AI client can call. Instead of writing custom HTTP glue, clients like Claude Desktop and Cursor discover the tools, see their JSON schemas, and invoke them as if they were local functions.</p>
+
+<h2>What MCP actually is</h2>
+<p>The Model Context Protocol is an open spec (originated by Anthropic, now multi-vendor) that lets an AI host talk to external tools over a typed JSON-RPC channel — either local stdio or remote HTTP/SSE. The host gets a list of available tools with input schemas; the model picks one and the host invokes it. From the model's point of view the tool is a function with named arguments and a structured return value.</p>
+
+<h2>What a scraping MCP server exposes</h2>
+<p>A scraping-flavoured MCP server typically registers four to five tools, each backed by an underlying scraping API:</p>
+<ul>
+  <li><code>scrape</code> — fetch a single URL as markdown or HTML.</li>
+  <li><code>crawl</code> — start a multi-page job and stream results back.</li>
+  <li><code>map</code> — enumerate URLs on a domain.</li>
+  <li><code>extract</code> — pull structured fields out of one or many URLs using an LLM.</li>
+  <li><code>search</code> — web search with optional inline scrape.</li>
+</ul>
+<p>The model never sees the HTTP wire format. It sees a tool called <code>scrape</code> with arguments <code>{url, formats}</code> and gets back markdown directly.</p>
+
+<h2>How fastCRW does it</h2>
+<p>fastCRW ships <a href="/mcp/">crw-mcp</a> as an npm package. Add it to a client config (Claude Desktop's <code>claude_desktop_config.json</code>, Cursor's MCP settings, or any other host) and the five tools above appear without further wiring. The server talks to either the hosted API at <code>https://api.fastcrw.com</code> or a local self-hosted instance at <code>http://localhost:3000</code> via env var. See the <a href="/mcp-clients/">MCP clients page</a> for client-specific configuration snippets.</p>
+
+<h2>Frequently asked</h2>
+<dl>
+  <dt>Which AI clients can use an MCP scraping server?</dt><dd>Any MCP-aware host: Claude Desktop, Cursor, Cline, Continue, Zed, and a growing list of IDEs and agents. The protocol is client-agnostic so the same server works against all of them.</dd>
+  <dt>Do I need an API key for the MCP server?</dt><dd>Only when pointing at the hosted endpoint. Self-hosted fastCRW requires no auth by default, so a fully local setup needs no key at all.</dd>
+  <dt>Does MCP replace the REST API?</dt><dd>No — MCP wraps it. The REST endpoints stay the system of record; the MCP server is a thin protocol adapter so AI clients can call them without bespoke HTTP code.</dd>
+</dl>
+<script type="application/ld+json">
+{"@context":"https://schema.org","@type":"FAQPage","mainEntity":[
+  {"@type":"Question","name":"Which AI clients can use an MCP scraping server?","acceptedAnswer":{"@type":"Answer","text":"Any MCP-aware host: Claude Desktop, Cursor, Cline, Continue, Zed, and a growing list of IDEs and agents. The protocol is client-agnostic so the same server works against all of them."}},
+  {"@type":"Question","name":"Do I need an API key for the MCP server?","acceptedAnswer":{"@type":"Answer","text":"Only when pointing at the hosted endpoint. Self-hosted fastCRW requires no auth by default, so a fully local setup needs no key at all."}},
+  {"@type":"Question","name":"Does MCP replace the REST API?","acceptedAnswer":{"@type":"Answer","text":"No — MCP wraps it. The REST endpoints stay the system of record; the MCP server is a thin protocol adapter so AI clients can call them without bespoke HTTP code."}}
+]}
+</script>
+<p>← <a href="/">CRW docs home</a></p>
+</body>
+</html>

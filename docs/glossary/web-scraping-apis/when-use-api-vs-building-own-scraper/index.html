@@ -1,0 +1,59 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>When should you use a web scraping API vs building your own scraper? — fastCRW glossary</title>
+<meta name="description" content="Use a web scraping API when anti-bot, JS rendering, and scale dominate; build your own only when the target is a single static site under your control.">
+<link rel="canonical" href="https://docs.fastcrw.com/glossary/web-scraping-apis/when-use-api-vs-building-own-scraper/">
+</head>
+<body>
+<h1>When should you use a web scraping API vs building your own scraper?</h1>
+
+<p><strong>Short answer:</strong> Use a web scraping API when you need scale, JavaScript rendering, anti-bot rotation, or polite multi-site crawling — these problems compound and consume engineering quarters. Build your own scraper only when the target is a single static site you control, the volume is low, and the schema is stable.</p>
+
+<h2>What an API saves you</h2>
+<p>A production scraper has to solve four hard problems that look easy on day one and consume a full team by month six: residential/datacenter proxy rotation, headless browser orchestration (Chromium, Playwright, or a lighter engine), per-site rate limiting and politeness, and clean markdown extraction from arbitrary HTML. A web scraping API absorbs all four behind one endpoint. Time-to-first-scrape drops from weeks to minutes, and the maintenance burden — the part DIY teams underestimate — stays with the vendor or the open-source project.</p>
+
+<h2>When DIY actually makes sense</h2>
+<p>Building your own scraper is the right call when the target is a single static site with predictable HTML, you have legal permission, traffic is well below any rate limit, and you can absorb breakage when the site redesigns. A 50-line Python script with <code>httpx</code> and <code>selectolax</code> can run for years against an internal admin panel or a partner's documentation portal. The math changes the moment you add a second site, a JavaScript-rendered page, or a hostile WAF.</p>
+
+<h2>How fastCRW does it</h2>
+<p>fastCRW is the scraping API for teams that want the API tradeoff without the SaaS lock-in. The same Rust binary powers our hosted endpoint (<a href="/api-reference/scrape/">/v1/scrape</a>) and the self-hosted AGPL-3.0 release, so you can prototype on the cloud and migrate to your own infra without rewriting client code. Reproducible 63.74% truth-recall on Firecrawl's public 1,000-URL dataset (<code>diagnose_3way.py</code>, 2026-05-08). See the full <a href="/api-reference/">REST surface</a>.</p>
+
+<h2>Frequently asked</h2>
+<dl>
+  <dt>How long does it take to build a production scraper from scratch?</dt>
+  <dd>A single-site MVP takes a weekend. A multi-site scraper with JS rendering, proxy rotation, retries, and clean markdown output typically takes one engineer three to six months to reach the quality of an off-the-shelf scraping API, plus ongoing maintenance as targets change.</dd>
+  <dt>Is a scraping API always more expensive than DIY?</dt>
+  <dd>No. Once you include engineer time, proxy subscriptions, browser hosting, and the dropped requests during outages, DIY usually loses on total cost above a few thousand pages per day. Below that volume, DIY can be cheaper, especially against cooperative sites.</dd>
+  <dt>Can I mix the two approaches?</dt>
+  <dd>Yes — many teams use a scraping API for the hard targets (JS-heavy, anti-bot, residential-only) and keep a small in-house script for one or two friendly sources. Routing by hostname inside a queue gives you both economics.</dd>
+</dl>
+
+<script type="application/ld+json">
+{
+  "@context": "https://schema.org",
+  "@type": "FAQPage",
+  "mainEntity": [
+    {
+      "@type": "Question",
+      "name": "How long does it take to build a production scraper from scratch?",
+      "acceptedAnswer": {"@type":"Answer","text":"A single-site MVP takes a weekend. A multi-site scraper with JS rendering, proxy rotation, retries, and clean markdown output typically takes one engineer three to six months to reach the quality of an off-the-shelf scraping API, plus ongoing maintenance as targets change."}
+    },
+    {
+      "@type": "Question",
+      "name": "Is a scraping API always more expensive than DIY?",
+      "acceptedAnswer": {"@type":"Answer","text":"No. Once you include engineer time, proxy subscriptions, browser hosting, and the dropped requests during outages, DIY usually loses on total cost above a few thousand pages per day. Below that volume, DIY can be cheaper, especially against cooperative sites."}
+    },
+    {
+      "@type": "Question",
+      "name": "Can I mix the two approaches?",
+      "acceptedAnswer": {"@type":"Answer","text":"Yes — many teams use a scraping API for the hard targets (JS-heavy, anti-bot, residential-only) and keep a small in-house script for one or two friendly sources. Routing by hostname inside a queue gives you both economics."}
+    }
+  ]
+}
+</script>
+
+<p>← <a href="/">CRW docs home</a></p>
+</body>
+</html>

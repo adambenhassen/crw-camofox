@@ -1,0 +1,45 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>How do you scrape JavaScript-rendered pages? — fastCRW glossary</title>
+<meta name="description" content="JavaScript-rendered pages return empty HTML to plain HTTP scrapers. You need a headless browser that executes scripts, waits for content, then snapshots the DOM.">
+<link rel="canonical" href="https://docs.fastcrw.com/glossary/web-scraping-apis/javascript-rendered-pages-scraping/">
+</head>
+<body>
+<h1>How do you scrape JavaScript-rendered pages?</h1>
+<p><strong>Short answer:</strong> JavaScript-rendered pages send an almost-empty HTML shell that the browser fills in by executing scripts and fetching JSON. A plain HTTP scraper sees the shell and gives up. To scrape the real content you need a headless browser that runs the scripts, waits for the DOM to settle, then serialises the final HTML.</p>
+
+<h2>Why plain HTTP scrapers fail</h2>
+<p>Single-page applications (React, Vue, Svelte, Next.js client routes) ship a minimal HTML document — often just a root div and a bundle script. The visible text only appears after the JavaScript runs in a browser. A request library like <code>curl</code> or Python <code>requests</code> never executes that script, so it captures the empty shell. The same failure mode happens with infinite-scroll listings, modal-loaded detail panes, and client-side filters.</p>
+
+<h2>The headless-browser approach</h2>
+<p>A correct JS-aware scraper does this:</p>
+<ol>
+  <li>Launches a headless browser (Chromium, Firefox, or a leaner alternative).</li>
+  <li>Navigates to the URL and waits for either <code>networkidle</code>, a DOM selector, or a fixed millisecond budget.</li>
+  <li>Optionally executes user-provided JavaScript (click "load more", scroll, dismiss a cookie banner).</li>
+  <li>Serialises <code>document.documentElement.outerHTML</code> as the rendered HTML.</li>
+  <li>Feeds the rendered HTML through a Markdown converter and link extractor.</li>
+</ol>
+<p>The cost is RAM and CPU per page. A full Chromium instance is typically several hundred MB resident — this is why headless-browser-first scrapers are expensive at scale.</p>
+
+<h2>How fastCRW does it</h2>
+<p>fastCRW auto-detects whether a page needs a browser. Static pages go through the HTTP fast path; pages that require JavaScript route to a headless renderer. Instead of full Chromium, the default browser path is <a href="/js-rendering/">LightPanda</a>, a Rust-native headless browser, keeping the whole binary at ~50 MB RAM idle. Full Chromium is still available when a page needs it. Set <code>"renderer": "lightpanda"</code> or <code>"chromium"</code> on <code>POST /v1/scrape</code> — see <a href="/api-reference/scrape/">the scrape endpoint reference</a> for the request body. <code>waitFor</code> takes a millisecond budget for browser renderers.</p>
+
+<h2>Frequently asked</h2>
+<dl>
+  <dt>How do I tell if a page is JavaScript-rendered?</dt><dd>Curl it and inspect the body. If the text you see in the browser is missing from <code>curl -s URL | grep</code>, the page is client-rendered and needs a headless browser.</dd>
+  <dt>Why not always use a headless browser?</dt><dd>Browser rendering is roughly an order of magnitude more expensive in CPU and RAM than plain HTTP. Auto-detecting per page keeps cost down — over half of public pages still render server-side and do not need a browser at all.</dd>
+  <dt>What does waitFor actually wait for?</dt><dd>It is a millisecond budget after navigation, applied only to browser renderers. Use it when content arrives via a delayed XHR that you cannot bind to a specific selector.</dd>
+</dl>
+<script type="application/ld+json">
+{"@context":"https://schema.org","@type":"FAQPage","mainEntity":[
+  {"@type":"Question","name":"How do I tell if a page is JavaScript-rendered?","acceptedAnswer":{"@type":"Answer","text":"Curl it and inspect the body. If the text you see in the browser is missing from curl -s URL | grep, the page is client-rendered and needs a headless browser."}},
+  {"@type":"Question","name":"Why not always use a headless browser?","acceptedAnswer":{"@type":"Answer","text":"Browser rendering is roughly an order of magnitude more expensive in CPU and RAM than plain HTTP. Auto-detecting per page keeps cost down — over half of public pages still render server-side and do not need a browser at all."}},
+  {"@type":"Question","name":"What does waitFor actually wait for?","acceptedAnswer":{"@type":"Answer","text":"It is a millisecond budget after navigation, applied only to browser renderers. Use it when content arrives via a delayed XHR that you cannot bind to a specific selector."}}
+]}
+</script>
+<p>← <a href="/">CRW docs home</a></p>
+</body>
+</html>
