@@ -1,0 +1,82 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>fastCRW Crawl URL API</title>
+<meta name="description" content="fastCRW crawl endpoint: start a multi-page crawl from a seed URL and poll for status. Firecrawl-compatible POST /v1/crawl + GET /v1/crawl/{id}.">
+<link rel="canonical" href="https://docs.fastcrw.com/api-reference/crawl/">
+<meta http-equiv="refresh" content="0; url=/api-reference/crawl/">
+</head>
+<body>
+<h1>fastCRW Crawl URL API</h1>
+<p>Hosted: <code>https://api.fastcrw.com</code> &middot; Self-hosted: <code>http://localhost:3000</code></p>
+<p><strong>Auth (hosted only):</strong> <code>Authorization: Bearer $CRW_API_KEY</code></p>
+<p><em>Self-hosted: no auth required by default.</em></p>
+
+<h2>POST /v1/crawl</h2>
+<p>Start a multi-page crawl from a seed URL. Returns a job ID; poll for status.</p>
+<p>Request body:</p>
+<pre><code>{
+  "url": "https://example.com",
+  "limit": 50,
+  "scrapeOptions": { "formats": ["markdown"] }
+}</code></pre>
+
+<p>curl:</p>
+<pre><code>curl -X POST https://api.fastcrw.com/v1/crawl \
+  -H "Authorization: Bearer $CRW_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{"url":"https://example.com","limit":50,"scrapeOptions":{"formats":["markdown"]}}'</code></pre>
+
+<p>Response shape: <code>{"success": true, "id": "...", "url": ".../v1/crawl/{id}"}</code></p>
+
+<h2>GET /v1/crawl/{id}</h2>
+<p>Poll for crawl progress and results.</p>
+<pre><code>curl https://api.fastcrw.com/v1/crawl/$JOB_ID \
+  -H "Authorization: Bearer $CRW_API_KEY"</code></pre>
+
+<p>Python (stdlib):</p>
+<pre><code>#!/usr/bin/env python3
+import json, os, time, urllib.request
+
+def post(url, body):
+    req = urllib.request.Request(
+        url,
+        data=json.dumps(body).encode(),
+        headers={"Content-Type": "application/json",
+                 "Authorization": f"Bearer {os.environ['CRW_API_KEY']}"},
+        method="POST",
+    )
+    with urllib.request.urlopen(req) as r:
+        return json.loads(r.read())
+
+def get(url):
+    req = urllib.request.Request(
+        url, headers={"Authorization": f"Bearer {os.environ['CRW_API_KEY']}"}
+    )
+    with urllib.request.urlopen(req) as r:
+        return json.loads(r.read())
+
+start = post("https://api.fastcrw.com/v1/crawl",
+             {"url": "https://example.com", "limit": 50,
+              "scrapeOptions": {"formats": ["markdown"]}})
+job_id = start["id"]
+
+while True:
+    s = get(f"https://api.fastcrw.com/v1/crawl/{job_id}")
+    if s.get("status") in ("completed", "failed"):
+        break
+    time.sleep(2)
+print(s["data"][0]["markdown"][:500])
+# Run with: python3 crawl.py</code></pre>
+
+<p>Related endpoints:
+<a href="/api-reference/scrape/">scrape</a> for single-page,
+<a href="/api-reference/map/">map</a> for URL discovery,
+<a href="/api-reference/extract/">extract</a> for structured JSON,
+<a href="/api-reference/search/">search</a> for web search.</p>
+
+<p>&rarr; Canonical page: <a href="/api-reference/crawl/">/api-reference/crawl</a></p>
+<noscript><p>Redirecting to <a href="/api-reference/crawl/">/api-reference/crawl</a></p></noscript>
+</body>
+</html>
