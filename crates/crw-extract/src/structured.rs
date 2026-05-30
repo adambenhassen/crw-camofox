@@ -28,7 +28,7 @@ pub struct StructuredExtractResult {
 /// UTF-8-safe truncation: clip at `max_bytes` but walk back to the nearest
 /// char boundary so we never split a multibyte sequence. Returns
 /// `(truncated_slice, was_truncated)`.
-fn truncate_md(s: &str, max_bytes: usize) -> (&str, bool) {
+pub(crate) fn truncate_md(s: &str, max_bytes: usize) -> (&str, bool) {
     if s.len() <= max_bytes {
         return (s, false);
     }
@@ -51,7 +51,10 @@ fn shared_client() -> &'static reqwest::Client {
 }
 
 /// Validate a JSON value against a JSON schema.
-fn validate_against_schema(value: &serde_json::Value, schema: &serde_json::Value) -> CrwResult<()> {
+pub(crate) fn validate_against_schema(
+    value: &serde_json::Value,
+    schema: &serde_json::Value,
+) -> CrwResult<()> {
     let validator = jsonschema::validator_for(schema)
         .map_err(|e| CrwError::ExtractionError(format!("Invalid JSON schema: {e}")))?;
     let errors: Vec<String> = validator
@@ -107,9 +110,32 @@ pub async fn extract_structured_with_usage(
     let max_bytes = max_input_bytes.unwrap_or(DEFAULT_MAX_INPUT_BYTES);
     let (clipped, truncated) = truncate_md(markdown, max_bytes);
 
+    let prompt = format!(
+        "Extract structured data from the following content according to the JSON schema. \
+         Call the extract_data tool with the extracted data.\n\n## Content\n{clipped}"
+    );
+
     let (value, mut usage) = match llm.provider.as_str() {
-        "anthropic" => call_anthropic(clipped, schema, llm).await,
-        "openai" | "deepseek" | "openai-compatible" => call_openai(clipped, schema, llm).await,
+        "anthropic" => {
+            call_anthropic(
+                &prompt,
+                schema,
+                llm,
+                "extract_data",
+                "Extract structured data from the content",
+            )
+            .await
+        }
+        "openai" | "deepseek" | "openai-compatible" => {
+            call_openai(
+                &prompt,
+                schema,
+                llm,
+                "extract_data",
+                "Extract structured data from the content",
+            )
+            .await
+        }
         other => Err(CrwError::ExtractionError(format!(
             "Unsupported LLM provider: {other}. Use 'anthropic', 'openai', 'deepseek', or 'openai-compatible'."
         ))),
@@ -185,10 +211,15 @@ enum AnthropicContentBlock {
     },
 }
 
-async fn call_anthropic(
-    markdown: &str,
+/// Call Anthropic with a tool-use forcing the given `schema`. `prompt` is the
+/// full user message; `tool_name`/`tool_desc` name the forced tool. Shared by
+/// structured extraction and the change-tracking judge.
+pub(crate) async fn call_anthropic(
+    prompt: &str,
     schema: &serde_json::Value,
     llm: &LlmConfig,
+    tool_name: &str,
+    tool_desc: &str,
 ) -> CrwResult<(serde_json::Value, Option<LlmUsage>)> {
     let base_url = llm
         .base_url
@@ -197,21 +228,16 @@ async fn call_anthropic(
 
     let url = format!("{base_url}/v1/messages");
 
-    let prompt = format!(
-        "Extract structured data from the following content according to the JSON schema. \
-         Call the extract_data tool with the extracted data.\n\n## Content\n{markdown}"
-    );
-
     let body = AnthropicRequest {
         model: llm.model.clone(),
         max_tokens: llm.max_tokens,
         messages: vec![Message {
             role: "user".into(),
-            content: prompt,
+            content: prompt.to_string(),
         }],
         tools: Some(vec![AnthropicTool {
-            name: "extract_data".into(),
-            description: "Extract structured data from the content".into(),
+            name: tool_name.into(),
+            description: tool_desc.into(),
             input_schema: schema.clone(),
         }]),
     };
@@ -376,10 +402,15 @@ struct OpenAiFunctionCall {
     arguments: String,
 }
 
-async fn call_openai(
-    markdown: &str,
+/// Call an OpenAI-compatible provider with a function-call forcing the given
+/// `schema`. `prompt` is the full user message; `tool_name`/`tool_desc` name
+/// the forced function. Shared by structured extraction and the judge.
+pub(crate) async fn call_openai(
+    prompt: &str,
     schema: &serde_json::Value,
     llm: &LlmConfig,
+    tool_name: &str,
+    tool_desc: &str,
 ) -> CrwResult<(serde_json::Value, Option<LlmUsage>)> {
     let default_base = match llm.provider.as_str() {
         "deepseek" => "https://api.deepseek.com",
@@ -389,23 +420,18 @@ async fn call_openai(
 
     let url = format!("{base_url}/v1/chat/completions");
 
-    let prompt = format!(
-        "Extract structured data from the following content according to the provided schema. \
-         Call the extract_data function with the extracted data.\n\n## Content\n{markdown}"
-    );
-
     let body = OpenAiRequest {
         model: llm.model.clone(),
         max_tokens: llm.max_tokens,
         messages: vec![Message {
             role: "user".into(),
-            content: prompt,
+            content: prompt.to_string(),
         }],
         tools: Some(vec![OpenAiToolDef {
             r#type: "function".into(),
             function: OpenAiFunctionDef {
-                name: "extract_data".into(),
-                description: "Extract structured data from the content".into(),
+                name: tool_name.into(),
+                description: tool_desc.into(),
                 parameters: schema.clone(),
             },
         }]),

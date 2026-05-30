@@ -43,6 +43,10 @@ pub struct LlmCapabilities {
 #[serde(rename_all = "camelCase")]
 pub struct FormatCapabilities {
     pub supported: Vec<&'static str>,
+    /// Change-tracking diff modes this instance supports. Empty when the
+    /// `changeTracking` format is unavailable. The SaaS capability-gate checks
+    /// `supported` contains `"changeTracking"` before emitting monitor scrapes.
+    pub change_tracking_modes: Vec<&'static str>,
 }
 
 #[derive(Debug, Serialize)]
@@ -78,7 +82,9 @@ pub async fn capabilities(State(state): State<AppState>) -> Json<Capabilities> {
                 "links",
                 "json",
                 "summary",
+                "changeTracking",
             ],
+            change_tracking_modes: vec!["gitDiff", "json"],
         },
         search: SearchCapabilities {
             answer: true,

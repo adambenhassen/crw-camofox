@@ -2,8 +2,8 @@ use crw_core::Deadline;
 use crw_core::config::{BUILTIN_UA_POOL, ExtractionConfig, LlmConfig};
 use crw_core::error::CrwResult;
 use crw_core::types::{
-    FetchResult, OutputFormat, ScrapeData, ScrapeRequest, resolve_pinned_renderer,
-    resolve_render_js,
+    ChangeTrackingMode, FetchResult, OutputFormat, ScrapeData, ScrapeRequest,
+    resolve_pinned_renderer, resolve_render_js,
 };
 use crw_renderer::FallbackRenderer;
 use crw_renderer::http_only::HttpFetcher;
@@ -499,7 +499,166 @@ async fn scrape_url_inner(
         data.debug_extraction = Some(extraction);
     }
 
+    // Surface the fetched content type so change-tracking (here and on the
+    // crawl path) can hash binary/non-text content rather than diff it.
+    data.content_type = fetch_result.content_type.clone();
+
+    // ── Change tracking (monitor) ──────────────────────────────────────────
+    // Activated by the `"changeTracking"` format string; options ride on the
+    // sibling `change_tracking` field. The diff is computed against the
+    // caller-supplied `previous` snapshot — opencore stores nothing. The LLM
+    // judge is injected by the M2 orchestration layer, not here.
+    if req.formats.contains(&OutputFormat::ChangeTracking) {
+        let Some(ct_opts) = &req.change_tracking else {
+            return Err(crw_core::error::CrwError::InvalidRequest(
+                "formats includes 'changeTracking' but no 'changeTracking' options were provided."
+                    .into(),
+            ));
+        };
+        let wants_json = ct_opts.modes.contains(&ChangeTrackingMode::Json);
+
+        // For json / mixed mode, extract the tracked fields using the
+        // changeTracking schema (independent of the top-level `json` format).
+        let mut current_json: Option<serde_json::Value> = None;
+        if wants_json {
+            match (ct_opts.schema.as_ref(), effective_llm) {
+                (Some(schema), Some(llm)) => {
+                    let md = data.markdown.as_deref().unwrap_or("");
+                    match crw_extract::structured::extract_structured_with_usage(
+                        md, schema, llm, None,
+                    )
+                    .await
+                    {
+                        Ok(result) => {
+                            current_json = Some(result.value);
+                            if data.llm_usage.is_none() {
+                                data.llm_usage = result.usage;
+                            }
+                        }
+                        Err(e) => return Err(e),
+                    }
+                }
+                (None, _) => {
+                    return Err(crw_core::error::CrwError::InvalidRequest(
+                        "changeTracking json mode requires a 'schema' describing the fields to track.".into(),
+                    ));
+                }
+                (Some(_), None) => {
+                    return Err(crw_core::error::CrwError::ExtractionError(
+                        "changeTracking json mode requires an LLM config. Set [extraction.llm] or pass 'llmApiKey'.".into(),
+                    ));
+                }
+            }
+        }
+
+        let md = data.markdown.as_deref().unwrap_or("");
+        let started = std::time::Instant::now();
+        let mut result = crw_diff::compute_change_tracking(
+            ct_opts,
+            md,
+            current_json.as_ref(),
+            data.content_type.as_deref(),
+        );
+
+        // Observability: diff duration + retained snapshot size, by mode.
+        let mode = change_tracking_mode_label(ct_opts, data.content_type.as_deref());
+        let m = crw_core::metrics::metrics();
+        m.change_tracking_duration_seconds
+            .with_label_values(&[mode])
+            .observe(started.elapsed().as_secs_f64());
+        if let Some(snap) = &result.snapshot {
+            let bytes = snap.markdown.as_ref().map(|s| s.len()).unwrap_or(0)
+                + snap.json.as_ref().map(|j| j.to_string().len()).unwrap_or(0);
+            m.change_tracking_snapshot_bytes
+                .with_label_values(&[mode])
+                .observe(bytes as f64);
+        }
+
+        // ── Meaningful-change judge (M2) ──────────────────────────────────
+        // Runs only on a changed page that produced a diff (excludes binary
+        // and first-observation pages), when a goal is set and judging is
+        // enabled. Judge failure never fails the scrape — it degrades to no
+        // judgment plus a warning. opencore does no credit math; the SaaS
+        // bills a flat +1 credit per judged changed page.
+        if result.status == crw_core::types::ChangeStatus::Changed
+            && result.diff.is_some()
+            && req.judge_enabled == Some(true)
+            && let Some(goal) = req.goal.as_deref().map(str::trim).filter(|g| !g.is_empty())
+        {
+            let has_json = ct_opts.modes.contains(&ChangeTrackingMode::Json);
+            let diff_text = result.diff.as_ref().and_then(|d| d.text.as_deref());
+            // Only the per-field json map (json/mixed) is a useful judge input;
+            // the gitDiff-only AST under diff.json is not field-level changes.
+            let json_diff = if has_json {
+                result.diff.as_ref().and_then(|d| d.json.as_ref())
+            } else {
+                None
+            };
+            match effective_llm {
+                Some(llm) => {
+                    match crw_extract::judge::judge_change(goal, diff_text, json_diff, llm, None)
+                        .await
+                    {
+                        Ok(judgment) => {
+                            m.judge_calls_total.with_label_values(&["ok"]).inc();
+                            if let Some(u) = &judgment.llm_usage {
+                                m.judge_tokens_total
+                                    .with_label_values(&["input"])
+                                    .inc_by(u.input_tokens as u64);
+                                m.judge_tokens_total
+                                    .with_label_values(&["output"])
+                                    .inc_by(u.output_tokens as u64);
+                            }
+                            result.judgment = Some(judgment);
+                        }
+                        Err(e) => {
+                            m.judge_calls_total.with_label_values(&["error"]).inc();
+                            tracing::warn!("change-tracking judge failed: {e}");
+                            data.warnings.push(format!("judge failed: {e}"));
+                        }
+                    }
+                }
+                None => {
+                    m.judge_calls_total.with_label_values(&["skipped"]).inc();
+                    data.warnings
+                        .push("judge skipped: no LLM configured".into());
+                }
+            }
+        }
+
+        data.change_tracking = Some(result);
+    }
+
     Ok(data)
+}
+
+/// Metric label for a change-tracking computation: `binary` when the content
+/// type is non-text, else `mixed` / `json` / `gitDiff` per the active modes.
+fn change_tracking_mode_label(
+    opts: &crw_core::types::ChangeTrackingOptions,
+    content_type: Option<&str>,
+) -> &'static str {
+    let is_text = content_type.is_none_or(|ct| {
+        let ct = ct.to_ascii_lowercase();
+        ct.starts_with("text/")
+            || ct.contains("json")
+            || ct.contains("xml")
+            || ct.contains("html")
+            || ct.contains("markdown")
+            || ct.contains("javascript")
+            || ct.contains("csv")
+            || ct.contains("yaml")
+    });
+    if !is_text {
+        return "binary";
+    }
+    let has_git = opts.modes.is_empty() || opts.modes.contains(&ChangeTrackingMode::GitDiff);
+    let has_json = opts.modes.contains(&ChangeTrackingMode::Json);
+    match (has_git, has_json) {
+        (true, true) => "mixed",
+        (false, true) => "json",
+        _ => "gitDiff",
+    }
 }
 
 /// Decide whether `final_url` represents a material redirect from `requested`.

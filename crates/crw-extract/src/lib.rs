@@ -17,6 +17,7 @@ pub mod clean;
 pub mod dom_features;
 pub mod dom_util;
 pub mod filter;
+pub mod judge;
 pub mod markdown;
 pub mod plaintext;
 pub mod quality;
@@ -805,6 +806,10 @@ pub fn extract(opts: ExtractOptions<'_>) -> CrwResult<ScrapeData> {
             elapsed_ms,
         },
         debug_extraction: None,
+        // Populated post-extract by the caller (single.rs / crawl.rs) from
+        // FetchResult.content_type; change_tracking is computed there too.
+        content_type: None,
+        change_tracking: None,
     })
 }
 

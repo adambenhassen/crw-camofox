@@ -581,7 +581,10 @@ async fn enrich_with_scrape(
             Ok(u) => u,
             Err(_) => continue,
         };
-        if crw_core::url_safety::validate_safe_url(&parsed).is_err() {
+        if crw_core::url_safety::validate_safe_url_resolved(&parsed)
+            .await
+            .is_err()
+        {
             continue;
         }
         jobs.push((idx, r.url.clone()));
@@ -644,6 +647,9 @@ async fn enrich_with_scrape(
                 renderer: None,
                 deadline_ms: Some(deadline_ms),
                 debug: None,
+                change_tracking: None,
+                goal: None,
+                judge_enabled: None,
             };
             let deadline = Deadline::from_request_ms(deadline_ms);
             let result = scrape_url(

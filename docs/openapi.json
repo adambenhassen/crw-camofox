@@ -31,7 +31,8 @@
     { "name": "scrape",  "description": "Single-URL content extraction" },
     { "name": "crawl",   "description": "Async multi-page crawl jobs" },
     { "name": "map",     "description": "URL discovery without full scraping" },
-    { "name": "extract", "description": "Structured JSON extraction via scrape + jsonOptions" }
+    { "name": "extract", "description": "Structured JSON extraction via scrape + jsonOptions" },
+    { "name": "change-tracking", "description": "Stateless diff of a scrape against a caller-supplied previous snapshot (monitor primitive)" }
   ],
   "paths": {
     "/v1/search": {
@@ -181,6 +182,65 @@
         }
       }
     },
+    "/v1/change-tracking/diff": {
+      "post": {
+        "tags": ["change-tracking"],
+        "summary": "Diff current scrape content against a previous snapshot",
+        "description": "Stateless: opencore stores nothing — the caller supplies the `previous` snapshot. Accepts a single body or a `batch` array (presence of `batch` selects batch mode). The crawl-path workhorse for monitors.",
+        "operationId": "changeTrackingDiff",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": { "$ref": "#/components/schemas/ChangeTrackingDiffRequest" },
+              "examples": {
+                "single_gitdiff": {
+                  "summary": "Single page, markdown git-diff",
+                  "value": {
+                    "modes": ["gitDiff"],
+                    "previous": { "markdown": "Starter $19", "contentHash": "abc" },
+                    "current": { "markdown": "Starter $24" }
+                  }
+                },
+                "batch_json": {
+                  "summary": "Batch, json per-field mode",
+                  "value": {
+                    "modes": ["json"],
+                    "batch": [
+                      { "url": "https://example.com/pricing", "previous": { "json": { "price": "$19" }, "contentHash": "abc" }, "current": { "json": { "price": "$24" } } }
+                    ]
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Diff result (object for single, array for batch) wrapped in the standard envelope",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": ["success", "data"],
+                  "properties": {
+                    "success": { "type": "boolean" },
+                    "data": {
+                      "oneOf": [
+                        { "$ref": "#/components/schemas/ChangeTrackingResult" },
+                        { "type": "array", "items": { "$ref": "#/components/schemas/ChangeTrackingResult" } }
+                      ]
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "400": { "$ref": "#/components/responses/BadRequest" },
+          "401": { "$ref": "#/components/responses/Unauthorized" }
+        }
+      }
+    },
     "/v1/extract": {
       "post": {
         "tags": ["extract"],
@@ -264,9 +324,12 @@
         "required": ["url"],
         "properties": {
           "url":             { "type": "string", "format": "uri" },
-          "formats":         { "type": "array", "items": { "type": "string", "enum": ["markdown", "html", "rawHtml", "plainText", "links", "json"] }, "default": ["markdown"] },
+          "formats":         { "type": "array", "items": { "type": "string", "enum": ["markdown", "html", "rawHtml", "plainText", "links", "json", "summary", "changeTracking"] }, "default": ["markdown"] },
           "onlyMainContent": { "type": "boolean", "default": true },
-          "jsonOptions":     { "$ref": "#/components/schemas/JsonOptions" }
+          "jsonOptions":     { "$ref": "#/components/schemas/JsonOptions" },
+          "changeTracking":  { "$ref": "#/components/schemas/ChangeTrackingOptions", "description": "Activated when formats includes 'changeTracking'. The format entry is the plain string; options ride on this sibling field." },
+          "goal":            { "type": "string", "maxLength": 2048, "description": "Plain-language monitor goal for the meaningful-change judge" },
+          "judgeEnabled":    { "type": "boolean", "description": "Run the LLM meaningful-change judge on a changed page (requires goal)" }
         }
       },
       "ScrapeResponse": {
@@ -382,6 +445,95 @@
           "description": { "type": "string" },
           "sourceURL":   { "type": "string", "format": "uri" },
           "statusCode":  { "type": "integer" }
+        }
+      },
+      "ChangeTrackingOptions": {
+        "type": "object",
+        "properties": {
+          "modes":   { "type": "array", "items": { "type": "string", "enum": ["gitDiff", "json"] }, "description": "Diff surfaces. gitDiff = markdown unified diff + AST; json = per-field diff; both = mixed." },
+          "schema":  { "type": "object", "additionalProperties": true, "description": "JSON schema of tracked fields (json/mixed mode)" },
+          "prompt":  { "type": "string" },
+          "previous": { "$ref": "#/components/schemas/ChangeTrackingSnapshot" },
+          "tag":     { "type": "string", "description": "Opaque caller tag echoed on the result" },
+          "contentType": { "type": "string", "description": "MIME type; non-text content is hashed, not diffed" }
+        }
+      },
+      "ChangeTrackingSnapshot": {
+        "type": "object",
+        "properties": {
+          "markdown":    { "type": "string", "description": "Present for gitDiff/mixed mode" },
+          "json":        { "type": "object", "additionalProperties": true, "description": "Present for json/mixed mode" },
+          "contentHash": { "type": "string", "description": "Mode-aware hash; persist + supply on the next check" },
+          "capturedAt":  { "type": "string", "description": "Caller-stamped capture time, echoed untouched" }
+        }
+      },
+      "ChangeDiff": {
+        "type": "object",
+        "properties": {
+          "text": { "type": "string", "description": "Unified markdown diff (gitDiff/mixed)" },
+          "json": { "type": "object", "additionalProperties": true, "description": "Parse-diff AST (gitDiff-only) OR per-field path map {previous,current} (json/mixed)" }
+        }
+      },
+      "ChangeJudgment": {
+        "type": "object",
+        "required": ["meaningful", "confidence", "reason"],
+        "properties": {
+          "meaningful": { "type": "boolean" },
+          "confidence": { "type": "string", "enum": ["low", "medium", "high"] },
+          "reason":     { "type": "string" },
+          "meaningfulChanges": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "type":   { "type": "string", "enum": ["added", "removed", "changed"] },
+                "before": { "type": "string" },
+                "after":  { "type": "string" },
+                "reason": { "type": "string" }
+              }
+            }
+          }
+        }
+      },
+      "ChangeTrackingResult": {
+        "type": "object",
+        "required": ["status", "contentHash"],
+        "properties": {
+          "status":           { "type": "string", "enum": ["same", "changed"], "description": "Per-page status. Set-level new/removed are computed by the caller's reconciler." },
+          "firstObservation": { "type": "boolean", "description": "True when no previous was supplied — caller maps to 'new'" },
+          "contentHash":      { "type": "string" },
+          "snapshot":         { "$ref": "#/components/schemas/ChangeTrackingSnapshot" },
+          "diff":             { "$ref": "#/components/schemas/ChangeDiff" },
+          "judgment":         { "$ref": "#/components/schemas/ChangeJudgment" },
+          "tag":              { "type": "string" },
+          "truncated":        { "type": "boolean" }
+        }
+      },
+      "ChangeTrackingDiffItem": {
+        "type": "object",
+        "required": ["current"],
+        "properties": {
+          "url":      { "type": "string", "format": "uri" },
+          "current":  { "type": "object", "properties": { "markdown": { "type": "string" }, "json": { "type": "object", "additionalProperties": true } } },
+          "previous": { "$ref": "#/components/schemas/ChangeTrackingSnapshot" },
+          "modes":    { "type": "array", "items": { "type": "string", "enum": ["gitDiff", "json"] } },
+          "schema":   { "type": "object", "additionalProperties": true },
+          "prompt":   { "type": "string" },
+          "contentType": { "type": "string" },
+          "tag":      { "type": "string" }
+        }
+      },
+      "ChangeTrackingDiffRequest": {
+        "type": "object",
+        "description": "Single body (provide 'current') OR batch (provide 'batch'). Top-level modes/schema/prompt/contentType act as shared defaults in batch mode.",
+        "properties": {
+          "batch":    { "type": "array", "items": { "$ref": "#/components/schemas/ChangeTrackingDiffItem" } },
+          "current":  { "type": "object", "properties": { "markdown": { "type": "string" }, "json": { "type": "object", "additionalProperties": true } } },
+          "previous": { "$ref": "#/components/schemas/ChangeTrackingSnapshot" },
+          "modes":    { "type": "array", "items": { "type": "string", "enum": ["gitDiff", "json"] } },
+          "schema":   { "type": "object", "additionalProperties": true },
+          "prompt":   { "type": "string" },
+          "contentType": { "type": "string" }
         }
       },
       "Error": {

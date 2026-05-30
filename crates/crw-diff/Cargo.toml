@@ -1,0 +1,27 @@
+[package]
+name = "crw-diff"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+keywords.workspace = true
+categories.workspace = true
+description = "Stateless change-tracking diff engine for the CRW web scraper"
+
+[dependencies]
+# Shared types only (ChangeTrackingOptions/Result, DiffAst, etc.). This crate
+# MUST NOT depend on crw-extract — judging is injected upstream so the diff
+# engine stays pure (no LLM, no HTTP, no I/O).
+crw-core = { path = "../crw-core", version = "0.11.0" }
+serde = { workspace = true }
+serde_json = { workspace = true }
+similar = { workspace = true }
+sha2 = { workspace = true }
+hex = { workspace = true }
+tracing = { workspace = true }
+
+[dev-dependencies]
+serde_json = { workspace = true }
+insta = { workspace = true }
+proptest = { workspace = true }
