@@ -1,7 +1,11 @@
 target
 .git
 bench
-docs
+# Exclude the 5MB docs site but keep the two OpenAPI specs that crw-server
+# embeds via include_str! (crates/crw-server/src/routes/openapi.rs).
+docs/*
+!docs/openapi.json
+!docs/openapi-3.0.json
 *.md
 tests
 .dockerignore
