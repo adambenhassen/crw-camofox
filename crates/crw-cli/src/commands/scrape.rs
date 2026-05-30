@@ -634,5 +634,8 @@ fn build_request(
         renderer: None,
         deadline_ms: None,
         debug: None,
+        change_tracking: None,
+        goal: None,
+        judge_enabled: None,
     }
 }

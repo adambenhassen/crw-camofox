@@ -16,6 +16,7 @@ pub enum OutputFormat {
     Links,
     Json,
     Summary,
+    ChangeTracking,
 }
 
 impl<'de> Deserialize<'de> for OutputFormat {
@@ -32,9 +33,10 @@ impl<'de> Deserialize<'de> for OutputFormat {
             "links" => Ok(OutputFormat::Links),
             "json" | "extract" | "llm-extract" => Ok(OutputFormat::Json),
             "summary" => Ok(OutputFormat::Summary),
+            "changeTracking" | "change-tracking" => Ok(OutputFormat::ChangeTracking),
             other => Err(serde::de::Error::custom(format!(
-                "Unknown format '{other}'. Valid formats: markdown, html, rawHtml, plainText, links, json, summary \
-                 (aliases: extract, llm-extract). Use formats: [\"json\"] with jsonSchema for structured extraction."
+                "Unknown format '{other}'. Valid formats: markdown, html, rawHtml, plainText, links, json, summary, changeTracking \
+                 (aliases: extract, llm-extract, change-tracking). Use formats: [\"json\"] with jsonSchema for structured extraction."
             ))),
         }
     }
@@ -235,6 +237,24 @@ pub struct ScrapeRequest {
     /// considered and why one was selected.
     #[serde(default)]
     pub debug: Option<bool>,
+    /// Change-tracking options. Activated when `formats` contains
+    /// `"changeTracking"`. Carries the diff modes, an optional extraction
+    /// schema/prompt for json mode, and the caller-supplied `previous`
+    /// snapshot to diff the current scrape against. Sibling field — mirrors
+    /// the precedented `extract` / `jsonSchema` pattern (the `formats` entry
+    /// is the plain string `"changeTracking"`, options ride here).
+    #[serde(default, alias = "change_tracking")]
+    pub change_tracking: Option<ChangeTrackingOptions>,
+    /// Plain-language monitor goal used by the meaningful-change judge.
+    /// Capped server-side at 2 KB. The judge only runs when both `goal` is
+    /// present and `judgeEnabled` is true (and the page actually changed).
+    #[serde(default)]
+    pub goal: Option<String>,
+    /// Whether to run the LLM meaningful-change judge on a changed page.
+    /// `None` is treated as "off" at the opencore layer — the SaaS
+    /// orchestration decides auto-enable semantics.
+    #[serde(default, alias = "judge_enabled")]
+    pub judge_enabled: Option<bool>,
 }
 
 fn default_formats() -> Vec<OutputFormat> {
@@ -362,6 +382,16 @@ pub struct ScrapeData {
     /// Extraction debug trace; populated only when the request opts in.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub debug_extraction: Option<DebugExtraction>,
+    /// MIME content type of the fetched resource (from `FetchResult`).
+    /// Surfaced so change-tracking can hash binary/non-text content (PDF,
+    /// images) by bytes rather than attempting a markdown/json diff.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub content_type: Option<String>,
+    /// Change-tracking result; populated only when `formats` includes
+    /// `"changeTracking"`. Carries per-page status + diff (+ judgment when
+    /// the orchestration layer ran the judge).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub change_tracking: Option<ChangeTrackingResult>,
 }
 
 /// Per-request extraction debug trace. One entry per extract() call
@@ -1200,4 +1230,244 @@ pub struct CapturedNetworkResponse {
     pub mime_type: Option<String>,
     pub body: Option<String>,
     pub body_size_bytes: usize,
+}
+
+// ===========================================================================
+// Change tracking (monitor) types
+//
+// These types are the stateless primitives the SaaS / self-host monitor
+// control plane builds on. `crw-diff` consumes `ChangeTrackingOptions` and
+// produces a `ChangeTrackingResult`; the LLM judge (`crw-extract`) populates
+// `ChangeJudgment`. Wire shapes mirror Firecrawl's `/monitor` check payloads.
+// ===========================================================================
+
+/// Change-tracking diff mode. Wire: `"gitDiff"` or `"json"`.
+///
+/// Deserialization also accepts `"git-diff"` for ergonomics; serialization
+/// always emits the canonical `"gitDiff"` / `"json"`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub enum ChangeTrackingMode {
+    GitDiff,
+    Json,
+}
+
+impl<'de> Deserialize<'de> for ChangeTrackingMode {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let s = String::deserialize(deserializer)?;
+        match s.as_str() {
+            "gitDiff" | "git-diff" => Ok(ChangeTrackingMode::GitDiff),
+            "json" => Ok(ChangeTrackingMode::Json),
+            other => Err(serde::de::Error::custom(format!(
+                "Unknown changeTracking mode '{other}'. Valid modes: gitDiff, json (alias: git-diff)."
+            ))),
+        }
+    }
+}
+
+/// A snapshot of a scrape, used as the baseline to diff against. The caller
+/// (SaaS / self-host monitor) persists this between checks and supplies the
+/// prior one as `previous`; opencore is stateless and stores nothing.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ChangeTrackingSnapshot {
+    /// Normalized markdown content (present for gitDiff / mixed mode).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub markdown: Option<String>,
+    /// Extracted structured JSON (present for json / mixed mode).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub json: Option<serde_json::Value>,
+    /// Mode-aware content hash (markdown hash for gitDiff/mixed; tracked-field
+    /// hash for json mode). The SaaS short-circuit keys off this.
+    #[serde(default)]
+    pub content_hash: String,
+    /// Caller-stamped capture time; echoed back untouched.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub captured_at: Option<String>,
+}
+
+/// Change-tracking options. Sibling field on `ScrapeRequest` (activated by the
+/// `"changeTracking"` format string) and the body of `POST /v1/change-tracking/diff`.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ChangeTrackingOptions {
+    /// Diff surfaces to compute. `["gitDiff"]` = markdown unified diff + AST;
+    /// `["json"]` = per-field diff; `["json","gitDiff"]` = mixed (both).
+    #[serde(default)]
+    pub modes: Vec<ChangeTrackingMode>,
+    /// JSON schema describing the fields to track (json / mixed mode).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub schema: Option<serde_json::Value>,
+    /// Natural-language extraction prompt (alternative to `schema`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub prompt: Option<String>,
+    /// The previous snapshot to diff against. `None` => first observation.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub previous: Option<ChangeTrackingSnapshot>,
+    /// Opaque caller tag echoed back on the result (e.g. a target id).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tag: Option<String>,
+    /// MIME content type of the current page (binary/non-text → byte hash, no diff).
+    #[serde(
+        default,
+        alias = "content_type",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub content_type: Option<String>,
+}
+
+/// Per-page change status emitted by opencore. Set-level `new` / `removed`
+/// are computed by the caller's reconciler, not here.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ChangeStatus {
+    Same,
+    Changed,
+}
+
+/// Judge confidence level. Matches Firecrawl's `"low" | "medium" | "high"`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ChangeConfidence {
+    Low,
+    Medium,
+    High,
+}
+
+/// A single meaningful change called out by the judge. Mirrors Firecrawl's
+/// `meaningfulChanges[]` entries.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MeaningfulChange {
+    /// `"added" | "removed" | "changed"`.
+    #[serde(rename = "type")]
+    pub change_type: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub before: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub after: Option<String>,
+    pub reason: String,
+}
+
+/// LLM meaningful-change judgment. Public wire shape is exactly
+/// `{meaningful, confidence, reason, meaningfulChanges}` (Firecrawl parity);
+/// `llm_usage` is internal-only and never serialized.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ChangeJudgment {
+    pub meaningful: bool,
+    pub confidence: ChangeConfidence,
+    pub reason: String,
+    #[serde(default)]
+    pub meaningful_changes: Vec<MeaningfulChange>,
+    /// Token usage for the judge call. Internal-only — `skip` keeps it out of
+    /// the public judgment wire shape; the orchestration layer reads it for
+    /// billing/observability.
+    #[serde(skip)]
+    pub llm_usage: Option<LlmUsage>,
+}
+
+/// One change line within a diff chunk (parse-diff-compatible).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DiffChange {
+    /// `"add" | "del" | "normal"`.
+    #[serde(rename = "type")]
+    pub change_type: String,
+    pub content: String,
+    /// New-file line number (add / normal).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ln: Option<usize>,
+    /// Old-file line number (normal only).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ln1: Option<usize>,
+    /// New-file line number (normal only).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ln2: Option<usize>,
+}
+
+/// A hunk within a diff file (parse-diff-compatible).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DiffChunk {
+    /// The `@@ -a,b +c,d @@` header line.
+    pub content: String,
+    pub changes: Vec<DiffChange>,
+    pub old_start: usize,
+    pub old_lines: usize,
+    pub new_start: usize,
+    pub new_lines: usize,
+}
+
+/// A single file's diff (parse-diff-compatible). For a single-page change
+/// track there is always exactly one synthetic file (`previous` → `current`).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DiffFile {
+    pub from: String,
+    pub to: String,
+    pub additions: usize,
+    pub deletions: usize,
+    pub chunks: Vec<DiffChunk>,
+}
+
+/// The git-diff AST (parse-diff style). Serialized into `diff.json` for
+/// gitDiff-only mode; in mixed mode the per-field json diff takes `diff.json`
+/// instead and this AST is not surfaced.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct DiffAst {
+    pub files: Vec<DiffFile>,
+    pub additions: usize,
+    pub deletions: usize,
+    /// True when the AST was capped at `max_diff_changes` (full snapshot still
+    /// retained, so the change is recoverable).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub truncated: bool,
+}
+
+/// The `diff` envelope: `{ text?, json? }`. `text` is the unified markdown
+/// diff (gitDiff / mixed). `json` is mode-polymorphic — the parse-diff AST in
+/// gitDiff-only mode, or the per-field path map (`{ "<path>": {previous,current} }`)
+/// in json / mixed mode. Modeled as `Value` to carry either shape, exactly
+/// matching Firecrawl's wire payload.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ChangeDiff {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub text: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub json: Option<serde_json::Value>,
+}
+
+/// Result of a change-tracking computation for one page. Surfaced on
+/// `ScrapeData.change_tracking` and returned by `POST /v1/change-tracking/diff`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ChangeTrackingResult {
+    pub status: ChangeStatus,
+    /// True when no `previous` was supplied — the caller maps this to `new`.
+    #[serde(default)]
+    pub first_observation: bool,
+    /// Mode-aware hash of the current content (see `ChangeTrackingSnapshot`).
+    pub content_hash: String,
+    /// The current snapshot — persist this as the next check's `previous`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub snapshot: Option<ChangeTrackingSnapshot>,
+    /// The diff surfaces; `None` when `status == Same` or for binary content.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub diff: Option<ChangeDiff>,
+    /// Meaningful-change judgment; populated by the orchestration layer only
+    /// when the page changed, a goal is set, and judging is enabled.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub judgment: Option<ChangeJudgment>,
+    /// Echoed caller tag.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tag: Option<String>,
+    /// True when the diff AST was truncated (mirrors `DiffAst.truncated`).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub truncated: bool,
 }

@@ -117,6 +117,18 @@ pub struct Metrics {
     /// Emitted even when `antibot.escalate_in_failover = false`, so the
     /// dashboard shows escalation pressure before the switch is flipped.
     pub antibot_escalation_total: IntCounterVec,
+    // -------- Change tracking (monitor) --------
+    /// Wall-clock duration of one `compute_change_tracking` call, labeled by
+    /// mode (`gitDiff` | `json` | `mixed` | `binary`).
+    pub change_tracking_duration_seconds: HistogramVec,
+    /// Size in bytes of the current snapshot retained per change-tracking call
+    /// (markdown + json), labeled by mode. Informs storage/retention sizing.
+    pub change_tracking_snapshot_bytes: HistogramVec,
+    /// LLM meaningful-change judge calls, labeled by outcome
+    /// (`ok` | `error` | `skipped`).
+    pub judge_calls_total: IntCounterVec,
+    /// LLM judge token usage, labeled by kind (`input` | `output`).
+    pub judge_tokens_total: IntCounterVec,
 }
 
 static METRICS: OnceLock<Metrics> = OnceLock::new();
@@ -392,6 +404,45 @@ impl Metrics {
             registry
         )
         .unwrap();
+        // -------- Change tracking (monitor) --------
+        // Diff compute is sub-millisecond to low-ms; reuse the 10ms×2^k ladder.
+        let ct_lat_buckets = exponential_buckets(0.001, 2.0, 12).unwrap();
+        let change_tracking_duration_seconds = register_histogram_vec_with_registry!(
+            histogram_opts!(
+                "crw_change_tracking_duration_seconds",
+                "Duration of one compute_change_tracking call by mode",
+                ct_lat_buckets
+            ),
+            &["mode"],
+            registry
+        )
+        .unwrap();
+        // Snapshot sizes: 256 B × 4^k → 256B .. ~256 MB.
+        let snapshot_byte_buckets = exponential_buckets(256.0, 4.0, 10).unwrap();
+        let change_tracking_snapshot_bytes = register_histogram_vec_with_registry!(
+            histogram_opts!(
+                "crw_change_tracking_snapshot_bytes",
+                "Retained snapshot size in bytes per change-tracking call, by mode",
+                snapshot_byte_buckets
+            ),
+            &["mode"],
+            registry
+        )
+        .unwrap();
+        let judge_calls_total = register_int_counter_vec_with_registry!(
+            "crw_judge_calls_total",
+            "LLM meaningful-change judge calls by outcome (ok | error | skipped)",
+            &["outcome"],
+            registry
+        )
+        .unwrap();
+        let judge_tokens_total = register_int_counter_vec_with_registry!(
+            "crw_judge_tokens_total",
+            "LLM judge token usage by kind (input | output)",
+            &["kind"],
+            registry
+        )
+        .unwrap();
         Self {
             registry,
             render_route_decision_total,
@@ -428,6 +479,10 @@ impl Metrics {
             chrome_request_handshake_seconds,
             vendor_block_total,
             antibot_escalation_total,
+            change_tracking_duration_seconds,
+            change_tracking_snapshot_bytes,
+            judge_calls_total,
+            judge_tokens_total,
         }
     }
 }
@@ -465,5 +520,25 @@ mod tests {
         assert!(text.contains("crw_chrome_navigate_seconds"));
         assert!(text.contains("crw_chrome_snapshot_seconds"));
         assert!(text.contains(r#"outcome="ok""#));
+    }
+
+    #[test]
+    fn change_tracking_metrics_registered() {
+        let m = metrics();
+        m.change_tracking_duration_seconds
+            .with_label_values(&["gitDiff"])
+            .observe(0.002);
+        m.change_tracking_snapshot_bytes
+            .with_label_values(&["json"])
+            .observe(4096.0);
+        m.judge_calls_total.with_label_values(&["ok"]).inc();
+        m.judge_tokens_total
+            .with_label_values(&["input"])
+            .inc_by(1234);
+        let text = gather_text();
+        assert!(text.contains("crw_change_tracking_duration_seconds"));
+        assert!(text.contains("crw_change_tracking_snapshot_bytes"));
+        assert!(text.contains("crw_judge_calls_total"));
+        assert!(text.contains("crw_judge_tokens_total"));
     }
 }

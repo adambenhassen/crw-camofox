@@ -276,6 +276,11 @@ async fn run_crawl_inner(opts: CrawlOptions<'_>) {
             }
         };
         data.warning = warning;
+        // Surface content type on each discovered page so the SaaS monitor
+        // reconciler can hash binary/non-text pages instead of diffing them.
+        // The actual change-tracking diff for crawl pages runs SaaS-side via
+        // POST /v1/change-tracking/diff, not inline here.
+        data.content_type = fetch_result.content_type.clone();
 
         if let (Some(schema), Some(llm)) = (&req.json_schema, llm_config)
             && let Some(md) = &data.markdown

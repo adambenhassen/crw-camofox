@@ -16,6 +16,7 @@ test-utils = []
 
 [dependencies]
 crw-core = { path = "../crw-core", version = "0.10.0" }
+crw-diff = { path = "../crw-diff", version = "0.10.0" }
 crw-renderer = { path = "../crw-renderer", version = "0.10.0" }
 crw-extract = { path = "../crw-extract", version = "0.10.0" }
 crw-crawl = { path = "../crw-crawl", version = "0.10.0" }

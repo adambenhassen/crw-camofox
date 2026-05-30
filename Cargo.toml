@@ -1,6 +1,7 @@
 [workspace]
 members = [
     "crates/crw-core",
+    "crates/crw-diff",
     "crates/crw-renderer",
     "crates/crw-extract",
     "crates/crw-crawl",
@@ -49,6 +50,10 @@ once_cell = "1"
 
 # Text processing
 regex = "1"
+
+# Diffing (change-tracking / monitor). Myers diff over lines; the parse-diff
+# AST and the unified text surface are both derived from its op stream.
+similar = "2"
 
 # Randomness
 rand = "0.9"

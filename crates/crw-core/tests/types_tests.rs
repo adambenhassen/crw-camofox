@@ -10,6 +10,8 @@ fn output_format_serde_roundtrip() {
         (OutputFormat::PlainText, "\"plainText\""),
         (OutputFormat::Links, "\"links\""),
         (OutputFormat::Json, "\"json\""),
+        (OutputFormat::Summary, "\"summary\""),
+        (OutputFormat::ChangeTracking, "\"changeTracking\""),
     ];
 
     for (variant, expected_json) in variants {
@@ -169,6 +171,8 @@ fn scrape_data_skip_serializing_none() {
             elapsed_ms: 50,
         },
         debug_extraction: None,
+        content_type: None,
+        change_tracking: None,
     };
 
     let json = serde_json::to_value(&data).unwrap();
@@ -276,10 +280,95 @@ fn scrape_data_serializes_debug_extraction_as_camel_case() {
             elapsed_ms: 0,
         },
         debug_extraction: None,
+        content_type: None,
+        change_tracking: None,
     };
     let v = serde_json::to_value(&data).unwrap();
     assert!(v.get("debugExtraction").is_none(), "absent when None");
     data.debug_extraction = Some(DebugExtraction::default());
     let v = serde_json::to_value(&data).unwrap();
     assert!(v.get("debugExtraction").is_some(), "present when Some");
+}
+
+// ── Change-tracking wire-shape locks (Firecrawl parity) ────────────────────
+
+#[test]
+fn change_tracking_format_deserialize_aliases() {
+    // Both "changeTracking" and "change-tracking" decode to the same variant.
+    let a: OutputFormat = serde_json::from_str("\"changeTracking\"").unwrap();
+    let b: OutputFormat = serde_json::from_str("\"change-tracking\"").unwrap();
+    assert_eq!(a, OutputFormat::ChangeTracking);
+    assert_eq!(b, OutputFormat::ChangeTracking);
+}
+
+#[test]
+fn change_tracking_mode_deserialize_aliases() {
+    let g1: ChangeTrackingMode = serde_json::from_str("\"gitDiff\"").unwrap();
+    let g2: ChangeTrackingMode = serde_json::from_str("\"git-diff\"").unwrap();
+    let j: ChangeTrackingMode = serde_json::from_str("\"json\"").unwrap();
+    assert_eq!(g1, ChangeTrackingMode::GitDiff);
+    assert_eq!(g2, ChangeTrackingMode::GitDiff);
+    assert_eq!(j, ChangeTrackingMode::Json);
+    // Serialize emits the canonical token.
+    assert_eq!(serde_json::to_string(&g1).unwrap(), "\"gitDiff\"");
+    assert_eq!(serde_json::to_string(&j).unwrap(), "\"json\"");
+}
+
+#[test]
+fn judgment_wire_shape_matches_firecrawl() {
+    // Exactly {meaningful, confidence, reason, meaningfulChanges}; confidence is
+    // the string enum "high"/"medium"/"low"; meaningfulChanges are objects;
+    // llm_usage is internal-only and never serialized.
+    let j = ChangeJudgment {
+        meaningful: true,
+        confidence: ChangeConfidence::High,
+        reason: "Starter price changed".into(),
+        meaningful_changes: vec![MeaningfulChange {
+            change_type: "changed".into(),
+            before: Some("$19/mo".into()),
+            after: Some("$24/mo".into()),
+            reason: "The Starter plan price changed.".into(),
+        }],
+        llm_usage: None,
+    };
+    let v = serde_json::to_value(&j).unwrap();
+    assert_eq!(v["confidence"], json!("high"));
+    assert_eq!(v["meaningful"], json!(true));
+    assert!(v.get("meaningfulChanges").is_some(), "camelCase key");
+    assert_eq!(v["meaningfulChanges"][0]["type"], json!("changed"));
+    assert_eq!(v["meaningfulChanges"][0]["after"], json!("$24/mo"));
+    assert!(v.get("llmUsage").is_none(), "llm_usage must not serialize");
+    assert!(v.get("llm_usage").is_none());
+}
+
+#[test]
+fn change_tracking_result_diff_envelope_shape() {
+    // Markdown (gitDiff) mode: diff.json carries the parse-diff AST (has `files`).
+    let result = ChangeTrackingResult {
+        status: ChangeStatus::Changed,
+        first_observation: false,
+        content_hash: "abc".into(),
+        snapshot: Some(ChangeTrackingSnapshot {
+            markdown: Some("Starter $24".into()),
+            json: None,
+            content_hash: "abc".into(),
+            captured_at: None,
+        }),
+        diff: Some(ChangeDiff {
+            text: Some("--- previous\n+++ current\n".into()),
+            json: Some(json!({"files": [], "additions": 1, "deletions": 1})),
+        }),
+        judgment: None,
+        tag: Some("target-1".into()),
+        truncated: false,
+    };
+    let v = serde_json::to_value(&result).unwrap();
+    assert_eq!(v["status"], json!("changed"));
+    assert_eq!(v["firstObservation"], json!(false));
+    assert!(v["diff"]["text"].is_string());
+    assert!(v["diff"]["json"]["files"].is_array());
+    assert_eq!(v["tag"], json!("target-1"));
+    // round-trips back
+    let back: ChangeTrackingResult = serde_json::from_value(v).unwrap();
+    assert_eq!(back.status, ChangeStatus::Changed);
 }

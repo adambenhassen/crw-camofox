@@ -559,6 +559,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "console"
+version = "0.16.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d64e8af5551369d19cf50138de61f1c42074ab970f74e99be916646777f8fc87"
+dependencies = [
+ "encode_unicode",
+ "libc",
+ "windows-sys 0.61.2",
+]
+
+[[package]]
 name = "const-random"
 version = "0.1.18"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -717,7 +728,7 @@ dependencies = [
  "anyhow",
  "axum",
  "clap",
- "console",
+ "console 0.15.11",
  "crw-browse",
  "crw-core",
  "crw-crawl",
@@ -766,6 +777,7 @@ name = "crw-crawl"
 version = "0.10.0"
 dependencies = [
  "crw-core",
+ "crw-diff",
  "crw-extract",
  "crw-renderer",
  "dashmap",
@@ -777,11 +789,27 @@ dependencies = [
  "rand 0.9.2",
  "reqwest 0.13.2",
  "scraper",
+ "serde_json",
  "tokio",
  "tracing",
  "url",
  "uuid",
  "wiremock",
+]
+
+[[package]]
+name = "crw-diff"
+version = "0.10.0"
+dependencies = [
+ "crw-core",
+ "hex",
+ "insta",
+ "proptest",
+ "serde",
+ "serde_json",
+ "sha2",
+ "similar",
+ "tracing",
 ]
 
 [[package]]
@@ -889,6 +917,7 @@ dependencies = [
  "clap",
  "crw-core",
  "crw-crawl",
+ "crw-diff",
  "crw-extract",
  "crw-renderer",
  "crw-search",
@@ -1051,7 +1080,7 @@ version = "0.11.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "658bce805d770f407bc62102fca7c2c64ceef2fbcb2b8bd19d2765ce093980de"
 dependencies = [
- "console",
+ "console 0.15.11",
  "fuzzy-matcher",
  "shell-words",
  "tempfile",
@@ -1893,11 +1922,24 @@ version = "0.17.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "183b3088984b400f4cfac3620d5e076c84da5364016b4f49473de574b2586235"
 dependencies = [
- "console",
+ "console 0.15.11",
  "number_prefix",
  "portable-atomic",
  "unicode-width",
  "web-time",
+]
+
+[[package]]
+name = "insta"
+version = "1.47.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "7b4a6248eb93a4401ed2f37dfe8ea592d3cf05b7cf4f8efa867b6895af7e094e"
+dependencies = [
+ "console 0.16.3",
+ "once_cell",
+ "serde",
+ "similar",
+ "tempfile",
 ]
 
 [[package]]
@@ -3528,6 +3570,12 @@ name = "simd-adler32"
 version = "0.3.8"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e320a6c5ad31d271ad523dcf3ad13e2767ad8b1cb8f047f75a8aeaf8da139da2"
+
+[[package]]
+name = "similar"
+version = "2.7.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "bbbb5d9659141646ae647b42fe094daf6c6192d1620870b449d9557f748b2daa"
 
 [[package]]
 name = "siphasher"
