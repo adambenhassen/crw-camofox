@@ -75,6 +75,7 @@ export default {
         { title: "Map", slug: "map", icon: "map" },
         { title: "Crawl", slug: "crawling", icon: "globe" },
         { title: "Extract", slug: "extract", icon: "zap" },
+        { title: "Monitoring", slug: "monitoring", icon: "bell" },
       ],
     },
     {

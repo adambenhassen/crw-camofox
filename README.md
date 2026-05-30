@@ -31,6 +31,7 @@ Works with: Claude Code · Cursor · Windsurf · Cline · Copilot · Continue.de
 - **Rust-native, single static binary** — no Redis, no Node.js, no Python venv, no headless-browser sidecar in the request path. One binary, one config file, one process.
 - **~50 MB RAM idle** — leaves headroom on a $5 VPS. Browser-render-first stacks (Firecrawl, Crawl4AI) carry a Chromium heap baseline measured in hundreds of MB before a single request lands.
 - **Firecrawl-compatible drop-in** — same `/v1/scrape`, `/v1/crawl`, `/v1/extract`, `/v1/map`, `/v1/search` endpoints with compatible request/response shapes. Swap the base URL and keep your code.
+- **Change tracking & monitoring** — diff a page against a prior snapshot (markdown git-diff, per-field JSON, or both) with an optional LLM "meaningful-change" judge. Stateless `changeTracking` primitive in the engine; scheduled monitors + signed-webhook/email alerts on the managed platform. See the [Monitoring docs](https://us.github.io/crw/monitoring).
 - **AGPL-3.0 open core + managed option** — self-host free, or point at `api.fastcrw.com` for managed proxy network, dashboard, and SLA without the AGPL obligations on your application code.
 
 ---
@@ -231,6 +232,7 @@ production hardening, auth, reverse proxy, and resource tuning.
 | `POST` | `/v1/map` | Discover all URLs on a site |
 | `POST` | `/v1/extract` | Structured JSON extraction from a URL via JSON Schema |
 | `POST` | `/v1/search` | Web search via SearXNG sidecar, with optional content scraping |
+| `POST` | `/v1/change-tracking/diff` | Diff a scrape against a supplied snapshot (the [monitoring](https://us.github.io/crw/monitoring) primitive) — single or batch |
 | `GET` | `/health` | Health check (no auth required) |
 | `POST` | `/mcp` | Streamable HTTP MCP transport |
 
