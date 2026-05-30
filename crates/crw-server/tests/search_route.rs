@@ -28,6 +28,29 @@ timeout_ms = 5000
     TestServer::new(app)
 }
 
+fn test_app_with_searxng_and_llm(url: &str) -> TestServer {
+    // Sibling of `test_app_with_searxng` that also wires an `[extraction.llm]`
+    // leg so provider/model can fall back to server config. `api_key` has no
+    // serde default (required field) — must be present for the block to parse.
+    let toml = format!(
+        r#"
+[search]
+enabled = true
+searxng_url = "{url}"
+timeout_ms = 5000
+
+[extraction.llm]
+provider = "anthropic"
+api_key = "sk-test"
+model = "claude-sonnet-4-20250514"
+"#
+    );
+    let config: AppConfig = toml::from_str(&toml).unwrap();
+    let state = AppState::new(config).expect("AppState::new failed");
+    let app = create_app(state);
+    TestServer::new(app)
+}
+
 fn test_app_search_disabled() -> TestServer {
     // Default config has no searxng_url → state.searxng = None.
     let config: AppConfig = toml::from_str("").unwrap();
@@ -99,6 +122,53 @@ fn searxng_mixed_response() -> Value {
         "suggestions": [],
         "unresponsive_engines": []
     })
+}
+
+#[tokio::test]
+async fn search_llm_usage_always_present_on_zero_results() {
+    // Wave 4 (R1) invariant: once LLM mode is entered (summarizeResults +
+    // scrapeOptions present), `/v1/search` ALWAYS returns a non-null
+    // `llmUsage` object — even with ZERO search results and no LLM call
+    // actually running. The SaaS 5-branch credit dispatch relies on this.
+    let mock = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/search"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .set_body_json(json!({"results": [], "number_of_results": 0})),
+        )
+        .mount(&mock)
+        .await;
+
+    let server = test_app_with_searxng_and_llm(&mock.uri());
+    let resp = server
+        .post("/v1/search")
+        .json(&json!({
+            "query": "rust async",
+            "summarizeResults": true,
+            "scrapeOptions": {"formats": ["markdown"]}
+        }))
+        .await;
+    resp.assert_status_ok();
+    let body: Value = resp.json();
+    assert_eq!(body["success"], true);
+
+    let usage = &body["data"]["llmUsage"];
+    assert!(usage.is_object(), "llmUsage must be present, got: {usage}");
+    assert_eq!(usage["executedSummaries"], 0);
+    assert_eq!(usage["answerExecuted"], false);
+    assert_eq!(usage["inputTokens"], 0);
+    assert_eq!(usage["outputTokens"], 0);
+    assert!(
+        usage["provider"].is_string(),
+        "provider must be a string, got: {}",
+        usage["provider"]
+    );
+    assert!(
+        usage["model"].is_string(),
+        "model must be a string, got: {}",
+        usage["model"]
+    );
 }
 
 #[tokio::test]
