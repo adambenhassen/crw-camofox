@@ -143,6 +143,16 @@ pub struct SearchConfig {
     /// unaffected and keeps SaaS byte-parity regardless of this flag.
     #[serde(default = "default_true_search")]
     pub rerank_enabled: bool,
+    /// Multi-query expansion for the LLM answer / summarize path: before the
+    /// SearXNG fetch, generate an entity/keyword-focused rewrite of the query,
+    /// fetch both the original and the rewrite, and UNION the candidate pools
+    /// (recall can only increase — the original's results are always kept).
+    /// Targets "retrieval-miss" failures where the answer's source never
+    /// surfaced for the user's phrasing. Costs one extra small LLM call + one
+    /// extra SearXNG fetch. Defaults to `false` (gated); the plain path and the
+    /// answer layer are untouched, so precision/SaaS-parity are preserved.
+    #[serde(default)]
+    pub query_expand: bool,
 }
 
 impl Default for SearchConfig {
@@ -156,6 +166,7 @@ impl Default for SearchConfig {
             research_engines: default_research_engines(),
             github_engines: default_github_engines(),
             rerank_enabled: true,
+            query_expand: false,
         }
     }
 }

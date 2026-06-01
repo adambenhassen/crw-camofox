@@ -121,6 +121,41 @@ pub async fn chat(
     .await
 }
 
+/// Generate ONE entity/keyword-focused rewrite of a search query to widen
+/// retrieval recall on the answer path. The caller fetches BOTH the original
+/// and this rewrite and unions the candidate pools, so recall can only
+/// increase. Returns an empty `Vec` on any failure or when the rewrite is
+/// trivial/identical — the caller then uses the original query alone, which
+/// means this can never reduce recall or break a search.
+pub async fn expand_query(cfg: &LlmConfig, query: &str) -> Vec<String> {
+    const SYS: &str = "You rewrite a user's search query into ONE alternative \
+        web-search query that maximizes the chance of finding the answer. Keep \
+        the key named entities; use precise keywords a relevant page would \
+        contain; drop filler words. Output ONLY the rewritten query on a single \
+        line — no quotes, no labels, no explanation.";
+    let mut leg = cfg.clone();
+    leg.max_tokens = leg.max_tokens.min(120);
+    match chat(&leg, SYS, query).await {
+        Ok(r) => {
+            let v = r
+                .content
+                .trim()
+                .lines()
+                .next()
+                .unwrap_or("")
+                .trim()
+                .trim_matches('"')
+                .to_string();
+            if v.is_empty() || v.eq_ignore_ascii_case(query.trim()) {
+                Vec::new()
+            } else {
+                vec![v]
+            }
+        }
+        Err(_) => Vec::new(),
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 async fn dispatch(
     provider: &str,

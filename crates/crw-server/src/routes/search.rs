@@ -12,7 +12,8 @@ use crw_crawl::single::scrape_url;
 use crw_extract::answer;
 use crw_extract::summary;
 use crw_search::{
-    SearchError, map_to_searxng_params, transform_flat, transform_flat_reranked, transform_grouped,
+    SearchError, SearxngClient, SearxngParams, SearxngResponse, map_to_searxng_params,
+    transform_flat, transform_flat_reranked, transform_grouped,
 };
 use futures::stream::{self, StreamExt};
 use std::collections::HashMap;
@@ -77,18 +78,37 @@ pub async fn search_inner(
         .min(state.config.search.max_limit)
         .max(1);
 
+    // BYOK + LLM config is built up-front because multi-query expansion (below)
+    // needs the LLM *before* the SearXNG fetch. Reused by the summarize/answer
+    // legs further down. `llm_path` = this request enters LLM mode.
+    let server_llm = state.config.extraction.llm.clone();
+    let byok_llm = build_byok_search_llm_config(&req, server_llm.as_ref());
+    let effective_llm = byok_llm.as_ref().or(server_llm.as_ref());
+    let llm_path = req.answer.unwrap_or(false) || req.summarize_results.unwrap_or(false);
+
     let params = map_to_searxng_params(&req, &state.config.search);
-    let response = client
-        .fetch(&params)
-        .await
-        .map_err(|e| map_search_error(e, state.config.search.timeout_ms))?;
+    // Multi-query expansion (gated): on the LLM path, also fetch an
+    // entity/keyword rewrite of the query and UNION the pools so the answer's
+    // source is more likely to surface. Falls back to the single fetch.
+    let response = if state.config.search.query_expand
+        && llm_path
+        && let Some(llm) = effective_llm
+    {
+        fetch_expanded(&client, &req.query, &params, llm)
+            .await
+            .map_err(|e| map_search_error(e, state.config.search.timeout_ms))?
+    } else {
+        client
+            .fetch(&params)
+            .await
+            .map_err(|e| map_search_error(e, state.config.search.timeout_ms))?
+    };
 
     let has_sources = req.sources.as_ref().is_some_and(|s| !s.is_empty());
     // The LLM answer / summarize path feeds the top-N flat sources straight to
     // the model, so it must receive a clean, query-relevant pool. Re-rank the
     // flat pool on that path (unless disabled); the plain path keeps the raw
     // SaaS byte-parity `transform_flat` sort.
-    let llm_path = req.answer.unwrap_or(false) || req.summarize_results.unwrap_or(false);
     let mut data = if has_sources {
         let sources = req.sources.clone().unwrap_or_default();
         SearchData::Grouped(transform_grouped(&response, &sources, limit))
@@ -110,13 +130,7 @@ pub async fn search_inner(
         }
     }
 
-    // BYOK + LLM features. Both `summarize_results` and `answer` need an
-    // effective LlmConfig. Build it once from the BYOK request fields,
-    // falling back to server config.
-    let server_llm = state.config.extraction.llm.clone();
-    let byok_llm = build_byok_search_llm_config(&req, server_llm.as_ref());
-    let effective_llm = byok_llm.as_ref().or(server_llm.as_ref());
-
+    // `effective_llm` / `byok_llm` / `server_llm` were built up-front (above).
     let wants_summaries = req.summarize_results.unwrap_or(false);
     let wants_answer = req.answer.unwrap_or(false);
     // Wave 4 (R1): once we enter LLM mode the response MUST carry a
@@ -561,6 +575,47 @@ fn map_search_error(err: SearchError, timeout_ms: u64) -> CrwError {
         }
         SearchError::Transport(msg) => CrwError::TargetUnreachable(format!("SearXNG: {msg}")),
     }
+}
+
+/// Multi-query expansion: fetch the original query plus an LLM-generated
+/// entity/keyword rewrite, then UNION the candidate pools (dedupe by URL,
+/// original results kept first so they retain priority). Recall can only
+/// increase vs a single fetch. The original fetch's error propagates (same
+/// failure semantics as the single-fetch path); a failed variant fetch is
+/// ignored. If the rewrite is empty/trivial, this is exactly the single fetch.
+async fn fetch_expanded(
+    client: &SearxngClient,
+    query: &str,
+    base_params: &SearxngParams,
+    llm: &LlmConfig,
+) -> Result<SearxngResponse, SearchError> {
+    let mut leg = llm.clone();
+    leg.max_tokens = leg.max_tokens.min(SEARCH_LLM_MAX_TOKENS_PER_LEG);
+    let variants = crw_extract::llm::expand_query(&leg, query).await;
+    let mut merged = client.fetch(base_params).await?;
+    if variants.is_empty() {
+        return Ok(merged);
+    }
+    let mut seen: std::collections::HashSet<String> = merged
+        .results
+        .iter()
+        .filter_map(|r| r.url.clone())
+        .collect();
+    for v in variants {
+        let mut vp = base_params.clone();
+        vp.q = v;
+        if let Ok(r) = client.fetch(&vp).await {
+            for row in r.results {
+                if let Some(u) = row.url.clone()
+                    && seen.insert(u)
+                {
+                    merged.results.push(row);
+                }
+            }
+        }
+    }
+    merged.number_of_results = merged.results.len() as u64;
+    Ok(merged)
 }
 
 /// Enrich `web` (or flat) results in-place by calling the scrape pipeline
