@@ -73,10 +73,14 @@ ws_url = "ws://chrome:9222/"
 [renderer.chrome_pool]
 size = 4
 
-# /v1/search points at the bundled SearXNG sidecar. The container resolves
-# `searxng` via docker-compose's network DNS.
+# /v1/search points at the bundled SearXNG sidecar. Use the `searxng-internal`
+# alias, which exists ONLY on the internal `search_rpc` network — the bare
+# `searxng` name also resolves on `public_egress`, where the egress firewall
+# drops service-to-service traffic, so docker DNS returning that IP breaks the
+# answer path. `searxng-internal` pins the search_rpc IP (matches the SaaS,
+# which already uses it). See crw-saas docker-compose.prod.yml.
 [search]
-searxng_url = "http://searxng:8080"
+searxng_url = "http://searxng-internal:8080"
 
 # /map URL filter — defaults on. Set `drop_action_urls = false` to revert
 # to legacy behaviour (action URLs surface in results).
