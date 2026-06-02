@@ -153,6 +153,14 @@ pub struct SearchConfig {
     /// answer layer are untouched, so precision/SaaS-parity are preserved.
     #[serde(default)]
     pub query_expand: bool,
+    /// Passage-level relevance gate for the LLM answer path: split each scraped
+    /// source into passages and feed the answer LLM only the query-relevant
+    /// ones (DeepSeek-scored, no new ML deps). Subtractive — removes noise, never
+    /// adds sources or forces commits; falls back to the full source on any
+    /// failure (byte-identical to off), so it is monotone-safe. Defaults to
+    /// `false` (gated); answer prompt + plain path untouched.
+    #[serde(default)]
+    pub passage_select: bool,
 }
 
 impl Default for SearchConfig {
@@ -167,6 +175,7 @@ impl Default for SearchConfig {
             github_engines: default_github_engines(),
             rerank_enabled: true,
             query_expand: false,
+            passage_select: false,
         }
     }
 }

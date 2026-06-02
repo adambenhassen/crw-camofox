@@ -168,6 +168,122 @@ pub async fn synthesize(
     })
 }
 
+/// Only sources larger than this are worth a passage-selection pass (smaller
+/// ones already fit and carry little noise). Bounds the extra LLM cost.
+const PASSAGE_SELECT_MIN_CHARS: usize = 4096;
+/// Never reduce a source below this many chars — guards against an
+/// over-aggressive selection cutting the answer-bearing span (which would
+/// inflate NOT_ATTEMPTED). Padded with leading passages until met.
+const PASSAGE_KEEP_FLOOR: usize = 3072;
+/// Cap kept passages per source.
+const MAX_KEPT_PASSAGES: usize = 12;
+
+/// Split markdown into passages on blank-line / heading boundaries.
+fn split_passages(md: &str) -> Vec<&str> {
+    md.split("\n\n")
+        .map(str::trim)
+        .filter(|p| !p.is_empty())
+        .collect()
+}
+
+/// Ask the LLM which passages are relevant. Returns the kept indices, or `None`
+/// on any failure / empty / unparseable result (caller keeps the full source).
+async fn select_passage_indices(
+    query: &str,
+    passages: &[&str],
+    cfg: &LlmConfig,
+) -> Option<Vec<usize>> {
+    const SYS: &str = "You select which passages from a web source are relevant \
+        to answering a query. Given the query and numbered passages, return ONLY \
+        a JSON array of the integer indices of passages containing information \
+        helpful to answer the query. Be INCLUSIVE — keep any passage that might \
+        help, plus immediate context. Never return an empty array if anything is \
+        even slightly relevant. Output ONLY the JSON array, e.g. [0,2,3].";
+    let mut listing = format!("Query: {query}\n\nPassages:\n");
+    for (i, p) in passages.iter().enumerate() {
+        let head: String = p.chars().take(400).collect();
+        listing.push_str(&format!("[{i}] {head}\n"));
+    }
+    let mut leg = cfg.clone();
+    leg.max_tokens = leg.max_tokens.min(256);
+    let r = llm::chat(&leg, SYS, &listing).await.ok()?;
+    let start = r.content.find('[')?;
+    let end = r.content[start..].find(']')? + start;
+    let arr: Vec<usize> = serde_json::from_str(&r.content[start..=end]).ok()?;
+    let kept: Vec<usize> = arr.into_iter().filter(|&i| i < passages.len()).collect();
+    if kept.is_empty() { None } else { Some(kept) }
+}
+
+/// Reduce a source to its query-relevant passages. `None` means "keep the full
+/// source" (every failure path and the no-benefit path), so this is
+/// monotone-safe: it can only remove noise, never lose the source.
+async fn reduce_source(query: &str, md: &str, cfg: &LlmConfig) -> Option<String> {
+    let passages = split_passages(md);
+    if passages.len() <= 2 {
+        return None;
+    }
+    let mut keep: std::collections::BTreeSet<usize> = select_passage_indices(query, &passages, cfg)
+        .await?
+        .into_iter()
+        .collect();
+    // Lead-passage guard: always retain passage 0 (page lead / definition).
+    keep.insert(0);
+    // Floor guard: pad with leading passages until we clear PASSAGE_KEEP_FLOOR.
+    let mut kept: Vec<usize> = keep.into_iter().collect();
+    let mut size: usize = kept.iter().map(|&i| passages[i].len()).sum();
+    let mut next = 0usize;
+    while size < PASSAGE_KEEP_FLOOR && next < passages.len() {
+        if !kept.contains(&next) {
+            kept.push(next);
+            size += passages[next].len();
+        }
+        next += 1;
+    }
+    kept.sort_unstable();
+    kept.dedup();
+    kept.truncate(MAX_KEPT_PASSAGES);
+    // No benefit if we kept (nearly) everything — keep the full source.
+    if kept.len() >= passages.len() {
+        return None;
+    }
+    let assembled = kept
+        .iter()
+        .map(|&i| passages[i])
+        .collect::<Vec<_>>()
+        .join("\n\n");
+    if assembled.len() >= md.len() {
+        None
+    } else {
+        Some(assembled)
+    }
+}
+
+/// Passage-selection variant of [`synthesize`]: reduce each large source to its
+/// query-relevant passages (in parallel), then delegate to the unchanged
+/// `synthesize` (same answer prompt, citation guards, truncation). Any selection
+/// failure falls back to the full source, so output is byte-identical to
+/// `synthesize` on the fallback path — it can only remove noise, never regress.
+pub async fn synthesize_selected(
+    query: &str,
+    sources: &[Source],
+    cfg: &LlmConfig,
+    max_chars_per_source: usize,
+    user_prompt: Option<&str>,
+) -> CrwResult<AnswerResult> {
+    let reduce_futs = sources.iter().map(|(url, title, md)| async move {
+        let new_md = if md.len() >= PASSAGE_SELECT_MIN_CHARS {
+            reduce_source(query, md, cfg)
+                .await
+                .unwrap_or_else(|| md.clone())
+        } else {
+            md.clone()
+        };
+        (url.clone(), title.clone(), new_md)
+    });
+    let reduced: Vec<Source> = futures::future::join_all(reduce_futs).await;
+    synthesize(query, &reduced, cfg, max_chars_per_source, user_prompt).await
+}
+
 fn parse_answer_and_citations(
     raw: &str,
     sources: &[Source],

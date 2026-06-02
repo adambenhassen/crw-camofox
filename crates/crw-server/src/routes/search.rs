@@ -221,7 +221,14 @@ pub async fn search_inner(
                     }
                 }
                 if wants_answer {
-                    match synthesize_answer(&req, &data, &leg_cfg).await {
+                    match synthesize_answer(
+                        &req,
+                        &data,
+                        &leg_cfg,
+                        state.config.search.passage_select,
+                    )
+                    .await
+                    {
                         Ok((ans, cites, ans_usage, mut ans_warns)) => {
                             warnings.append(&mut ans_warns);
                             agg_answer_executed = true;
@@ -451,6 +458,7 @@ async fn synthesize_answer(
     req: &SearchRequest,
     data: &SearchData,
     cfg: &LlmConfig,
+    passage_select: bool,
 ) -> Result<
     (
         String,
@@ -488,9 +496,16 @@ async fn synthesize_answer(
     if sources.is_empty() {
         return Err("no results carry markdown to synthesize an answer from".into());
     }
-    let result = answer::synthesize(&req.query, &sources, cfg, cap, req.answer_prompt.as_deref())
-        .await
-        .map_err(|e| e.to_string())?;
+    // Passage-select reduces each large source to its query-relevant passages
+    // before synthesis (monotone-safe: falls back to the full source on any
+    // failure). Gated; off = byte-identical to plain synthesize.
+    let result = if passage_select {
+        answer::synthesize_selected(&req.query, &sources, cfg, cap, req.answer_prompt.as_deref())
+            .await
+    } else {
+        answer::synthesize(&req.query, &sources, cfg, cap, req.answer_prompt.as_deref()).await
+    }
+    .map_err(|e| e.to_string())?;
     Ok((
         result.content,
         result.citations,
