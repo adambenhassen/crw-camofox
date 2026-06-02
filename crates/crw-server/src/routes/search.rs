@@ -21,6 +21,10 @@ use std::sync::Arc;
 use tokio::task::JoinSet;
 
 const DEFAULT_ANSWER_TOP_N: u32 = 5;
+/// Default top-N for the calibrated answer path (feeds more sources so the
+/// answer in result #6-8, or behind a failed top-5 scrape, still reaches the
+/// model). Bounded by `MAX_ANSWER_TOP_N`.
+const CALIBRATED_ANSWER_TOP_N: u32 = 8;
 const MAX_ANSWER_TOP_N: u32 = 10;
 const DEFAULT_MAX_CHARS_PER_SOURCE: usize = 8192;
 
@@ -268,6 +272,7 @@ pub async fn search_inner(
                         &data,
                         &leg_cfg,
                         state.config.search.passage_select,
+                        state.config.search.answer_calibrated,
                     )
                     .await
                     {
@@ -501,6 +506,7 @@ async fn synthesize_answer(
     data: &SearchData,
     cfg: &LlmConfig,
     passage_select: bool,
+    calibrated: bool,
 ) -> Result<
     (
         String,
@@ -510,9 +516,18 @@ async fn synthesize_answer(
     ),
     String,
 > {
+    // Calibrated answer feeds more sources by default (Pattern A: the answer
+    // often sits in result #6-8, or a failed top-5 scrape thinned the pool) and
+    // uses the anti-hedge prompt clause. An explicit request `answer_top_n`
+    // still wins. Capped by MAX_ANSWER_TOP_N.
+    let default_top_n = if calibrated {
+        CALIBRATED_ANSWER_TOP_N
+    } else {
+        DEFAULT_ANSWER_TOP_N
+    };
     let top_n = req
         .answer_top_n
-        .unwrap_or(DEFAULT_ANSWER_TOP_N)
+        .unwrap_or(default_top_n)
         .min(MAX_ANSWER_TOP_N) as usize;
     let cap = req
         .max_chars_per_source
@@ -542,10 +557,25 @@ async fn synthesize_answer(
     // before synthesis (monotone-safe: falls back to the full source on any
     // failure). Gated; off = byte-identical to plain synthesize.
     let result = if passage_select {
-        answer::synthesize_selected(&req.query, &sources, cfg, cap, req.answer_prompt.as_deref())
-            .await
+        answer::synthesize_selected(
+            &req.query,
+            &sources,
+            cfg,
+            cap,
+            req.answer_prompt.as_deref(),
+            calibrated,
+        )
+        .await
     } else {
-        answer::synthesize(&req.query, &sources, cfg, cap, req.answer_prompt.as_deref()).await
+        answer::synthesize(
+            &req.query,
+            &sources,
+            cfg,
+            cap,
+            req.answer_prompt.as_deref(),
+            calibrated,
+        )
+        .await
     }
     .map_err(|e| e.to_string())?;
     Ok((

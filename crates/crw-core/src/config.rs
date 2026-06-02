@@ -171,6 +171,17 @@ pub struct SearchConfig {
     /// still abstains). Defaults to `false` (gated); requires `rerank_enabled`.
     #[serde(default)]
     pub page2_fallback: bool,
+    /// Calibrated answer path (gated): reduce recoverable OVER-abstentions by
+    /// (a) feeding more sources to the answer LLM by default (top_n 5->8, so the
+    /// answer in result #6-8 or behind a failed top-5 scrape still reaches it)
+    /// and (b) swapping the answer prompt's abstention rule for an anti-hedge
+    /// variant — commit when the sources DO contain the answer (even indirectly
+    /// / one inference step), abstain ONLY when they genuinely lack it. The
+    /// "use ONLY sources" grounding is untouched, so this is the precise inverse
+    /// of the cycle-1 blunt "always commit" failure (which forced commits on
+    /// no-source cases). Default false; A/B with an INCORRECT-guard before flip.
+    #[serde(default)]
+    pub answer_calibrated: bool,
 }
 
 impl Default for SearchConfig {
@@ -187,6 +198,7 @@ impl Default for SearchConfig {
             query_expand: false,
             passage_select: false,
             page2_fallback: false,
+            answer_calibrated: false,
         }
     }
 }

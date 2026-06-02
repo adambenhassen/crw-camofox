@@ -41,6 +41,29 @@ Output: the answer text in your normal response, plus exactly one
 include inline `[N]` markers in the answer text — citations live only
 in the tool call."#;
 
+/// The baseline abstention rule (line in SYSTEM_PROMPT). Swapped for
+/// `CALIBRATED_CLAUSE` when the calibrated-answer flag is on.
+const HEDGE_CLAUSE: &str =
+    "- If the sources do not cover the query, say so plainly. Do not invent.";
+
+/// Calibrated abstention rule (gated). Converts recoverable OVER-abstentions:
+/// commit when the answer IS present (even indirectly / one inference step),
+/// abstain ONLY when the sources genuinely lack it. Keeps the "use ONLY
+/// sources" grounding (the moat) untouched, so this is the precise INVERSE of
+/// the cycle-1 blunt "always commit" failure (which forced commits on
+/// no-source cases and blew INCORRECT 2->17): here, no source still => abstain.
+const CALIBRATED_CLAUSE: &str = "- If the sources contain the answer — even stated indirectly, in different words, or requiring one obvious inference step (e.g. a year \"1933\" supports the decade \"the 1930s\") — give the direct answer confidently. Do NOT hedge, add disclaimers, or call the sources unclear when they in fact support an answer.\n- ONLY if the sources genuinely do not contain the information, say so plainly in one sentence. Never invent facts that are not in the sources.";
+
+/// Build the system prompt; `calibrated` swaps the abstention rule for the
+/// over-abstention-reducing variant (gated, default off).
+fn system_prompt(calibrated: bool) -> String {
+    if calibrated {
+        SYSTEM_PROMPT.replace(HEDGE_CLAUSE, CALIBRATED_CLAUSE)
+    } else {
+        SYSTEM_PROMPT.to_string()
+    }
+}
+
 pub struct AnswerResult {
     pub content: String,
     pub citations: Vec<Citation>,
@@ -81,6 +104,7 @@ pub async fn synthesize(
     cfg: &LlmConfig,
     max_chars_per_source: usize,
     user_prompt: Option<&str>,
+    calibrated: bool,
 ) -> CrwResult<AnswerResult> {
     if sources.is_empty() {
         return Err(CrwError::InvalidRequest(
@@ -113,8 +137,9 @@ pub async fn synthesize(
     // non-trivial; the current shape — model emits a `===CITATIONS===`
     // line followed by JSON — gives us structured output with a single
     // provider-agnostic call. Fabricated source_ids are rejected below.
+    let sys = system_prompt(calibrated);
     let mut augmented_prompt = format!(
-        "{SYSTEM_PROMPT}\n\nINSTEAD of calling a tool, append the citations after \
+        "{sys}\n\nINSTEAD of calling a tool, append the citations after \
          your answer in this exact format:\n\n===CITATIONS===\n[{{\"source_id\": 0, \
          \"position\": 0}}, ...]\n\nThe citations JSON must be a parseable JSON array \
          on the line after the marker. Only include source_ids you actually used."
@@ -269,6 +294,7 @@ pub async fn synthesize_selected(
     cfg: &LlmConfig,
     max_chars_per_source: usize,
     user_prompt: Option<&str>,
+    calibrated: bool,
 ) -> CrwResult<AnswerResult> {
     let reduce_futs = sources.iter().map(|(url, title, md)| async move {
         let new_md = if md.len() >= PASSAGE_SELECT_MIN_CHARS {
@@ -281,7 +307,15 @@ pub async fn synthesize_selected(
         (url.clone(), title.clone(), new_md)
     });
     let reduced: Vec<Source> = futures::future::join_all(reduce_futs).await;
-    synthesize(query, &reduced, cfg, max_chars_per_source, user_prompt).await
+    synthesize(
+        query,
+        &reduced,
+        cfg,
+        max_chars_per_source,
+        user_prompt,
+        calibrated,
+    )
+    .await
 }
 
 fn parse_answer_and_citations(
