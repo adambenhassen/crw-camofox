@@ -2,7 +2,7 @@ use crw_core::Deadline;
 use crw_core::config::AppConfig;
 use crw_core::error::{CrwError, CrwResult};
 use crw_core::types::{
-    CrawlRequest, CrawlState, CrawlStatus, RequestedRenderer, ScrapeData, ScrapeRequest,
+    CrawlRequest, CrawlState, CrawlStatus, RequestedRenderer, ScrapeRequest,
     resolve_pinned_renderer, resolve_render_js,
 };
 use crw_crawl::crawl::{CrawlOptions, run_crawl};
@@ -405,20 +405,15 @@ impl AppState {
                 })
                 .collect();
 
-            let results = std::sync::Arc::new(tokio::sync::Mutex::new(Vec::<ScrapeData>::new()));
-            let completed = std::sync::Arc::new(std::sync::atomic::AtomicU32::new(0));
-
             futures::stream::iter(reqs)
                 .for_each_concurrent(max_concurrency, |req| {
                     let renderer = renderer.clone();
                     let config = config.clone();
                     let user_agent = user_agent.clone();
                     let tx = tx.clone();
-                    let results = results.clone();
-                    let completed = completed.clone();
                     async move {
                         let deadline = Deadline::from_request_ms(deadline_ms);
-                        let outcome = scrape_url(
+                        let scraped = scrape_url(
                             &req,
                             &renderer,
                             config.extraction.llm.as_ref(),
@@ -428,26 +423,20 @@ impl AppState {
                             render_js_default,
                             deadline,
                         )
-                        .await;
-                        let mut guard = results.lock().await;
-                        if let Ok(d) = outcome {
-                            guard.push(d);
-                        }
-                        let done = completed.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1;
-                        let snapshot = guard.clone();
-                        let status = if done >= total {
-                            CrawlStatus::Completed
-                        } else {
-                            CrawlStatus::InProgress
-                        };
-                        let _ = tx.send(CrawlState {
-                            id,
-                            success: true,
-                            status,
-                            total,
-                            completed: done,
-                            data: snapshot,
-                            error: None,
+                        .await
+                        .ok();
+                        // Mutate the shared status in place — push one document and
+                        // bump the counter without cloning the whole accumulated Vec
+                        // on every completion (avoids O(n^2) copying on large
+                        // batches). A failed scrape still advances `completed`.
+                        tx.send_modify(|st| {
+                            if let Some(d) = scraped {
+                                st.data.push(d);
+                            }
+                            st.completed += 1;
+                            if st.completed >= total {
+                                st.status = CrawlStatus::Completed;
+                            }
                         });
                     }
                 })
