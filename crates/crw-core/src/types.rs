@@ -967,6 +967,11 @@ pub struct SearchRequest {
     /// recall (e.g. 1 vs 3) at a fixed answer temperature.
     #[serde(default, alias = "query_expand_variants")]
     pub query_expand_variants: Option<usize>,
+    /// Per-request override for `[search].multi_round` — the adaptive
+    /// evidence-scout round that fires when the round-1 answer abstains. None
+    /// uses the server config. The eval harness sets this to A/B the lever.
+    #[serde(default, alias = "multi_round")]
+    pub multi_round: Option<bool>,
     /// Maximum number of bytes of each per-result markdown sent to the LLM
     /// when `summarize_results` is enabled. Defaults to
     /// `[extraction.llm].max_html_bytes` (100 KB). Clamped to a 200 KB

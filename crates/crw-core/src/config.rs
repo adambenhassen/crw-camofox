@@ -162,6 +162,18 @@ pub struct SearchConfig {
     /// SearXNG fetch each. Clamped to `MAX_QUERY_EXPAND_VARIANTS` in the route.
     #[serde(default = "default_query_expand_variants")]
     pub query_expand_variants: usize,
+    /// Adaptive multi-round retrieval (the "evidence-scout" loop). When the
+    /// round-1 answer ABSTAINS (sources lacked the fact), an LLM scout reads the
+    /// round-1 evidence and emits targeted follow-up queries (acronym-expanded,
+    /// exact-entity, predicate/date-specific); their results are scraped, unioned
+    /// into the pool, and the answer is re-synthesized ONCE. Bounded (one extra
+    /// round, capped follow-up queries) so worst-case stays within the request
+    /// deadline. Only fires on abstention, so ~most queries keep the single-shot
+    /// fast path. Recall-only + monotone-safe: a still-abstaining round-2 is
+    /// discarded, keeping round-1. Targets "the answer page never entered the
+    /// first pool" — the dominant remaining miss. Defaults to `false` (gated).
+    #[serde(default)]
+    pub multi_round: bool,
     /// Passage-level relevance gate for the LLM answer path: split each scraped
     /// source into passages and feed the answer LLM only the query-relevant
     /// ones (DeepSeek-scored, no new ML deps). Subtractive — removes noise, never
@@ -215,6 +227,7 @@ impl Default for SearchConfig {
             rerank_enabled: true,
             query_expand: false,
             query_expand_variants: default_query_expand_variants(),
+            multi_round: false,
             passage_select: false,
             page2_fallback: false,
             answer_calibrated: false,

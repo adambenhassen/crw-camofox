@@ -30,6 +30,83 @@ const MAX_ANSWER_TOP_N: u32 = 10;
 /// request-supplied `query_expand_variants` can't fan out unbounded SearXNG
 /// fetches. The extra pools are fetched concurrently in `fetch_expanded`.
 const MAX_QUERY_EXPAND_VARIANTS: usize = 5;
+/// Adaptive multi-round: max follow-up queries the evidence-scout issues in the
+/// extra round, and how many results each contributes to the scrape pool.
+/// Bounded so the single extra round stays well within the request deadline.
+const MAX_SCOUT_QUERIES: usize = 2;
+const SCOUT_FETCH_LIMIT: u32 = 6;
+
+/// Heuristic: did the synthesized answer ABSTAIN (sources lacked the fact)?
+/// Aligned with `answer.rs`'s calibrated clause ("ONLY if the sources genuinely
+/// do not contain the information, say so plainly"). Triggers the adaptive
+/// multi-round scout. Conservative — only well-known abstention phrasings.
+fn is_abstention(answer: &str) -> bool {
+    let a = answer.to_lowercase();
+    const MARKERS: &[&str] = &[
+        "do not contain",
+        "does not contain",
+        "doesn't contain",
+        "cannot answer",
+        "can't answer",
+        "cannot determine",
+        "could not find",
+        "couldn't find",
+        "no information",
+        "do not provide",
+        "does not provide",
+        "not mentioned in",
+        "not specified",
+        "unable to answer",
+        "cannot be answered",
+        "sources do not",
+        "i cannot",
+    ];
+    MARKERS.iter().any(|m| a.contains(m))
+}
+
+/// Build a short evidence excerpt from the current candidate pool to brief the
+/// evidence-scout (title + a markdown/snippet head per source, bounded).
+fn evidence_excerpt(data: &SearchData, max_sources: usize, per_chars: usize) -> String {
+    let pool: &Vec<SearchResult> = match data {
+        SearchData::Flat(v) => v,
+        SearchData::Grouped(g) => match g.web.as_ref() {
+            Some(v) => v,
+            None => return String::new(),
+        },
+    };
+    let mut out = String::new();
+    for r in pool.iter().take(max_sources) {
+        let body = r.markdown.as_deref().unwrap_or(r.description.as_str());
+        let snip: String = body.chars().take(per_chars).collect();
+        out.push_str("- ");
+        out.push_str(&r.title);
+        out.push_str(" :: ");
+        out.push_str(snip.trim());
+        out.push('\n');
+    }
+    out
+}
+
+/// Merge freshly-scraped scout rows into the flat answer pool (dedup by URL,
+/// only rows that actually carry markdown). Returns true if any were added.
+/// Grouped data (the explicit-`sources` path) is left untouched — multi-round
+/// targets the flat answer path. Recall-only: never removes existing sources.
+fn merge_scraped(data: &mut SearchData, rows: Vec<SearchResult>) -> bool {
+    if let SearchData::Flat(pool) = data {
+        let mut seen: std::collections::HashSet<String> =
+            pool.iter().map(|r| r.url.clone()).collect();
+        let mut added = false;
+        for r in rows {
+            if r.markdown.is_some() && seen.insert(r.url.clone()) {
+                pool.push(r);
+                added = true;
+            }
+        }
+        added
+    } else {
+        false
+    }
+}
 const DEFAULT_MAX_CHARS_PER_SOURCE: usize = 8192;
 
 /// Wave 4 (R2): hard cap on `max_tokens` per LLM leg (one summary call OR
@@ -293,7 +370,7 @@ pub async fn search_inner(
                     )
                     .await
                     {
-                        Ok((ans, cites, ans_usage, mut ans_warns)) => {
+                        Ok((mut ans, mut cites, ans_usage, mut ans_warns)) => {
                             warnings.append(&mut ans_warns);
                             agg_answer_executed = true;
                             if let Some(ref u) = ans_usage {
@@ -308,6 +385,74 @@ pub async fn search_inner(
                                     &mut agg_truncated,
                                     u,
                                 );
+                            }
+                            // Adaptive multi-round (gated): if round-1 ABSTAINED,
+                            // the evidence-scout issues targeted follow-ups; we
+                            // scrape them, union into the pool, and re-synthesize
+                            // ONCE. Recall-only — a still-abstaining round-2 is
+                            // discarded (keep round-1). Only fires on abstention,
+                            // so the single-shot fast path is unchanged for hits.
+                            let want_multi =
+                                req.multi_round.unwrap_or(state.config.search.multi_round);
+                            if want_multi
+                                && is_abstention(&ans)
+                                && let Some(opts) = req.scrape_options.as_ref()
+                            {
+                                let evidence = evidence_excerpt(&data, 5, 400);
+                                let scout_qs = crw_extract::llm::scout_followups(
+                                    &leg_cfg,
+                                    &req.query,
+                                    &evidence,
+                                    MAX_SCOUT_QUERIES,
+                                )
+                                .await;
+                                let mut grew = false;
+                                for sq in scout_qs {
+                                    let mut sp = params.clone();
+                                    sp.q = sq;
+                                    if let Ok(resp2) = client.fetch(&sp).await {
+                                        let extra = transform_flat_reranked(
+                                            &resp2,
+                                            &req.query,
+                                            SCOUT_FETCH_LIMIT,
+                                        );
+                                        let mut sd = SearchData::Flat(extra);
+                                        let _ = enrich_with_scrape(&mut sd, opts, state).await;
+                                        if let SearchData::Flat(rows) = sd {
+                                            grew |= merge_scraped(&mut data, rows);
+                                        }
+                                    }
+                                }
+                                if grew
+                                    && let Ok((ans2, cites2, usage2, mut warns2)) =
+                                        synthesize_answer(
+                                            &req,
+                                            &data,
+                                            &leg_cfg,
+                                            state.config.search.passage_select,
+                                            state.config.search.answer_calibrated,
+                                            state.config.search.snippet_fallback,
+                                        )
+                                        .await
+                                    && !is_abstention(&ans2)
+                                {
+                                    ans = ans2;
+                                    cites = cites2;
+                                    warnings.append(&mut warns2);
+                                    if let Some(ref u) = usage2 {
+                                        merge_usage(
+                                            &mut agg_input_tokens,
+                                            &mut agg_output_tokens,
+                                            &mut agg_cache_hit,
+                                            &mut agg_cache_miss,
+                                            &mut agg_calls,
+                                            &mut agg_provider,
+                                            &mut agg_model,
+                                            &mut agg_truncated,
+                                            u,
+                                        );
+                                    }
+                                }
                             }
                             let aggregated = build_aggregated_usage(
                                 agg_input_tokens,
@@ -924,6 +1069,7 @@ mod tests {
             answer_prompt: None,
             answer_temperature: None,
             query_expand_variants: None,
+            multi_round: None,
             max_content_chars: None,
         }
     }

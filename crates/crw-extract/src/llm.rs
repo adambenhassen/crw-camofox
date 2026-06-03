@@ -165,6 +165,59 @@ pub async fn expand_query(cfg: &LlmConfig, query: &str, max_variants: usize) -> 
     }
 }
 
+/// Evidence-scout for adaptive multi-round retrieval. Given the question and a
+/// short excerpt of what round-1 retrieval surfaced (which did NOT answer it),
+/// produce up to `max_queries` TARGETED follow-up web-search queries to find or
+/// confirm the answer. Unlike `expand_query` (blind rephrasings), the scout is
+/// failure-aware: it leans on entity names/aliases seen in the evidence and
+/// goes harder — exact-phrase `"entity"`, full official names for any acronym,
+/// the specific predicate/date asked, or a likely authoritative source. Returns
+/// deduped queries (empty on LLM failure → caller simply skips the extra round).
+pub async fn scout_followups(
+    cfg: &LlmConfig,
+    query: &str,
+    evidence: &str,
+    max_queries: usize,
+) -> Vec<String> {
+    let n = max_queries.max(1);
+    let sys = format!(
+        "A first web search did NOT answer the user's question. You are a search \
+         strategist. Using the question and the EVIDENCE excerpt of what the first \
+         search found, write up to {n} NEW, BETTER web-search queries likely to \
+         surface or confirm the answer. Rules: (1) EXPAND every acronym/initialism \
+         to its full proper name. (2) Prefer the exact entity name(s) seen in the \
+         evidence, quoted, plus the specific thing asked (the predicate, the date, \
+         the number). (3) Try a different angle than the original phrasing — an \
+         exact-phrase query, an authoritative source guess, or the canonical \
+         entity. (4) Do NOT repeat the user's original wording. Output ONLY the \
+         queries, ONE per line: no quotes around the whole line, no numbering, no \
+         labels. Output at most {n} line(s)."
+    );
+    let user = format!("QUESTION: {query}\n\nEVIDENCE (did not answer it):\n{evidence}");
+    let mut leg = cfg.clone();
+    leg.max_tokens = leg.max_tokens.min(60 + 60 * n as u32);
+    match chat(&leg, &sys, &user).await {
+        Ok(r) => {
+            let mut out: Vec<String> = Vec::new();
+            for line in r.content.trim().lines() {
+                let v = line.trim().trim_matches('"').trim().to_string();
+                if v.is_empty() || v.eq_ignore_ascii_case(query.trim()) {
+                    continue;
+                }
+                if out.iter().any(|e| e.eq_ignore_ascii_case(&v)) {
+                    continue;
+                }
+                out.push(v);
+                if out.len() >= n {
+                    break;
+                }
+            }
+            out
+        }
+        Err(_) => Vec::new(),
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 async fn dispatch(
     provider: &str,

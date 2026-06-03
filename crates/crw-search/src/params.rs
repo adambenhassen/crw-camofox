@@ -147,6 +147,7 @@ mod tests {
             answer_prompt: None,
             answer_temperature: None,
             query_expand_variants: None,
+            multi_round: None,
             max_content_chars: None,
         }
     }
