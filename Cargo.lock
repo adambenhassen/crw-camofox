@@ -923,6 +923,7 @@ version = "0.12.0"
 dependencies = [
  "crw-core",
  "futures",
+ "moka",
  "reqwest 0.13.2",
  "serde",
  "serde_json",

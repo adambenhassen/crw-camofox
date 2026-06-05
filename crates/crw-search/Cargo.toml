@@ -12,6 +12,7 @@ description = "SearXNG-backed search client and result transforms for the CRW we
 [dependencies]
 crw-core = { path = "../crw-core", version = "0.12.1" }
 futures = { workspace = true }
+moka = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 reqwest = { workspace = true }

@@ -224,6 +224,15 @@ pub struct SearchConfig {
     /// diag500 gold-in-sources with the wrong-non-abstain invariant before flip.
     #[serde(default)]
     pub use_structured_sources: bool,
+    /// Deterministic Wikidata entity-relation lookup (gated, W3). For
+    /// `<relation> of <entity>` questions (PopQA's obscure long tail that web
+    /// search can't surface), classify -> wbsearchentities -> property fetch and
+    /// pin the fact as a structured source (UNTRUSTED-wrapped, runs in parallel
+    /// with SearXNG, 3s-bounded, any error falls through). Free open data, no
+    /// AI, no SPARQL hot-path. Default false; A/B on diag500 PopQA accuracy +
+    /// the wrong-non-abstain invariant before flip.
+    #[serde(default)]
+    pub wikidata_lookup: bool,
     /// Snippet fallback for the LLM answer path (gated): when a top-N result's
     /// scrape failed (empty `markdown`), the result is normally dropped from the
     /// answer pool — if it was the answer-bearing page, crw abstains though
@@ -254,6 +263,7 @@ impl Default for SearchConfig {
             answer_calibrated: false,
             answer_guarded: false,
             use_structured_sources: false,
+            wikidata_lookup: false,
             snippet_fallback: false,
         }
     }

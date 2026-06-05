@@ -158,6 +158,10 @@ max_limit = 20
 # Still UNTRUSTED-wrapped. Flip with CRW_SEARCH__USE_STRUCTURED_SOURCES=true after
 # the diag500 re-baseline. See crates/crw-search/src/structured.rs.
 # use_structured_sources = false
+# W3 (gated, default false): deterministic Wikidata lookup for "<relation> of
+# <entity>" questions (obscure entity tail). CRW_SEARCH__WIKIDATA_LOOKUP=true.
+# use_structured_sources should also be on (W3 pins via the same mechanism).
+# wikidata_lookup = false
 # Engines invoked when the request includes `categories: ["research"]`.
 research_engines = ["arxiv", "crossref", "google scholar", "semantic scholar"]
 # Engines invoked when the request includes `categories: ["github"]`.

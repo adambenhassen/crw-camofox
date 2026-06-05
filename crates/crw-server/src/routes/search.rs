@@ -212,7 +212,8 @@ pub async fn search_inner(
     // W0: parse SearXNG's infoboxes[]/answers[] (Wikidata/Wikipedia structured
     // facts the results[] transform discards) into pinned answer sources. Gated
     // default-off; empty when the flag is off or no structured data was returned.
-    let structured_sources: Vec<answer::Source> = if state.config.search.use_structured_sources {
+    let mut structured_sources: Vec<answer::Source> = if state.config.search.use_structured_sources
+    {
         crw_search::structured_facts(&response)
             .into_iter()
             .map(|f| {
@@ -223,6 +224,18 @@ pub async fn search_inner(
     } else {
         Vec::new()
     };
+
+    // W3: deterministic Wikidata entity-relation lookup (gated, answer path).
+    // For `<relation> of <entity>` queries the obscure-entity long tail web
+    // search can't surface, resolve the fact via Wikidata and PIN it first.
+    // 3s-bounded + cached; any miss/error leaves the normal path untouched.
+    if state.config.search.wikidata_lookup
+        && llm_path
+        && let Some(f) = crw_search::wikidata::lookup(&req.query).await
+    {
+        let md = f.to_markdown();
+        structured_sources.insert(0, (f.url, f.title, md));
+    }
 
     // Page-2 fallback (gated, default-off): when the reranked clean pool came
     // back thinner than the answer needs (junk filter stripped a sparse first
