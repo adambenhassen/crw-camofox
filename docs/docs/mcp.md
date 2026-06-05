@@ -282,7 +282,7 @@ Use [MCP Client Setup](#mcp-clients) for:
 ## Verify Installation
 
 ```bash
-echo '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"clientInfo":{"name":"test"},"protocolVersion":"2024-11-05"}}' \
+echo '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"clientInfo":{"name":"test"},"protocolVersion":"2025-06-18"}}' \
   | crw-mcp 2>/dev/null
 ```
 
@@ -293,7 +293,7 @@ Expected:
   "jsonrpc": "2.0",
   "id": 1,
   "result": {
-    "protocolVersion": "2024-11-05",
+    "protocolVersion": "2025-06-18",
     "capabilities": {"tools": {}},
     "serverInfo": {"name": "crw-mcp", "version": "<current>"}
   }
@@ -322,7 +322,9 @@ AI Assistant → HTTP POST (JSON-RPC 2.0) → crw-server /mcp → Web pages
 
 In embedded mode, the scraping engine runs in-process with zero overhead. In proxy mode, tool calls are forwarded over HTTP. The HTTP transport calls `crw-server` functions directly.
 
-Protocol version: `2024-11-05`
+Protocol version: `2025-06-18`
+
+The `crw_search` tool declares an `outputSchema` and therefore returns its result both as the usual text content block and as a spec-compliant `structuredContent` object (MCP 2025-06-18) shaped like `{ success, data: { results: [...] } }` — strict clients can validate it directly, while lenient clients keep reading the text block unchanged.
 
 ## Operational Notes
 

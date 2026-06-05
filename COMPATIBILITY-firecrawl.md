@@ -103,6 +103,8 @@ This is a **capability matrix**, not an API-shape compatibility matrix (which th
 
 **Surface match:** both products ship MCP. Tool names differ (Firecrawl uses `firecrawl_*`, fastCRW uses `crw_*`); semantic mapping is straightforward.
 
+**Structured output:** `crw_search` additionally emits MCP-2025-06-18 `structuredContent` shaped to fastCRW's own `/v1/search` envelope (`data.results`), **not** Firecrawl's `data.web` shape — it mirrors the body fastCRW clients already consume, so this is not a Firecrawl-shape parity claim. The legacy text content block is retained for lenient clients.
+
 ---
 
 ## 8. Anti-bot / Fire-engine

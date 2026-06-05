@@ -1,8 +1,13 @@
+use axum::http::{HeaderName, HeaderValue};
 use axum_test::TestServer;
 use crw_core::config::AppConfig;
+use crw_core::mcp::{tool_output_schema, tool_result_response};
+use crw_core::types::{
+    ApiResponse, GroupedSearchData, ImageResult, SearchData, SearchResponseData, SearchResult,
+};
 use crw_server::app::create_app;
 use crw_server::state::AppState;
-use serde_json::json;
+use serde_json::{Value, json};
 
 fn test_app() -> TestServer {
     let config: AppConfig = toml::from_str("").unwrap();
@@ -37,7 +42,9 @@ async fn mcp_initialize_returns_capabilities() {
     assert_eq!(json["jsonrpc"], "2.0");
     assert_eq!(json["id"], 1);
     let result = &json["result"];
-    assert!(result["protocolVersion"].is_string());
+    // T7 — protocol version is bumped to the revision that defines
+    // structuredContent/outputSchema (issue #89).
+    assert_eq!(result["protocolVersion"], "2025-06-18");
     assert!(result["capabilities"].is_object());
     assert!(result["serverInfo"]["name"].is_string());
     assert!(result["serverInfo"]["version"].is_string());
@@ -256,4 +263,193 @@ async fn mcp_missing_method_field() {
     let json: serde_json::Value = resp.json();
     // Should be a parse error since "method" is required in JsonRpcRequest
     assert_eq!(json["error"]["code"], -32700);
+}
+
+// --- structuredContent / outputSchema (issue #89) ---
+
+/// T8 — tools/list advertises crw_search with the corrected nested-shape
+/// outputSchema (data is an object whose `results` is required), not the old
+/// flat-array shape.
+#[tokio::test]
+async fn mcp_t8_search_advertises_nested_output_schema() {
+    let server = test_app();
+    let resp = server
+        .post("/mcp")
+        .content_type("application/json")
+        .json(&mcp_request("tools/list", json!(8), json!({})))
+        .await;
+    resp.assert_status_ok();
+    let json: serde_json::Value = resp.json();
+    let tools = json["result"]["tools"].as_array().unwrap();
+    let search = tools
+        .iter()
+        .find(|t| t["name"] == "crw_search")
+        .expect("crw_search tool");
+    let schema = &search["outputSchema"];
+    assert_eq!(schema["type"], "object");
+    assert_eq!(schema["properties"]["data"]["type"], "object");
+    let data_required = schema["properties"]["data"]["required"]
+        .as_array()
+        .expect("data.required");
+    assert!(data_required.iter().any(|v| v == "results"));
+}
+
+/// T9 — tools/call crw_search with no SearXNG configured returns a tool error
+/// (search disabled), surfaced as isError text with no structuredContent.
+#[tokio::test]
+async fn mcp_t9_search_disabled_is_tool_error() {
+    let server = test_app();
+    let resp = server
+        .post("/mcp")
+        .content_type("application/json")
+        .json(&mcp_request(
+            "tools/call",
+            json!(9),
+            json!({"name": "crw_search", "arguments": {"query": "anything"}}),
+        ))
+        .await;
+    resp.assert_status_ok();
+    let json: serde_json::Value = resp.json();
+    let result = &json["result"];
+    assert_eq!(result["isError"], true);
+    assert!(result["content"][0]["text"].is_string());
+    assert!(result.get("structuredContent").is_none());
+}
+
+/// T10 — the MCP-Protocol-Version header is tolerated: present-correct,
+/// present-mismatched, malformed, and absent all succeed (no reject branch).
+#[tokio::test]
+async fn mcp_t10_protocol_version_header_tolerated() {
+    let server = test_app();
+    let name = HeaderName::from_static("mcp-protocol-version");
+    for header in [
+        Some("2025-06-18"),
+        Some("2024-11-05"),
+        Some("not-a-version"),
+        None,
+    ] {
+        let mut req = server.post("/mcp").content_type("application/json");
+        if let Some(v) = header {
+            req = req.add_header(name.clone(), HeaderValue::from_static(v));
+        }
+        let resp = req.json(&mcp_request("ping", json!(10), json!({}))).await;
+        resp.assert_status_ok();
+        let json: serde_json::Value = resp.json();
+        assert_eq!(
+            json["result"],
+            json!({}),
+            "ping must succeed regardless of MCP-Protocol-Version header = {header:?}"
+        );
+    }
+}
+
+// --- T12: real-serializer gate ---
+
+fn real_search_result(idx: u32) -> SearchResult {
+    SearchResult {
+        url: format!("https://example.com/{idx}"),
+        title: format!("Result {idx}"),
+        description: "body text".into(),
+        snippet: "body text".into(),
+        position: idx,
+        score: Some(4.0),
+        published_date: None,
+        category: Some("general".into()),
+        markdown: None,
+        html: None,
+        raw_html: None,
+        links: None,
+        metadata: None,
+        summary: None,
+    }
+}
+
+fn real_image_result(idx: u32) -> ImageResult {
+    ImageResult {
+        url: format!("https://example.com/img/{idx}"),
+        title: format!("Image {idx}"),
+        description: "alt text".into(),
+        image_url: format!("https://example.com/img/{idx}.png"),
+        position: idx,
+        thumbnail_url: None,
+        image_format: None,
+        resolution: None,
+    }
+}
+
+fn envelope(results: SearchData) -> SearchResponseData {
+    SearchResponseData {
+        results,
+        answer: None,
+        citations: Vec::new(),
+        llm_usage: None,
+        warnings: Vec::new(),
+    }
+}
+
+/// Emit `value` through the real MCP wrapper and return the structuredContent it
+/// produced (mirrors what the server sends on the wire).
+fn structured_content_for(value: Value) -> Value {
+    let resp = tool_result_response(json!(1), "crw_search", Ok(value));
+    resp.result
+        .expect("success response")
+        .get("structuredContent")
+        .cloned()
+        .expect("crw_search emits structuredContent for an object value")
+}
+
+/// T12 — validate the REAL `SearchResponse` serializer output (untagged enum,
+/// camelCase, every skip_serializing_if) against the declared outputSchema, on
+/// every branch: flat populated, flat empty, grouped, grouped empty. This is
+/// the gate that the original #89 schema-vs-reality drift would have failed.
+#[tokio::test]
+async fn mcp_t12_real_serializer_validates_against_output_schema() {
+    let schema = tool_output_schema("crw_search").expect("crw_search outputSchema");
+    let validator = jsonschema::validator_for(&schema).expect("schema compiles");
+
+    let cases: Vec<(&str, SearchData)> = vec![
+        (
+            "A: flat populated",
+            SearchData::Flat(vec![real_search_result(1), real_search_result(2)]),
+        ),
+        ("B: flat empty", SearchData::Flat(vec![])),
+        (
+            "C: grouped web+news+images",
+            SearchData::Grouped(GroupedSearchData {
+                web: Some(vec![real_search_result(1)]),
+                news: Some(vec![real_search_result(2)]),
+                images: Some(vec![real_image_result(1)]),
+            }),
+        ),
+        (
+            "D: grouped empty",
+            SearchData::Grouped(GroupedSearchData::default()),
+        ),
+    ];
+
+    for (label, results) in cases {
+        let is_empty_grouped = matches!(&results, SearchData::Grouped(g) if g.web.is_none() && g.news.is_none() && g.images.is_none());
+        let response = ApiResponse::ok(envelope(results));
+        let value = serde_json::to_value(&response).expect("serialize SearchResponse");
+
+        // Sanity on case D: an empty grouped envelope serializes results to `{}`.
+        if is_empty_grouped {
+            assert_eq!(
+                value["data"]["results"],
+                json!({}),
+                "empty grouped results must serialize to an empty object"
+            );
+        }
+
+        let structured = structured_content_for(value.clone());
+        let errors: Vec<String> = validator
+            .iter_errors(&structured)
+            .map(|e| e.to_string())
+            .collect();
+        assert!(
+            errors.is_empty(),
+            "[{label}] real serializer output failed schema validation:\n{}\nvalue: {value}",
+            errors.join("\n")
+        );
+    }
 }

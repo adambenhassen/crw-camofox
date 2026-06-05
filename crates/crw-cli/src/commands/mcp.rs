@@ -84,7 +84,7 @@ impl Backend {
                 let arguments = req.params.get("arguments").cloned().unwrap_or(json!({}));
 
                 let result = self.call_tool(tool_name, arguments).await;
-                Some(tool_result_response(id, result))
+                Some(tool_result_response(id, tool_name, result))
             }
 
             _ => {

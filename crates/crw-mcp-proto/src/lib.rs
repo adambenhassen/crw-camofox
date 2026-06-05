@@ -5,7 +5,16 @@
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
-pub const PROTOCOL_VERSION: &str = "2024-11-05";
+/// MCP spec revision advertised in the `initialize` handshake (lib.rs `initialize`
+/// arm). Bumped from "2024-11-05" to "2025-06-18" to legitimize tool `outputSchema`
+/// and result `structuredContent`, both introduced in the 2025-06-18 revision.
+/// There is no per-feature capability flag for structured output, so advertising
+/// the revision that defines it is the only spec-legal way to emit it.
+///
+/// NOTE: `crw-browse` is a separate rmcp-based MCP server that pins its own
+/// `ProtocolVersion::V_2024_11_05` (crw-browse/src/server.rs) and does NOT consume
+/// this constant — it intentionally stays on 2024-11-05.
+pub const PROTOCOL_VERSION: &str = "2025-06-18";
 
 // --- JSON-RPC types ---
 
@@ -193,7 +202,7 @@ pub fn tool_definitions(proxy_mode: bool) -> Value {
     let _ = proxy_mode;
     tools.push(json!({
         "name": "crw_search",
-        "description": "Search the web and return relevant results with titles, URLs, and descriptions/snippets. Backed by a SearXNG sidecar in embedded mode (no API key needed), or by the configured remote API in proxy mode (uses CRW_API_KEY).\n\nReturn shape: `{ \"success\": true, \"data\": [{ \"url\", \"title\", \"description\", \"snippet\", \"position\", \"score\" }, ...] }`. The `snippet` field is an alias of `description` — both carry the same body text so downstream LLM pipelines that ask for either get a match.\n\nExample: `crw_search(query=\"renewable energy trends 2024\", limit=3)` returns the top 3 web results with title/url/snippet.",
+        "description": "Search the web and return relevant results with titles, URLs, and descriptions/snippets. Backed by a SearXNG sidecar in embedded mode (no API key needed), or by the configured remote API in proxy mode (uses CRW_API_KEY).\n\nReturn shape: `{ \"success\": true, \"data\": { \"results\": [{ \"url\", \"title\", \"description\", \"snippet\", \"position\", \"score\" }, ...] } }`. When `sources` is set, `data.results` is instead an object grouped by source (`{ \"web\": [...], \"news\": [...], \"images\": [...] }`). The `snippet` field is an alias of `description` — both carry the same body text so downstream LLM pipelines that ask for either get a match.\n\nExample: `crw_search(query=\"renewable energy trends 2024\", limit=3)` returns the top 3 web results with title/url/snippet.",
         "inputSchema": {
             "type": "object",
             "properties": {
@@ -245,32 +254,86 @@ pub fn tool_definitions(proxy_mode: bool) -> Value {
             },
             "required": ["query"]
         },
+        // Mirrors the real `SearchResponse = ApiResponse<SearchResponseData>`
+        // serializer in crw-core/src/types.rs. The Ok branch of
+        // `tool_result_response` is the only path that emits `structuredContent`,
+        // and `ApiResponse::ok` always sets `data: Some(..)` — so `data` is
+        // required and the error/error_code/warning siblings are never present
+        // on the validated value (they only appear on the err() path, which
+        // returns Err(String) and never reaches structuredContent).
+        //
+        // `data.results` is `#[serde(untagged)] enum SearchData` → a flat array
+        // (no `sources`) OR a grouped object (`web`/`news`/`images`). Hence the
+        // `oneOf`. Grouped `images` deserialize to `ImageResult` (carries
+        // `imageUrl`, NO `snippet`), so they are deliberately left unconstrained —
+        // constraining them with the text-result shape would falsely reject every
+        // real grouped-image response. No `additionalProperties: false` anywhere:
+        // SearchResult conditionally emits markdown/html/links/metadata/etc.
         "outputSchema": {
             "type": "object",
+            "$defs": {
+                "searchResultItem": {
+                    "type": "object",
+                    "properties": {
+                        "url": { "type": "string" },
+                        "title": { "type": "string" },
+                        "description": { "type": "string", "description": "Body snippet for the result. `snippet` is an alias of this field." },
+                        "snippet": { "type": "string", "description": "Alias of `description`. Always populated." },
+                        "position": { "type": "integer" },
+                        "score": { "type": "number" },
+                        "category": { "type": "string" }
+                    },
+                    "required": ["url", "title", "description", "snippet", "position"]
+                }
+            },
             "properties": {
                 "success": { "type": "boolean" },
                 "data": {
-                    "type": "array",
-                    "items": {
-                        "type": "object",
-                        "properties": {
-                            "url": { "type": "string" },
-                            "title": { "type": "string" },
-                            "description": { "type": "string", "description": "Body snippet for the result. `snippet` is an alias of this field." },
-                            "snippet": { "type": "string", "description": "Alias of `description`. Always populated." },
-                            "position": { "type": "integer" },
-                            "score": { "type": "number" },
-                            "category": { "type": "string" }
+                    "type": "object",
+                    "properties": {
+                        "results": {
+                            "oneOf": [
+                                { "type": "array", "items": { "$ref": "#/$defs/searchResultItem" } },
+                                {
+                                    "type": "object",
+                                    "properties": {
+                                        "web": { "type": "array", "items": { "$ref": "#/$defs/searchResultItem" } },
+                                        "news": { "type": "array", "items": { "$ref": "#/$defs/searchResultItem" } },
+                                        "images": { "type": "array" }
+                                    }
+                                }
+                            ]
                         },
-                        "required": ["url", "title", "description", "snippet", "position"]
-                    }
-                }
+                        "answer": { "type": "string" },
+                        "citations": { "type": "array" },
+                        "llmUsage": { "type": "object" },
+                        "warnings": { "type": "array", "items": { "type": "string" } }
+                    },
+                    "required": ["results"]
+                },
+                "error": { "type": "string" },
+                "error_code": { "type": "string" },
+                "warning": { "type": "string" }
             },
             "required": ["success", "data"]
         }
     }));
 
     json!({ "tools": tools })
+}
+
+/// Returns the declared `outputSchema` for a tool, if it declares one.
+///
+/// Single source of truth: `structuredContent` emission is derived from the
+/// same `tool_definitions` declaration that `tools/list` advertises, so the two
+/// can never drift. Recomputes `tool_definitions` per call — `tools/call` is not
+/// hot; memoize behind a `OnceLock` only if profiling ever demands it.
+pub fn tool_output_schema(tool_name: &str) -> Option<Value> {
+    tool_definitions(false)["tools"]
+        .as_array()?
+        .iter()
+        .find(|t| t["name"] == tool_name)
+        .and_then(|t| t.get("outputSchema").cloned())
 }
 
 /// Result of handling a protocol method.
@@ -332,17 +395,41 @@ pub fn handle_protocol_method(
 }
 
 /// Wrap a tool call result into an MCP-compliant content response.
-pub fn tool_result_response(id: Value, result: Result<Value, String>) -> JsonRpcResponse {
+///
+/// On success the structured `value` is emitted **both** as a text content block
+/// (verbatim, for backward compatibility with lenient clients and clients that
+/// negotiated an older protocol revision) **and**, when the called tool declares
+/// an `outputSchema`, as a top-level `structuredContent` field (MCP 2025-06-18)
+/// so strict clients can validate it. Both representations derive from the same
+/// `value` binding, so `serde_json::from_str(content[0].text) == structuredContent`
+/// holds by construction — the two can never disagree.
+pub fn tool_result_response(
+    id: Value,
+    tool_name: &str,
+    result: Result<Value, String>,
+) -> JsonRpcResponse {
     match result {
         Ok(value) => {
             let text = serde_json::to_string_pretty(&value).unwrap_or_default();
-            JsonRpcResponse::success(
-                id,
-                json!({
-                    "content": [{"type": "text", "text": text}]
-                }),
-            )
+            let mut payload = json!({
+                "content": [{"type": "text", "text": text}]
+            });
+            // Attach structuredContent only when (a) the tool declares an
+            // outputSchema and (b) the value is a JSON object — the spec requires
+            // structuredContent to be an object. The `is_object()` guard is the
+            // proxy version-skew safety valve: in proxy mode a schema-bearing tool
+            // may yield a non-object Ok value (an upstream error string, a plain
+            // string, or a legacy top-level array) — degrade to text-only rather
+            // than ship a spec-violating structuredContent to a strict client.
+            // Locked by test T2b. Do NOT remove the is_object() guard.
+            if value.is_object() && tool_output_schema(tool_name).is_some() {
+                payload["structuredContent"] = value;
+            }
+            JsonRpcResponse::success(id, payload)
         }
+        // Err path: never attach structuredContent. `isError:true` signals
+        // failure, and strict clients must not validate outputSchema against an
+        // error result.
         Err(e) => JsonRpcResponse::success(
             id,
             json!({
@@ -474,5 +561,183 @@ mod tests {
                 "{name}: additionalProperties:false must remain off until schemas are complete"
             );
         }
+    }
+
+    // --- structuredContent emission (issue #89) ---
+
+    /// A single text-result item with every always-emitted field set, plus the
+    /// optional `score`/`category`. `snippet` mirrors `description`, matching the
+    /// real `SearchResult` serializer (snippet is an alias of description).
+    fn search_result_item(idx: u32) -> Value {
+        json!({
+            "url": format!("https://example.com/{idx}"),
+            "title": format!("Result {idx}"),
+            "description": "body text",
+            "snippet": "body text",
+            "position": idx,
+            "score": 4.0,
+            "category": "general"
+        })
+    }
+
+    /// A representative flat (`sources` unset) crw_search success value, shaped
+    /// like `ApiResponse::ok(SearchResponseData { results: Flat(..), .. })`.
+    fn representative_search_value() -> Value {
+        json!({
+            "success": true,
+            "data": { "results": [search_result_item(1), search_result_item(2)] }
+        })
+    }
+
+    /// A representative grouped (`sources` set) value: `results` is an object with
+    /// `web`/`news` (text items) and `images` (the differently-shaped ImageResult).
+    fn grouped_search_value() -> Value {
+        json!({
+            "success": true,
+            "data": { "results": {
+                "web": [search_result_item(1)],
+                "news": [search_result_item(2)],
+                "images": [{
+                    "url": "https://example.com/img",
+                    "title": "An image",
+                    "description": "alt text",
+                    "imageUrl": "https://example.com/img.png",
+                    "position": 1
+                }]
+            }}
+        })
+    }
+
+    fn result_of(resp: &JsonRpcResponse) -> &Value {
+        resp.result.as_ref().expect("success response has result")
+    }
+
+    /// T1 — crw_search Ok emits BOTH a text block and structuredContent, and the
+    /// two are byte-for-byte the same value (single-source invariant).
+    #[test]
+    fn t1_search_emits_dual_content_in_sync() {
+        let repr = representative_search_value();
+        let resp = tool_result_response(json!(1), "crw_search", Ok(repr.clone()));
+        let result = result_of(&resp);
+
+        let text = result["content"][0]["text"]
+            .as_str()
+            .expect("text content present");
+        assert_eq!(
+            result["content"][0]["type"], "text",
+            "first content block is text"
+        );
+
+        let structured = &result["structuredContent"];
+        assert!(!structured.is_null(), "structuredContent present");
+        assert_eq!(
+            structured, &repr,
+            "structuredContent is the unmodified value"
+        );
+
+        let from_text: Value = serde_json::from_str(text).expect("text is valid JSON");
+        assert_eq!(
+            &from_text, structured,
+            "from_str(content.text) == structuredContent (no drift)"
+        );
+    }
+
+    /// T2 — a tool WITHOUT an outputSchema (crw_scrape) gets text only, no
+    /// structuredContent (schema-gated emission).
+    #[test]
+    fn t2_scrape_has_no_structured_content() {
+        let resp = tool_result_response(json!(1), "crw_scrape", Ok(json!({"markdown": "hi"})));
+        let result = result_of(&resp);
+        assert!(result["content"][0]["text"].is_string());
+        assert!(
+            result.get("structuredContent").is_none(),
+            "crw_scrape declares no outputSchema → no structuredContent"
+        );
+    }
+
+    /// T2b — proxy version-skew safety valve: a schema-bearing tool whose Ok
+    /// value is NOT an object (upstream error string, or a legacy top-level
+    /// array) degrades to text-only. Locks the is_object() guard.
+    #[test]
+    fn t2b_non_object_search_value_degrades_to_text() {
+        for non_object in [json!("upstream error string"), json!([{ "url": "x" }])] {
+            let resp = tool_result_response(json!(1), "crw_search", Ok(non_object.clone()));
+            let result = result_of(&resp);
+            assert!(
+                result["content"][0]["text"].is_string(),
+                "text block carries the body"
+            );
+            assert!(
+                result.get("structuredContent").is_none(),
+                "non-object Ok value must NOT emit structuredContent: {non_object}"
+            );
+        }
+    }
+
+    /// T3 — the Err path is an isError text result with no structuredContent.
+    #[test]
+    fn t3_error_path_has_no_structured_content() {
+        let resp = tool_result_response(json!(1), "crw_search", Err("boom".into()));
+        let result = result_of(&resp);
+        assert_eq!(result["isError"], true);
+        assert_eq!(result["content"][0]["text"], "boom");
+        assert!(result.get("structuredContent").is_none());
+    }
+
+    /// T4 — emitted structuredContent validates against the declared outputSchema
+    /// for both the flat and the grouped value (using the same builders the
+    /// real serializer would feed).
+    #[test]
+    fn t4_emitted_structured_content_validates_against_schema() {
+        let schema = tool_output_schema("crw_search").expect("crw_search has outputSchema");
+        let validator = jsonschema::validator_for(&schema).expect("schema compiles");
+
+        for value in [representative_search_value(), grouped_search_value()] {
+            let resp = tool_result_response(json!(1), "crw_search", Ok(value.clone()));
+            let structured = result_of(&resp)["structuredContent"].clone();
+            let errors: Vec<String> = validator
+                .iter_errors(&structured)
+                .map(|e| e.to_string())
+                .collect();
+            assert!(
+                errors.is_empty(),
+                "structuredContent failed schema validation for {value}:\n{}",
+                errors.join("\n")
+            );
+        }
+    }
+
+    /// T5 — the helper is the single source of truth: present for crw_search,
+    /// absent for crw_scrape, with the expected required-field structure.
+    #[test]
+    fn t5_tool_output_schema_helper() {
+        let schema = tool_output_schema("crw_search").expect("crw_search has outputSchema");
+        assert_eq!(schema["type"], "object");
+        let required = schema["required"].as_array().expect("required array");
+        assert_eq!(required, &vec![json!("success"), json!("data")]);
+        assert_eq!(schema["properties"]["data"]["type"], "object");
+        let data_required = schema["properties"]["data"]["required"]
+            .as_array()
+            .expect("data.required array");
+        assert!(data_required.iter().any(|v| v == "results"));
+
+        assert!(
+            tool_output_schema("crw_scrape").is_none(),
+            "crw_scrape declares no outputSchema"
+        );
+    }
+
+    /// T6 — the additionalProperties:false guard is scoped to inputSchema only;
+    /// the new outputSchema must not set it (the conditional SearchResult fields
+    /// would make it falsely reject real responses).
+    #[test]
+    fn t6_output_schema_does_not_set_additional_properties_false() {
+        let defs = tool_definitions(false);
+        let search = tool_by_name(&defs, "crw_search");
+        let ap = search["outputSchema"].get("additionalProperties");
+        assert!(
+            ap.is_none() || ap.and_then(|v| v.as_bool()) != Some(false),
+            "crw_search outputSchema must not set additionalProperties:false"
+        );
     }
 }

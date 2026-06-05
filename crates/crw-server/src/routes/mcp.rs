@@ -133,7 +133,7 @@ pub async fn handle_request(state: &AppState, req: JsonRpcRequest) -> Option<Jso
             let arguments = req.params.get("arguments").cloned().unwrap_or(json!({}));
 
             let result = call_tool(state, tool_name, arguments).await;
-            Some(tool_result_response(id, result))
+            Some(tool_result_response(id, tool_name, result))
         }
 
         _ => {
@@ -174,6 +174,15 @@ pub async fn mcp_handler(
             .unwrap(),
         );
     }
+
+    // MCP 2025-06-18 requires clients to send `MCP-Protocol-Version` on every
+    // post-initialize request. We TOLERATE it: read for observability, never
+    // reject on presence, absence, or mismatch. Hard validation is deferred
+    // until client adoption is confirmed. Do NOT add a reject branch here
+    // without updating the header-tolerance test in tests/mcp.rs.
+    let _client_protocol = headers
+        .get("mcp-protocol-version")
+        .and_then(|v| v.to_str().ok());
 
     let req: JsonRpcRequest = match serde_json::from_str(&body) {
         Ok(r) => r,

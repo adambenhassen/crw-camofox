@@ -861,6 +861,7 @@ dependencies = [
 name = "crw-mcp-proto"
 version = "0.11.0"
 dependencies = [
+ "jsonschema",
  "serde",
  "serde_json",
  "thiserror 2.0.18",
@@ -949,6 +950,7 @@ dependencies = [
  "crw-server",
  "futures",
  "hex",
+ "jsonschema",
  "reqwest 0.13.2",
  "serde",
  "serde_json",
