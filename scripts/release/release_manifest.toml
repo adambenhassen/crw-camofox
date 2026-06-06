@@ -17,26 +17,38 @@ crates = ["crw-mcp-proto"]
 order = 1
 crates = ["crw-core"]
 
+# Within a tier crates MUST be independent of each other (the driver waits for
+# crates.io propagation only at tier boundaries, not between same-tier crates).
+# crw-renderer depends on crw-extract, so it cannot share tier 2 with it — that
+# ordering bug skipped the crates.io publish from crw-renderer onward (a crate
+# tried to resolve a sibling that wasn't on the index yet). renderer gets its
+# own tier after extract.
 [[tiers]]
 order = 2
-crates = ["crw-renderer", "crw-extract", "crw-search", "crw-diff"]
+crates = ["crw-extract", "crw-search", "crw-diff"]
 
 [[tiers]]
+# crw-renderer depends on crw-extract (tier 2).
 order = 3
+crates = ["crw-renderer"]
+
+[[tiers]]
+# crw-crawl depends on crw-renderer, crw-diff, crw-extract.
+order = 4
 crates = ["crw-crawl"]
 
 [[tiers]]
 # crw-monitor depends on crw-crawl and is an optional dependency of crw-server,
 # so it must publish after crw-crawl and before crw-server.
-order = 4
+order = 5
 crates = ["crw-monitor"]
 
 [[tiers]]
-order = 5
+order = 6
 crates = ["crw-server"]
 
 [[tiers]]
-order = 6
+order = 7
 crates = ["crw-mcp"]
 
 [unpublished]

@@ -246,6 +246,29 @@ def main() -> int:
                 f"either publish those crates or remove from defaults."
             )
 
+    # 3b. Tier topology: every internal dep must publish in an EARLIER tier.
+    #     Within a tier crates are assumed independent — the driver waits for
+    #     crates.io propagation only at tier boundaries, not between same-tier
+    #     crates. A same-tier (or later) dep means a crate tries to resolve a
+    #     sibling that isn't on the index yet, which aborts the crates.io
+    #     publish from that crate onward (this skipped renderer..mcp on 0.13.0).
+    tier_of = {c: t["order"] for t in manifest["tiers"] for c in t["crates"]}
+    for pkg in meta["packages"]:
+        name = pkg["name"]
+        if name not in tier_of:
+            continue
+        for dep in pkg.get("dependencies", []):
+            if dep.get("kind") not in (None, "build"):
+                continue
+            dn = dep["name"]
+            if dn in tier_of and tier_of[dn] >= tier_of[name]:
+                errors.append(
+                    f"tier ordering: {name} (tier {tier_of[name]}) depends on "
+                    f"{dn} (tier {tier_of[dn]}) — a dependency must publish in an "
+                    f"earlier tier; move {dn} up or {name} down in "
+                    f"release_manifest.toml."
+                )
+
     # 4. Path/git deps need version field
     for pkg in meta["packages"]:
         if pkg["name"] not in published:
