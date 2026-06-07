@@ -29,7 +29,7 @@ fn select_setup_mode() -> Result<SetupMode, SetupError> {
     println!();
 
     let items = vec![
-        "☁️  Cloud (Recommended for getting started)\n        • 500 free credits, no payment needed\n        • Zero setup, works instantly\n        • Managed infrastructure, always up-to-date",
+        "☁️  Cloud (Recommended for getting started)\n        • 500 free one-time credits, no payment needed\n        • Zero setup, works instantly\n        • Managed infrastructure, always up-to-date",
         "🏠 Local (Self-hosted)\n        • Unlimited usage, completely free\n        • Full control over your data\n        • Requires: Docker (~1.5GB for images)",
     ];
 

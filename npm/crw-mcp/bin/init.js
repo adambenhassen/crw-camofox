@@ -123,11 +123,13 @@ Without flags, auto-detects installed agents and installs to all of them.
     console.log(`  export CRW_API_KEY=${apiKey}`);
   } else {
     console.log("\nCloud mode (fastcrw.com):");
+    console.log("  500 free one-time credits, managed infra — https://fastcrw.com");
     console.log("  export CRW_API_KEY=fc-your-key");
-    console.log("  export CRW_API_URL=https://fastcrw.com/api");
+    console.log("  export CRW_API_URL=https://api.fastcrw.com");
+    console.log("  Terms of Service: https://fastcrw.com/terms");
   }
 
-  console.log("\nLocal mode (no key needed):");
+  console.log("\nLocal mode (free, same binary, fully capable):");
   console.log("  npx crw-mcp");
   console.log("\nDocs: https://fastcrw.com/docs");
 }
