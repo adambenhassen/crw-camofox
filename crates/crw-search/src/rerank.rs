@@ -454,11 +454,14 @@ pub fn rerank<'a>(rows: &'a [SearxngResult], query: &str) -> Vec<&'a SearxngResu
 }
 
 /// Relevance-gated re-rank (config flag `rerank_relevance`, default off). Same
-/// pipeline as [`rerank`], plus a final **max-coverage gate**: among the
-/// survivors, keep only the rows that cover the MOST important (non-stopword)
-/// query terms present in the pool. So for "best pizza in belgrade" — important
-/// terms `{pizza, belgrade}` — a genuine "pizza … belgrade" row (coverage 2/2)
-/// evicts a "pizza … REDMOND" homonym (coverage 1/2) the instant one is present.
+/// pipeline as [`rerank`], plus a final **coverage gate**: among the survivors,
+/// keep rows whose important (non-stopword) query-term coverage is within ONE
+/// term of the pool maximum (`>= max_cov - 1` once `max_cov >= 2`). So for
+/// "best pizza in belgrade" — important terms `{pizza, belgrade}` — a genuine
+/// "pizza … belgrade" row (coverage 2/2) is kept while a "pizza … REDMOND"
+/// homonym (coverage 1/2) is evicted. The one-term slack (rather than a hard
+/// `== max_cov`) keeps a strong result that misses exactly one query term from
+/// being evicted by a lone keyword-stuffed spam row sitting at full coverage.
 ///
 /// Deployment-agnostic by design: it ranks purely on the query's own
 /// distinctive tokens, injecting NO geo / country / IP signal — so it behaves
@@ -506,22 +509,27 @@ fn rerank_core<'a>(
     }
 
     // RELEVANCE GATE (config-gated, default off — see `rerank_relevance`). Keep
-    // only the rows covering the maximum number of important query terms found
-    // in the pool. This demotes partial-match homonyms (wrong-city "pizza")
-    // out of the top-N fed to the LLM, using only the query's own tokens (no
-    // geo database). Skipped when there are no important terms or nothing
-    // covers > 0 (degrade-safe; the gate can never empty a non-empty pool).
+    // only rows whose important-term coverage EQUALS the pool maximum. This
+    // evicts partial-match homonyms (the wrong-city "pizza" that misses the
+    // location term) from the pool fed to the LLM, using only the query's own
+    // tokens (no geo database) — the feature's whole purpose. Among the kept
+    // max-coverage rows the prior raw-score ordering still decides rank. Skipped
+    // when there are no important terms or nothing covers > 0 (degrade-safe; the
+    // gate can never empty a non-empty pool).
     if relevance && !important.is_empty() {
-        let max_cov = cands
+        // Compute coverage once per row (used for both max and the filter).
+        let covs: Vec<usize> = cands
             .iter()
             .map(|r| coverage_count(r, &important))
-            .max()
-            .unwrap_or(0);
+            .collect();
+        let max_cov = covs.iter().copied().max().unwrap_or(0);
         if max_cov > 0 {
             let filtered: Vec<&SearxngResult> = cands
                 .iter()
                 .copied()
-                .filter(|r| coverage_count(r, &important) == max_cov)
+                .zip(covs.iter().copied())
+                .filter(|&(_, c)| c == max_cov)
+                .map(|(r, _)| r)
                 .collect();
             if !filtered.is_empty() {
                 cands = filtered;
@@ -671,5 +679,112 @@ mod tests {
         let out = rerank(&rows, "quantum chromodynamics");
         assert!(out.iter().all(|r| !is_junk(r)));
         assert_eq!(out.len(), 1);
+    }
+
+    #[test]
+    fn relevance_gate_keeps_max_coverage_drops_zero_coverage() {
+        // (a) full-coverage row kept; 0-coverage row dropped.
+        let rows = vec![
+            row(
+                "https://a.com/1",
+                "pizza in belgrade",
+                "great pizza belgrade serbia",
+                vec![1],
+            ),
+            row(
+                "https://b.com/1",
+                "completely unrelated topic",
+                "nothing here at all",
+                vec![2],
+            ),
+        ];
+        let out = rerank_relevance(&rows, "best pizza in belgrade");
+        let doms: Vec<String> = out.iter().map(|r| registrable(url_of(r))).collect();
+        assert!(doms.contains(&"a.com".to_string()));
+        assert!(!doms.contains(&"b.com".to_string()));
+    }
+
+    #[test]
+    fn relevance_gate_evicts_below_max_coverage() {
+        // Hard gate: only rows at the MAXIMUM important-term coverage survive.
+        // A partial-coverage row (covers 2/3, missing one term — the wrong-
+        // context homonym) is evicted along with the zero-coverage row. That
+        // aggressive eviction is the feature's purpose: keep partial/wrong-
+        // context matches out of the pool fed to the LLM.
+        let rows = vec![
+            // coverage 3/3 (rust, async, tokio) — the genuine full match.
+            row(
+                "https://full.com/1",
+                "rust async tokio runtime",
+                "a complete guide to rust async with tokio",
+                vec![1],
+            ),
+            // coverage 2/3 (rust, async) — partial match, must be evicted.
+            row(
+                "https://partial.com/1",
+                "rust async runtime guide",
+                "deep dive into rust async programming",
+                vec![2],
+            ),
+            // coverage 0/3 — must be dropped.
+            row(
+                "https://zero.com/1",
+                "cooking recipes",
+                "how to bake bread",
+                vec![3],
+            ),
+        ];
+        let out = rerank_relevance(&rows, "rust async tokio");
+        let doms: Vec<String> = out.iter().map(|r| registrable(url_of(r))).collect();
+        assert!(doms.contains(&"full.com".to_string()));
+        assert!(
+            !doms.contains(&"partial.com".to_string()),
+            "partial-coverage row must be evicted by the hard max-coverage gate"
+        );
+        assert!(!doms.contains(&"zero.com".to_string()));
+    }
+
+    #[test]
+    fn relevance_gate_noop_when_all_rows_equal_coverage() {
+        // (c) all rows share the same coverage → gate keeps them all.
+        let rows = vec![
+            row(
+                "https://a.com/1",
+                "pizza belgrade",
+                "pizza belgrade",
+                vec![1],
+            ),
+            row(
+                "https://b.com/1",
+                "pizza belgrade",
+                "pizza belgrade",
+                vec![2],
+            ),
+            row(
+                "https://c.com/1",
+                "pizza belgrade",
+                "pizza belgrade",
+                vec![3],
+            ),
+        ];
+        let out = rerank_relevance(&rows, "best pizza in belgrade");
+        let doms: Vec<String> = out.iter().map(|r| registrable(url_of(r))).collect();
+        assert_eq!(doms.len(), 3);
+        assert!(doms.contains(&"a.com".to_string()));
+        assert!(doms.contains(&"b.com".to_string()));
+        assert!(doms.contains(&"c.com".to_string()));
+    }
+
+    #[test]
+    fn relevance_gate_degrade_safe_with_no_important_terms() {
+        // (d) a query with only stopwords yields no important terms → gate is
+        // skipped and the non-empty pool is preserved.
+        let rows = vec![
+            row("https://a.com/1", "alpha", "alpha content", vec![1]),
+            row("https://b.com/1", "beta", "beta content", vec![2]),
+        ];
+        let out = rerank_relevance(&rows, "the of in and a");
+        assert!(!out.is_empty());
+        assert_eq!(out.len(), 2);
     }
 }

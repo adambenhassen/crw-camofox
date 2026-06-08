@@ -96,6 +96,12 @@ fn system_prompt(calibrated: bool, guarded: bool, list_format: bool) -> String {
 /// "recommend …", "list of …", "which … are the best"). Conservative by design
 /// — when in doubt it returns false so factual single-answer queries (the
 /// accuracy benchmark) keep the prose path. Used to gate [`LIST_CLAUSE`].
+///
+/// Guards against an informational/how-to false-positive class: "best practices
+/// for rust", "best tips for testing", "best ways to learn rust", "best guide
+/// to X" all share the "best <noun> for/in X" shape of an entity-list query but
+/// are really prose/how-to questions. The `SINGULAR_TRAPS` list therefore also
+/// includes those informational nouns, so such queries fall back to prose.
 pub fn is_list_intent(query: &str) -> bool {
     let q = query.trim().to_lowercase();
     if q.is_empty() {
@@ -142,8 +148,39 @@ pub fn is_list_intent(query: &str) -> bool {
     // plural-ish noun). The cheap, robust signal is the presence of "in"/"for"/
     // "near" later in the query, which is what "best X in Y" queries carry.
     const FRAME_WORDS: &[&str] = &["in", "for", "near", "around"];
-    // Exclude clearly-singular factual framings that share the head cue.
-    const SINGULAR_TRAPS: &[&str] = &["time", "way", "place", "method", "approach"];
+    // Exclude clearly-singular factual framings AND informational/how-to nouns
+    // that share the head cue. "best practices for rust", "best tips for X",
+    // "best ways to learn Y", "best guide to Z" are prose/how-to queries, not
+    // entity-list queries, despite the "best <noun> for/in X" shape.
+    const SINGULAR_TRAPS: &[&str] = &[
+        "time",
+        "way",
+        "place",
+        "method",
+        "approach",
+        "practices",
+        "practice",
+        "tips",
+        "tip",
+        "guide",
+        "ways",
+        "idea",
+        "ideas",
+        "reason",
+        "reasons",
+        "example",
+        "examples",
+        "tutorial",
+        "advice",
+        "option",
+        "options",
+        "strategy",
+        "strategies",
+        "solution",
+        "solutions",
+        "tricks",
+        "steps",
+    ];
     if toks.iter().take(3).any(|t| SINGULAR_TRAPS.contains(t)) {
         return false;
     }
@@ -184,6 +221,7 @@ pub const MAX_USER_PROMPT_CHARS: usize = 500;
 /// optional caller-supplied style/tone/language directive appended below
 /// the hardcoded safety wrapper — it does NOT replace the
 /// "answer using ONLY the provided sources" rule or the citation format.
+#[allow(clippy::too_many_arguments)]
 pub async fn synthesize(
     query: &str,
     sources: &[Source],
@@ -376,6 +414,7 @@ async fn reduce_source(query: &str, md: &str, cfg: &LlmConfig) -> Option<String>
 /// `synthesize` (same answer prompt, citation guards, truncation). Any selection
 /// failure falls back to the full source, so output is byte-identical to
 /// `synthesize` on the fallback path — it can only remove noise, never regress.
+#[allow(clippy::too_many_arguments)]
 pub async fn synthesize_selected(
     query: &str,
     sources: &[Source],
@@ -587,6 +626,28 @@ mod tests {
         assert!(!is_list_intent("best time to visit belgrade"));
         assert!(!is_list_intent("best way to learn rust"));
         assert!(!is_list_intent(""));
+    }
+
+    #[test]
+    fn list_intent_skips_informational_best_queries() {
+        // "best <informational-noun> for/in X" is a how-to/prose query, not an
+        // entity-list ask — the informational-noun guard must catch these.
+        assert!(!is_list_intent("best practices for rust"));
+        assert!(!is_list_intent("best practices in security"));
+        assert!(!is_list_intent("best options for beginners"));
+        assert!(!is_list_intent("best strategy for teams"));
+        assert!(!is_list_intent("best solution for memory leaks"));
+        assert!(!is_list_intent("best tips for testing"));
+        assert!(!is_list_intent("best ways to learn rust"));
+    }
+
+    #[test]
+    fn list_intent_still_fires_on_genuine_entity_lists() {
+        // The guard must NOT over-fire: real "best/top <entity> in/for Y" asks
+        // still take the ranked-list path.
+        assert!(is_list_intent("best pizza in belgrade"));
+        assert!(is_list_intent("best laptops for programming"));
+        assert!(is_list_intent("top restaurants in tokyo"));
     }
 
     #[test]

@@ -24,7 +24,7 @@ const DEFAULT_ANSWER_TOP_N: u32 = 5;
 /// Default top-N for the calibrated answer path (feeds more sources so the
 /// answer in result #6-8, or behind a failed top-5 scrape, still reaches the
 /// model). Bounded by `MAX_ANSWER_TOP_N`.
-const CALIBRATED_ANSWER_TOP_N: u32 = 5;
+const CALIBRATED_ANSWER_TOP_N: u32 = 8;
 const MAX_ANSWER_TOP_N: u32 = 10;
 /// Upper bound on query-expansion rewrites fetched + unioned per request, so a
 /// request-supplied `query_expand_variants` can't fan out unbounded SearXNG
@@ -512,11 +512,15 @@ pub async fn search_inner(
                                             list_format,
                                         )
                                         .await
-                                    && !is_abstention(&ans2)
                                 {
-                                    ans = ans2;
-                                    cites = cites2;
-                                    warnings.append(&mut warns2);
+                                    // Round-2 actually called the LLM and consumed
+                                    // tokens, so its usage MUST be merged for honest
+                                    // accounting even if it abstained — only the
+                                    // ANSWER/citations are adopted conditionally
+                                    // (when round-2 produced a non-abstaining
+                                    // answer). Merging usage before the abstention
+                                    // check prevents silently dropping the round-2
+                                    // token cost.
                                     if let Some(ref u) = usage2 {
                                         merge_usage(
                                             &mut agg_input_tokens,
@@ -529,6 +533,11 @@ pub async fn search_inner(
                                             &mut agg_truncated,
                                             u,
                                         );
+                                    }
+                                    if !is_abstention(&ans2) {
+                                        ans = ans2;
+                                        cites = cites2;
+                                        warnings.append(&mut warns2);
                                     }
                                 }
                             }
@@ -1177,6 +1186,24 @@ mod tests {
             answer_list_format: None,
             max_content_chars: None,
         }
+    }
+
+    #[test]
+    fn is_abstention_detects_marker_phrases() {
+        assert!(is_abstention(
+            "The sources do not contain this information."
+        ));
+        assert!(is_abstention("I cannot answer that from the sources."));
+        assert!(is_abstention("That is not mentioned in the sources."));
+        assert!(is_abstention("The provided sources do not provide a year."));
+        assert!(is_abstention("I could not find the answer."));
+        assert!(is_abstention("The date is not specified anywhere."));
+    }
+
+    #[test]
+    fn is_abstention_false_for_normal_answer() {
+        assert!(!is_abstention("The capital of Serbia is Belgrade."));
+        assert!(!is_abstention("Rust was first released publicly in 2010."));
     }
 
     #[test]

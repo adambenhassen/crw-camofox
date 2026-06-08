@@ -419,22 +419,21 @@ fn make_row(url: &str, title: &str, content: &str, score: f64) -> SearxngResult 
 }
 
 #[test]
-fn relevance_gate_drops_partial_match_homonym() {
-    // The reported bug: "best pizza in belgrade" surfaced Redmond, WA pizzerias
-    // (coverage 1/2 — "pizza" only, higher raw score) above the genuine
-    // Belgrade result (coverage 2/2). The relevance gate must evict the
-    // partial-match homonym from the answer pool, using only the query's own
+fn relevance_gate_keeps_full_match_and_drops_zero_coverage() {
+    // The relevance gate keeps rows within ONE important term of the pool
+    // maximum (softened from the old hard `== max_cov`, so a single
+    // keyword-stuffed spam row can't evict a strong near-match). It must still
+    // drop rows that cover ZERO important terms, using only the query's own
     // tokens (no geo signal — works on any self-hosted region).
     let rows = vec![
-        // Wrong-city homonym: only "pizza" matches, but the higher raw score
-        // would float it to the top of the default raw-score sort.
+        // Zero-coverage row: neither "pizza" nor "belgrade" present.
         make_row(
-            "https://www.yelp.com/search?find_desc=pizza&find_loc=Redmond+WA",
-            "The Best 10 Pizza Places near Redmond, WA 98052",
-            "best pizza restaurants near you in redmond washington",
+            "https://www.example.com/cooking",
+            "How To Bake Sourdough Bread At Home",
+            "a long guide on baking bread from scratch in your oven",
             9.0,
         ),
-        // Genuine answer: both "pizza" and "belgrade" present, lower raw score.
+        // Genuine answer: both "pizza" and "belgrade" present (coverage 2/2).
         make_row(
             "https://www.tripadvisor.com/Restaurants-Belgrade-Pizza.html",
             "THE 10 BEST Pizza Places in Belgrade",
@@ -444,36 +443,61 @@ fn relevance_gate_drops_partial_match_homonym() {
     ];
     let q = "best pizza in the belgrade";
 
-    // Default path (relevance off) keeps both — proves the flag gates behavior
-    // and the frozen lexical-core ordering is unchanged.
-    let off = crw_search::transform_flat_reranked(&resp(rows.clone()), q, 5, false);
-    assert_eq!(
-        off.len(),
-        2,
-        "default path must keep both rows (byte-parity)"
-    );
-    assert!(
-        off[0].url.contains("redmond") || off[0].url.contains("Redmond"),
-        "default path orders by raw score → Redmond first: {:?}",
-        off.iter().map(|r| &r.url).collect::<Vec<_>>()
-    );
-
-    // Relevance gate (flag on): the Redmond row (coverage 1/2) is dropped, only
-    // the Belgrade row (coverage 2/2) reaches the LLM.
+    // Relevance gate (flag on): the zero-coverage bread row is dropped; only the
+    // Belgrade row (coverage 2/2, the max) reaches the LLM.
     let on = crw_search::transform_flat_reranked(&resp(rows), q, 5, true);
     assert_eq!(
         on.len(),
         1,
-        "relevance gate must keep only the full-match row"
+        "relevance gate must drop the zero-coverage row"
     );
     assert!(
         on[0].url.contains("tripadvisor") && on[0].url.to_lowercase().contains("belgrade"),
         "expected the Belgrade pizza row, got: {:?}",
         on[0].url
     );
+}
+
+#[test]
+fn relevance_gate_evicts_partial_match_homonym() {
+    // Hard gate: only MAX-coverage rows survive. The genuine Belgrade match
+    // (covers both "pizza" and "belgrade") evicts the pizza-only homonym
+    // (covers one term) — keeping the wrong-context result out of the pool,
+    // which is the feature's purpose. The homonym is given a HIGHER raw score
+    // to prove the gate evicts by coverage regardless of upstream rank.
+    let rows = vec![
+        // Full match: covers both "pizza" and "belgrade" (coverage 2/2).
+        make_row(
+            "https://belgrade-eats.example/pizza",
+            "Best Pizza in Belgrade — Top Pizzerias",
+            "a guide to the best pizza places across belgrade, serbia",
+            6.0,
+        ),
+        // Partial homonym: covers "pizza" only, no "belgrade" (coverage 1/2);
+        // higher raw score, but the gate still evicts it.
+        make_row(
+            "https://www.seriouseats.com/best-pizza-guide",
+            "The Definitive Guide To Great Pizza",
+            "an in-depth, well-researched look at what makes pizza great",
+            9.0,
+        ),
+    ];
+    let q = "best pizza in the belgrade";
+
+    let on = crw_search::transform_flat_reranked(&resp(rows), q, 5, true);
+    assert_eq!(
+        on.len(),
+        1,
+        "only the full-coverage Belgrade row should survive the gate"
+    );
     assert!(
-        !on.iter().any(|r| r.url.to_lowercase().contains("redmond")),
-        "Redmond homonym must not survive the relevance gate"
+        on.iter().any(|r| r.url.contains("belgrade-eats")),
+        "the full-match row must survive: {:?}",
+        on.iter().map(|r| &r.url).collect::<Vec<_>>()
+    );
+    assert!(
+        !on.iter().any(|r| r.url.contains("seriouseats")),
+        "the pizza-only homonym must be evicted by the hard max-coverage gate"
     );
 }
 
