@@ -872,13 +872,28 @@ impl<C: ChromeConnOps> Drop for PoolGuard<C> {
             return;
         }
 
-        // Step 2: lock slot, take conn out, transition → Dead{Some(conn)}
-        let conn_opt = {
+        // Step 2: lock slot, take conn out, transition → Dead{Some(conn)}.
+        // Capture ctx_id + target_id as well: on cancellation we must explicitly
+        // reap the browser-owned target/context (Step 5) — a bare connection
+        // close does NOT free them, so dropping the ids here is what leaked the
+        // renderer process on every timed-out / cancelled render.
+        let cleanup = {
             let mut g = slot.lock().unwrap();
             match std::mem::replace(&mut g.state, SlotState::Closing) {
-                SlotState::CheckedOut { conn, .. } | SlotState::Recycling { conn, .. } => {
+                SlotState::CheckedOut {
+                    conn,
+                    ctx_id,
+                    target_id,
+                }
+                | SlotState::Recycling {
+                    conn,
+                    ctx_id,
+                    target_id,
+                    ..
+                } => {
                     g.state = SlotState::Dead { conn: Some(conn) };
-                    g.take_conn() // immediate take to Dead{None}
+                    // immediate take to Dead{None}, paired with the ids to reap
+                    g.take_conn().map(|c| (c, ctx_id, target_id))
                 }
                 other => {
                     g.state = other;
@@ -899,11 +914,25 @@ impl<C: ChromeConnOps> Drop for PoolGuard<C> {
             pool.dec_inflight_and_notify();
         }
 
-        // Step 5: best-effort reaper for conn close
-        if let Some(conn) = conn_opt
+        // Step 5: best-effort reap of the browser-owned target + context BEFORE
+        // closing the connection. Targets created via Target.createTarget are
+        // owned by the browser (not the CDP client) and disposeOnDetach is not
+        // set, so a bare WS/conn close leaves an orphaned renderer process.
+        // Mirror release()'s reap (closeTarget → disposeBrowserContext), but
+        // best-effort with timeouts on a detached task (Drop cannot await).
+        if let Some((conn, ctx_id, target_id)) = cleanup
             && tokio::runtime::Handle::try_current().is_ok()
         {
             tokio::spawn(async move {
+                if let Some(tid) = target_id.as_deref() {
+                    let _ =
+                        tokio::time::timeout(Duration::from_secs(5), conn.close_target(tid)).await;
+                }
+                let _ = tokio::time::timeout(
+                    Duration::from_secs(5),
+                    conn.dispose_browser_context(&ctx_id),
+                )
+                .await;
                 let _ = tokio::time::timeout(Duration::from_secs(1), conn.close_conn()).await;
             });
         }
@@ -1023,6 +1052,40 @@ mod tests {
         assert_eq!(conn.dispose_ctx_calls.load(Ordering::SeqCst), 1);
         // create_ctx: once on creation + once on recycle
         assert_eq!(conn.create_ctx_calls.load(Ordering::SeqCst), 2);
+    }
+
+    #[tokio::test]
+    async fn drop_reaps_target_and_context() {
+        // Regression: a render cancelled by the outer timeout drops PoolGuard
+        // WITHOUT release(). Drop must still reap the browser-owned target +
+        // context, not just close the connection — otherwise the renderer
+        // process leaks (the 3-6 day-old orphans observed in prod).
+        let pool = BrowserContextPool::new(small_pool_cfg(), fake_factory());
+        let guard = pool.acquire().await.unwrap();
+        guard.record_target("t-1".into());
+        let conn = guard.conn.clone();
+
+        drop(guard); // simulate cancellation: no release()
+
+        // Drop reaps on a detached task; give it time to run.
+        tokio::time::sleep(Duration::from_millis(100)).await;
+
+        assert_eq!(
+            conn.close_target_calls.load(Ordering::SeqCst),
+            1,
+            "Drop must Target.closeTarget the orphaned target"
+        );
+        assert_eq!(
+            conn.dispose_ctx_calls.load(Ordering::SeqCst),
+            1,
+            "Drop must disposeBrowserContext"
+        );
+        assert_eq!(
+            conn.close_conn_calls.load(Ordering::SeqCst),
+            1,
+            "Drop must still close the connection last"
+        );
+        assert_eq!(pool.inflight(), 0, "Drop must decrement inflight");
     }
 
     #[tokio::test]
