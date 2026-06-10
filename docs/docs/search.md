@@ -140,7 +140,7 @@ That is the flat response shape used when `sources` is not set.
 | `lang` | string | -- | Result language hint such as `"en"` or `"tr"` |
 | `tbs` | string | -- | Recency filter: `qdr:h`, `qdr:d`, `qdr:w`, `qdr:m`, `qdr:y` |
 | `sources` | string[] | -- | Result groups such as `"web"`, `"news"`, `"images"` |
-| `categories` | string[] | -- | Filters such as `"github"`, `"research"`, `"pdf"` |
+| `categories` | string[] | -- | Curated filters (`"github"`, `"research"`, `"pdf"`) **plus** any native SearXNG category (`"science"`, `"it"`, `"news"`, `"files"`, …) passed straight through. Max 5 entries. See [Curated vs. passthrough categories](#curated-vs-passthrough-categories) |
 | `scrapeOptions` | object | -- | Scrape each result URL after search |
 | `summarizeResults` | boolean | `false` | When `true`, each scraped result is summarized by the LLM and the digest appears in `result.summary`. Needs LLM config (BYOK or server). Fan-out is bounded by `[extraction.llm].max_concurrency`. |
 | `answer` | boolean | `false` | When `true`, after scraping the top results crw synthesizes a single answer over them. The answer + `citations` land on the response wrapper. |
@@ -293,6 +293,55 @@ Same BYOK pattern as `/v1/scrape`: send `llmApiKey` / `llmProvider` / `llmModel`
 - Use `categories` to narrow the query domain without rewriting the query itself.
 
 Good default: add one narrowing control at a time so you can see which one actually improved the results.
+
+### Curated vs. passthrough categories
+
+`categories` accepts two kinds of values, and you can mix them freely (up to 5 entries):
+
+| Value | Kind | What CRW does |
+|---|---|---|
+| `github` | curated | Switches to the engines in `[search].github_engines` (default: `github`). |
+| `research` | curated | Switches to the engines in `[search].research_engines` (default: `arxiv`, `crossref`, `google scholar`, `semantic scholar`). |
+| `pdf` | curated | Appends ` filetype:pdf` to the query (not an engine switch). |
+| anything else | passthrough | Forwarded verbatim to SearXNG's native `categories` parameter — `science`, `it`, `news`, `files`, `images`, `map`, `music`, `social media`, … |
+
+The curated names (`github`/`research`/`pdf`) are **Firecrawl-compatible** and behave exactly as before. Passthrough values are the additive part: CRW does not maintain its own engine list for them — it hands the category string to SearXNG, which already knows the engine→category routing from its own `settings.yml`. That means new categories work **without any CRW code or config change**, and your self-hosted SearXNG governs exactly which engines each category hits.
+
+```json
+{
+  "query": "crispr base editing",
+  "categories": ["science"],
+  "limit": 5
+}
+```
+
+```json
+{
+  "query": "rust async runtime",
+  "categories": ["research", "it"]
+}
+```
+
+In the second example, `research` still drives CRW's curated academic engines while `it` is forwarded to SearXNG as a native category — both apply to the same query.
+
+:::note
+Which passthrough categories actually return results depends on the engines your SearXNG instance enables. The bundled sidecar uses `use_default_settings: true` (see `config/searxng/settings.yml`), so all of upstream SearXNG's default categories are available. An unknown or disabled category is silently ignored by SearXNG (it falls back to `general`) rather than erroring. The list of categories a given instance exposes is documented under [SearXNG → Configured Engines](https://docs.searxng.org/user/configured_engines.html).
+:::
+
+### SearXNG query parameters CRW sends
+
+For reference (and when debugging a self-hosted SearXNG directly), this is how the public request fields map onto the SearXNG `/search` query parameters CRW emits:
+
+| SearXNG param | Sourced from | Notes |
+|---|---|---|
+| `q` | `query` | Cleaned (leading filler stripped); `pdf` category appends ` filetype:pdf`. |
+| `categories` | `sources` + passthrough `categories` | Comma-joined union, de-duplicated. `web`→`general`, `news`→`news`, `images`→`images`, plus any passthrough value. |
+| `engines` | curated `categories` | Comma-joined engines for `github`/`research` (from config). Omitted when no curated category is set. |
+| `language` | `lang` | Defaults to `en` when omitted/empty so results aren't locale-mixed. |
+| `time_range` | `tbs` | `qdr:h`/`qdr:d`→`day`, `qdr:w`→`week`, `qdr:m`→`month`, `qdr:y`→`year`. |
+| `format` | — | Always `json` (the sidecar enables the JSON formatter; HTML stays on for debugging). |
+
+`pageno` and `safesearch` are available on the low-level `crw search` CLI but are not exposed on `/v1/search`. Full upstream reference: [SearXNG Search API](https://docs.searxng.org/dev/search_api.html).
 
 ## Self-hosting the SearXNG sidecar
 

@@ -1,4 +1,4 @@
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use std::collections::HashMap;
 use uuid::Uuid;
 
@@ -983,14 +983,64 @@ impl SearchSource {
     }
 }
 
-/// User-facing category modifiers. `Github` and `Research` map to engine
-/// filtering; `Pdf` modifies the query with `filetype:pdf` (matches SaaS).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "lowercase")]
+/// User-facing category modifiers.
+///
+/// Three values carry curated, Firecrawl-compatible behavior:
+/// - `Github` / `Research` switch to topical SearXNG *engines* (configurable
+///   via `[search].github_engines` / `[search].research_engines`).
+/// - `Pdf` appends `filetype:pdf` to the query.
+///
+/// Any other string is passed straight through to SearXNG's native
+/// `categories` query parameter (e.g. `science`, `it`, `news`, `files`,
+/// `images`), so SearXNG's own engine→category routing applies without any
+/// crw code or config changes. This makes the surface a strict superset of
+/// Firecrawl's `github`/`research`/`pdf` — existing callers are unaffected.
+///
+/// See <https://docs.searxng.org/user/configured_engines.html> for the
+/// categories a given SearXNG instance exposes.
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SearchCategory {
     Github,
     Research,
     Pdf,
+    /// Unknown value — forwarded verbatim to SearXNG's `categories` param.
+    Other(String),
+}
+
+impl SearchCategory {
+    /// Wire/string representation. The three curated variants round-trip to
+    /// their lowercase names; `Other` returns the verbatim passthrough value.
+    pub fn as_str(&self) -> &str {
+        match self {
+            SearchCategory::Github => "github",
+            SearchCategory::Research => "research",
+            SearchCategory::Pdf => "pdf",
+            SearchCategory::Other(s) => s.as_str(),
+        }
+    }
+}
+
+impl From<String> for SearchCategory {
+    fn from(s: String) -> Self {
+        match s.as_str() {
+            "github" => SearchCategory::Github,
+            "research" => SearchCategory::Research,
+            "pdf" => SearchCategory::Pdf,
+            _ => SearchCategory::Other(s),
+        }
+    }
+}
+
+impl Serialize for SearchCategory {
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.serialize_str(self.as_str())
+    }
+}
+
+impl<'de> Deserialize<'de> for SearchCategory {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        Ok(SearchCategory::from(String::deserialize(deserializer)?))
+    }
 }
 
 /// Time-window filter, mirrors Google's `tbs=qdr:*` syntax used by Firecrawl.

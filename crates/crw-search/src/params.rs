@@ -30,6 +30,9 @@ pub struct SearxngParams {
 /// - `categories: ["github"]` adds the `github` engine.
 /// - `categories: ["research"]` expands to `arxiv,crossref,google scholar,semantic scholar`
 ///   (configurable via `[search].research_engines`).
+/// - Any other `categories` value (e.g. `science`, `it`, `news`) is forwarded
+///   verbatim to SearXNG's native `categories` param, merged with the
+///   `sources`-derived categories — SearXNG owns the engine→category routing.
 /// - `tbs: "qdr:h"` is mapped to SearXNG `time_range=day` — SearXNG has no
 ///   hour granularity. (See `SearchTimeFilter::searxng_time_range`.)
 ///
@@ -68,6 +71,9 @@ pub fn clean_query(query: &str) -> String {
 pub fn map_to_searxng_params(req: &SearchRequest, config: &SearchConfig) -> SearxngParams {
     let mut query = clean_query(&req.query);
     let mut engines: Vec<String> = Vec::new();
+    // Native SearXNG categories collected from passthrough `Other(..)` values.
+    // Merged with the `sources`-derived categories below into one param.
+    let mut passthrough_cats: Vec<String> = Vec::new();
 
     if let Some(cats) = &req.categories {
         for cat in cats {
@@ -81,16 +87,34 @@ pub fn map_to_searxng_params(req: &SearchRequest, config: &SearchConfig) -> Sear
                 SearchCategory::Research => {
                     engines.extend(config.research_engines.iter().cloned());
                 }
+                // Unknown value: hand it to SearXNG's own category routing
+                // (`science`, `it`, `news`, `files`, ...) instead of failing.
+                SearchCategory::Other(name) => passthrough_cats.push(name.clone()),
             }
         }
     }
 
-    let categories = req.sources.as_ref().map(|srcs| {
-        srcs.iter()
-            .map(|s| s.searxng_category())
-            .collect::<Vec<_>>()
-            .join(",")
-    });
+    // `categories` is the union of the `sources`-derived buckets and any
+    // passthrough category names, de-duplicated while preserving order.
+    let mut category_names: Vec<String> = req
+        .sources
+        .as_ref()
+        .map(|srcs| {
+            srcs.iter()
+                .map(|s| s.searxng_category().to_string())
+                .collect()
+        })
+        .unwrap_or_default();
+    for name in passthrough_cats {
+        if !category_names.contains(&name) {
+            category_names.push(name);
+        }
+    }
+    let categories = if category_names.is_empty() {
+        None
+    } else {
+        Some(category_names.join(","))
+    };
 
     let time_range = req.tbs.map(|t| t.searxng_time_range().to_string());
     // Pin language to "en" when the request omits it (or sends empty), so
@@ -197,6 +221,73 @@ mod tests {
         r.sources = Some(vec![SearchSource::Web, SearchSource::News]);
         let p = map_to_searxng_params(&r, &cfg());
         assert_eq!(p.categories.as_deref(), Some("general,news"));
+    }
+
+    #[test]
+    fn unknown_category_passes_through_to_searxng() {
+        let mut r = req("crispr");
+        r.categories = Some(vec![SearchCategory::Other("science".into())]);
+        let p = map_to_searxng_params(&r, &cfg());
+        // Passed to SearXNG's native category routing, not crw engines.
+        assert_eq!(p.categories.as_deref(), Some("science"));
+        assert!(p.engines.is_none());
+        assert_eq!(p.q, "crispr");
+    }
+
+    #[test]
+    fn passthrough_categories_merge_with_sources() {
+        let mut r = req("rust");
+        r.sources = Some(vec![SearchSource::Web]);
+        r.categories = Some(vec![
+            SearchCategory::Other("it".into()),
+            SearchCategory::Other("science".into()),
+        ]);
+        let p = map_to_searxng_params(&r, &cfg());
+        assert_eq!(p.categories.as_deref(), Some("general,it,science"));
+    }
+
+    #[test]
+    fn curated_and_passthrough_categories_coexist() {
+        let mut r = req("memory safety");
+        r.categories = Some(vec![
+            SearchCategory::Research,
+            SearchCategory::Other("it".into()),
+        ]);
+        let p = map_to_searxng_params(&r, &cfg());
+        // `research` still drives curated engines (Firecrawl behavior intact)...
+        assert_eq!(
+            p.engines.as_deref(),
+            Some("arxiv,crossref,google scholar,semantic scholar")
+        );
+        // ...while `it` is forwarded as a native SearXNG category.
+        assert_eq!(p.categories.as_deref(), Some("it"));
+    }
+
+    #[test]
+    fn passthrough_category_dedupes_against_sources() {
+        let mut r = req("rust");
+        r.sources = Some(vec![SearchSource::News]);
+        r.categories = Some(vec![SearchCategory::Other("news".into())]);
+        let p = map_to_searxng_params(&r, &cfg());
+        assert_eq!(p.categories.as_deref(), Some("news"));
+    }
+
+    #[test]
+    fn category_string_roundtrip_keeps_curated_and_passthrough() {
+        // Curated names deserialize to their typed variants; everything else
+        // becomes Other(..) and survives a JSON round-trip verbatim.
+        let cats: Vec<SearchCategory> =
+            serde_json::from_str(r#"["research","science","github"]"#).unwrap();
+        assert_eq!(
+            cats,
+            vec![
+                SearchCategory::Research,
+                SearchCategory::Other("science".into()),
+                SearchCategory::Github,
+            ]
+        );
+        let back = serde_json::to_string(&cats).unwrap();
+        assert_eq!(back, r#"["research","science","github"]"#);
     }
 
     #[test]

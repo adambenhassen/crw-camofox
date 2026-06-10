@@ -234,8 +234,8 @@ pub fn tool_definitions(proxy_mode: bool) -> Value {
                 },
                 "categories": {
                     "type": "array",
-                    "items": { "type": "string", "enum": ["github", "research", "pdf"] },
-                    "description": "Bias the search towards a category. `pdf` appends `filetype:pdf` to the query; `github`/`research` switch to topical engines."
+                    "items": { "type": "string" },
+                    "description": "Bias the search towards a category. Curated values: `pdf` appends `filetype:pdf` to the query; `github`/`research` switch to topical engines. Any other value (e.g. `science`, `it`, `news`, `files`) is passed straight through to SearXNG's native `categories` routing."
                 },
                 "scrapeOptions": {
                     "type": "object",
