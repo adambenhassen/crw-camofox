@@ -5,9 +5,12 @@ from typing import Iterator
 from unittest.mock import MagicMock, patch
 
 import pytest
-from langchain_core.documents import Document
 
-from crw.integrations.langchain import CrwLoader
+pytest.importorskip("langchain_core")  # skip the suite unless the 'langchain' extra is installed
+
+from langchain_core.documents import Document  # noqa: E402
+
+from crw.integrations.langchain import CrwLoader  # noqa: E402
 
 
 @pytest.fixture
