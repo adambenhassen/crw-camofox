@@ -176,7 +176,9 @@ github_engines = ["github"]
 strip_tracking_params = true
 drop_action_urls = true
 gov_tld_drop_actions = false
-# Additive on top of built-ins (max 64 keys each).
+# Additive on top of built-ins (max 64 keys each). Keys are normalized to
+# canonical form (lowercase, hyphens folded to underscores), so "add-to-cart"
+# and "add_to_cart" are equivalent.
 extra_tracking_params = []
 extra_action_params = []
 extra_preserve_params = []

@@ -129,13 +129,16 @@ pub struct MapUrlFilterConfig {
     /// When `true`, `.gov`/`.mil` hosts run Tier A too. Default `false`.
     #[serde(default)]
     pub gov_tld_drop_actions: bool,
-    /// Additive on top of `DEFAULT_TRACKING_PARAMS`.
+    /// Additive on top of `DEFAULT_TRACKING_PARAMS`. Keys are normalized to
+    /// canonical form (lowercase, `-` folded to `_`).
     #[serde(default)]
     pub extra_tracking_params: Vec<String>,
-    /// Additive on top of `DEFAULT_ACTION_PARAMS`.
+    /// Additive on top of `DEFAULT_ACTION_PARAMS`. Keys are normalized to
+    /// canonical form (lowercase, `-` folded to `_`).
     #[serde(default)]
     pub extra_action_params: Vec<String>,
-    /// Additive on top of `ALWAYS_PRESERVE`.
+    /// Additive on top of `ALWAYS_PRESERVE`. Keys are normalized to
+    /// canonical form (lowercase, `-` folded to `_`).
     #[serde(default)]
     pub extra_preserve_params: Vec<String>,
 }

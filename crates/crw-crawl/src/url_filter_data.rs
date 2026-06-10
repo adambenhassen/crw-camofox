@@ -2,22 +2,42 @@
 //!
 //! See `url_filter.rs` for how these are consulted. Lists below are sourced
 //! from ClearURLs `globalRules` + research-agent taxonomy (WooCommerce/WP
-//! action params, common analytics trackers). All keys are ASCII lowercase.
+//! action params, common analytics trackers).
+//!
+//! All keys are stored in **canonical form**: ASCII lowercase with `-` folded
+//! to `_`. Lookups canonicalize the incoming key the same way (see
+//! `url_filter::canon_key`), so a single entry like `add_to_wishlist` matches
+//! both `?add_to_wishlist=` and `?add-to-wishlist=`. WordPress/WooCommerce
+//! plugins emit the same action under either spelling, so list only the
+//! underscore form — never both (enforced by `no_key_contains_hyphen`).
 
 use phf::{Set, phf_set};
 
 /// Action params: presence of any matching KEY in the query causes the URL
 /// to be dropped entirely (Tier A).
+///
+/// Covered families: WooCommerce core, YITH and WPC (WPClever) wishlist/compare,
+/// TI wishlist, WordPress core, Magento 2. The `-`/`_` fold (see
+/// `url_filter::canon_key`) collapses spelling variants, but genuinely distinct
+/// param *names* from new plugins must still be added here by hand — list only
+/// params that render as crawlable `<a href>` links (AJAX-only endpoints never
+/// appear in /map output, so they don't belong here).
 pub static DEFAULT_ACTION_PARAMS: Set<&'static str> = phf_set! {
-    // WooCommerce — Issue #40's primary trigger
-    "add-to-cart", "remove_item", "undo_item", "removed_item",
-    "wc-ajax", "wc-api", "pay_for_order", "apply_coupon",
+    // WooCommerce — Issue #40's primary trigger. `-`/`_` folded at lookup,
+    // so `add_to_cart` also catches `add-to-cart`.
+    "add_to_cart", "remove_item", "undo_item", "removed_item",
+    "wc_ajax", "wc_api", "pay_for_order", "apply_coupon",
     "remove_coupon", "order_again", "delete_payment_method",
-    // Wishlist plugins (YITH, TI)
+    // Wishlist / compare plugins (YITH, TI, WPC) — Issue #128. One entry per
+    // action; the `-`/`_` fold covers `add-to-wishlist` vs `add_to_wishlist`.
+    // `remove_compare_item` is WPC Smart Compare's remove action, observed in
+    // live /map output on the issue-128 site (it only dropped there because it
+    // co-occurred with `_wpnonce` — list it directly so it drops on its own).
     "add_to_wishlist", "remove_from_wishlist", "yith_wcwl_action",
+    "add_to_compare", "remove_from_compare", "remove_compare_item",
     // WordPress core
     "_wpnonce", "_wp_http_referer", "replytocom",
-    "unapproved", "moderation-hash", "doing_wp_cron",
+    "unapproved", "moderation_hash", "doing_wp_cron",
     "customize_changeset_uuid", "customize_messenger_channel",
     "preview_id", "preview_nonce",
     // Magento 2
@@ -30,7 +50,7 @@ pub static DEFAULT_ACTION_PARAMS: Set<&'static str> = phf_set! {
 pub static DEFAULT_TRACKING_PARAMS: Set<&'static str> = phf_set! {
     // Google
     "utm_source", "utm_medium", "utm_campaign", "utm_term", "utm_content",
-    "utm_id", "utm_name", "utm_brand", "utm_social", "utm_social-type",
+    "utm_id", "utm_name", "utm_brand", "utm_social", "utm_social_type",
     "gclid", "gclsrc", "gbraid", "wbraid", "dclid", "gad_source", "srsltid",
     "_ga", "_gl",
     // Facebook / Meta
@@ -219,6 +239,22 @@ mod audit {
                 "preserve key {:?} not lowercase",
                 k
             );
+        }
+    }
+
+    /// Keys are stored canonically (lowercase, `-` folded to `_`). A hyphen in
+    /// a list entry would be dead — lookups canonicalize the incoming key, so
+    /// the entry could never match. Forces maintainers to add the `_` form.
+    #[test]
+    fn no_key_contains_hyphen() {
+        for k in DEFAULT_ACTION_PARAMS.iter() {
+            assert!(!k.contains('-'), "action key {k:?} must use `_`, not `-`");
+        }
+        for k in DEFAULT_TRACKING_PARAMS.iter() {
+            assert!(!k.contains('-'), "tracking key {k:?} must use `_`, not `-`");
+        }
+        for k in ALWAYS_PRESERVE.iter() {
+            assert!(!k.contains('-'), "preserve key {k:?} must use `_`, not `-`");
         }
     }
 

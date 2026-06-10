@@ -924,13 +924,17 @@ pub struct MapRequest {
     /// (raw URLs — the explicit escape hatch).
     #[serde(default)]
     pub ignore_query_parameters: Option<bool>,
-    /// Additive on top of `DEFAULT_TRACKING_PARAMS`. Max 64 keys; over-cap → 422.
+    /// Additive on top of `DEFAULT_TRACKING_PARAMS`. Keys are normalized to
+    /// canonical form (lowercase, `-` folded to `_`), so `add-to-cart` and
+    /// `add_to_cart` are equivalent. Max 64 keys; over-cap → 422.
     #[serde(default)]
     pub extra_tracking_params: Option<Vec<String>>,
-    /// Additive on top of `DEFAULT_ACTION_PARAMS`. Max 64 keys; over-cap → 422.
+    /// Additive on top of `DEFAULT_ACTION_PARAMS`. Keys are normalized to
+    /// canonical form (lowercase, `-` folded to `_`). Max 64 keys; over-cap → 422.
     #[serde(default)]
     pub extra_action_params: Option<Vec<String>>,
-    /// Additive on top of `ALWAYS_PRESERVE` + TOML preserves.
+    /// Additive on top of `ALWAYS_PRESERVE` + TOML preserves. Keys are
+    /// normalized to canonical form (lowercase, `-` folded to `_`).
     /// Max 64 keys; over-cap → 422.
     #[serde(default)]
     pub preserve_params: Option<Vec<String>>,

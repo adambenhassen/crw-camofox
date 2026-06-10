@@ -17,6 +17,22 @@ use crate::url_filter_data::{
 use crw_core::metrics::metrics;
 use std::collections::HashSet;
 
+/// Canonicalize a query-param key for deny-/preserve-list matching: ASCII
+/// lowercase, then fold `-` to `_`. WordPress/WooCommerce plugins emit the
+/// same action under either spelling (`add-to-wishlist` vs `add_to_wishlist`,
+/// `wc-ajax` vs `wc_ajax`), so folding them onto one canonical form removes
+/// the per-variant whack-a-mole (issue #128, follow-up to #40). Both the
+/// static lists and every runtime set store canonical keys, and the incoming
+/// key is canonicalized before lookup. Matching never alters output — surviving
+/// URLs keep their original raw `key=value` pair verbatim.
+pub(crate) fn canon_key(k: &str) -> String {
+    let mut s = k.to_ascii_lowercase();
+    if s.as_bytes().contains(&b'-') {
+        s = s.replace('-', "_");
+    }
+    s
+}
+
 /// Per-request override delta. `None` fields fall through to whatever the
 /// server's default cfg already specifies. Construction lives in the route
 /// handler — it owns the precedence resolution (request > TOML > default).
@@ -44,19 +60,21 @@ pub struct HostOverride {
 
 impl HostOverride {
     fn from_static(e: &HostOverrideEntry) -> Self {
+        // `when_path_contains` are path substrings, not param keys — left as-is.
+        // The three param sets are canonicalized so `-`/`_` variants match.
         Self {
             host_pat: e.host_pat.clone(),
             when_path_contains: e.when_path_contains.iter().map(|s| s.to_string()).collect(),
-            preserve_params: e.preserve_params.iter().map(|s| s.to_string()).collect(),
+            preserve_params: e.preserve_params.iter().map(|s| canon_key(s)).collect(),
             exempt_action_params: e
                 .exempt_action_params
                 .iter()
-                .map(|s| s.to_string())
+                .map(|s| canon_key(s))
                 .collect(),
             extra_tracking_params: e
                 .extra_tracking_params
                 .iter()
-                .map(|s| s.to_string())
+                .map(|s| canon_key(s))
                 .collect(),
         }
     }
@@ -106,11 +124,11 @@ impl UrlFilterCfg {
     }
 
     /// Build from the raw TOML `[map.url_filter]` block. Strings are
-    /// lowercased once here so per-request lookups stay allocation-free.
+    /// canonicalized once here (lowercased, `-` folded to `_`) so per-request
+    /// lookups stay allocation-free.
     pub fn from_map_config(cfg: &crw_core::config::MapUrlFilterConfig) -> Self {
-        let to_lower_set = |v: &[String]| -> HashSet<String> {
-            v.iter().map(|s| s.to_ascii_lowercase()).collect()
-        };
+        let to_lower_set =
+            |v: &[String]| -> HashSet<String> { v.iter().map(|s| canon_key(s)).collect() };
         Self {
             strip_tracking: cfg.strip_tracking_params,
             drop_actions: cfg.drop_action_urls,
@@ -151,17 +169,17 @@ impl UrlFilterCfg {
         }
         if let Some(extra) = ov.extra_tracking {
             for k in extra {
-                out.tracking_params.insert(k.to_ascii_lowercase());
+                out.tracking_params.insert(canon_key(&k));
             }
         }
         if let Some(extra) = ov.extra_action {
             for k in extra {
-                out.action_params.insert(k.to_ascii_lowercase());
+                out.action_params.insert(canon_key(&k));
             }
         }
         if let Some(extra) = ov.preserve {
             for k in extra {
-                out.preserve_params.insert(k.to_ascii_lowercase());
+                out.preserve_params.insert(canon_key(&k));
             }
         }
         out
@@ -284,8 +302,8 @@ pub fn filter_and_normalize_parsed(
         .split('&')
         .filter(|s| !s.is_empty())
         .map(|p| match p.find('=') {
-            Some(i) => (p[..i].to_ascii_lowercase(), p, true),
-            None => (p.to_ascii_lowercase(), p, false),
+            Some(i) => (canon_key(&p[..i]), p, true),
+            None => (canon_key(p), p, false),
         })
         .collect();
 
@@ -612,9 +630,80 @@ mod tests {
     #[test]
     fn extra_preserve_protects_against_default_action() {
         let mut cfg = cfg_on();
-        cfg.preserve_params.insert("add-to-cart".to_string());
+        // Runtime sets store canonical keys (`-` folded to `_`); both spellings
+        // of the incoming key resolve to this entry.
+        cfg.preserve_params.insert("add_to_cart".to_string());
         let out = filter_and_normalize_raw("https://e.test/?add-to-cart=1", &cfg).unwrap();
         assert!(out.contains("add-to-cart=1"));
+    }
+
+    // ─────────────── issue #128: hyphen/underscore fold ───────────────
+
+    /// Hyphen spelling of a list entry stored in underscore form still drops.
+    /// `DEFAULT_ACTION_PARAMS` has `add_to_wishlist`; the live site emitted
+    /// `?add-to-wishlist=` and it leaked through before the fold.
+    #[test]
+    fn wishlist_hyphen_variant_drops() {
+        let cfg = cfg_on();
+        assert!(
+            filter_and_normalize_raw("https://www.urbanboxco.com/?add-to-wishlist=1405", &cfg)
+                .is_none()
+        );
+    }
+
+    /// Compare-plugin action param (`?add_to_compare=`) drops, in both spellings.
+    #[test]
+    fn compare_action_param_drops() {
+        let cfg = cfg_on();
+        for u in [
+            "https://www.urbanboxco.com/?add_to_compare=1405",
+            "https://www.urbanboxco.com/?add-to-compare=1405",
+            "https://www.urbanboxco.com/blog/?add_to_compare=2599",
+        ] {
+            assert!(
+                filter_and_normalize_raw(u, &cfg).is_none(),
+                "expected drop for {u}"
+            );
+        }
+    }
+
+    /// WPC Smart Compare remove action drops on its own, without a co-occurring
+    /// `_wpnonce` to carry it (the live issue-128 site always paired them).
+    #[test]
+    fn remove_compare_item_drops_without_nonce() {
+        let cfg = cfg_on();
+        assert!(
+            filter_and_normalize_raw(
+                "https://www.urbanboxco.com/?remove_compare_item=abc123",
+                &cfg
+            )
+            .is_none()
+        );
+    }
+
+    /// Mixed-separator spelling of `wc-ajax`/`wc_ajax` both drop.
+    #[test]
+    fn wc_ajax_both_spellings_drop() {
+        let cfg = cfg_on();
+        assert!(
+            filter_and_normalize_raw("https://e.test/?wc-ajax=get_refreshed_fragments", &cfg)
+                .is_none()
+        );
+        assert!(
+            filter_and_normalize_raw("https://e.test/?wc_ajax=get_refreshed_fragments", &cfg)
+                .is_none()
+        );
+    }
+
+    /// Tracking key with a hyphen in its canonical entry (`utm_social_type`)
+    /// strips regardless of the incoming separator.
+    #[test]
+    fn tracking_hyphen_variant_stripped() {
+        let cfg = cfg_on();
+        let out =
+            filter_and_normalize_raw("https://e.test/blog?utm_social-type=x&p=1", &cfg).unwrap();
+        assert!(!out.contains("utm_social"), "got {out}");
+        assert!(out.contains("p=1"), "got {out}");
     }
 
     #[test]
