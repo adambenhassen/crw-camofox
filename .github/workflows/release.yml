@@ -329,6 +329,9 @@ jobs:
               delay=$((delay * 2))
             done
           }
+          # win32 has no platform package: the names crw-mcp-win32-x64/arm64 are
+          # npm-security-held (0.0.1-security, owned by npm-support), so Windows
+          # is served by the launcher's GitHub-download fallback instead.
           for dir in mcp/crw-mcp-*/; do
             pkg=$(basename "$dir")
             case "$pkg" in
@@ -336,20 +339,18 @@ jobs:
               crw-mcp-darwin-arm64) asset="crw-mcp-darwin-arm64.tar.gz" ;;
               crw-mcp-linux-x64)    asset="crw-mcp-linux-x64.tar.gz" ;;
               crw-mcp-linux-arm64)  asset="crw-mcp-linux-arm64.tar.gz" ;;
-              crw-mcp-win32-x64)    asset="crw-mcp-win32-x64.zip" ;;
-              crw-mcp-win32-arm64)  asset="crw-mcp-win32-arm64.zip" ;;
               *) continue ;;
             esac
-            if [[ "$asset" == *.zip ]]; then
-              unzip -o "/tmp/assets/$asset" -d "$dir"
-            else
-              tar xzf "/tmp/assets/$asset" -C "$dir"
-            fi
+            tar xzf "/tmp/assets/$asset" -C "$dir"
             current=$(npm view "${pkg}@${VERSION}" version 2>/dev/null || true)
             if [ "$current" = "$VERSION" ]; then
               echo "::notice::${pkg}@${VERSION} already on npm"
             else
-              npm_publish_retry "$dir"
+              # Non-fatal: a single unpublishable platform package must never
+              # abort the run before the main launcher publishes. The launcher's
+              # download fallback covers any platform whose package is missing.
+              npm_publish_retry "$dir" \
+                || echo "::warning::publish failed for ${pkg}; launcher download fallback covers this platform"
               sleep 8
             fi
           done

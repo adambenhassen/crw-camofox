@@ -33,8 +33,6 @@
     "crw-mcp-darwin-x64": "0.15.1",
     "crw-mcp-darwin-arm64": "0.15.1",
     "crw-mcp-linux-x64": "0.15.1",
-    "crw-mcp-linux-arm64": "0.15.1",
-    "crw-mcp-win32-x64": "0.15.1",
-    "crw-mcp-win32-arm64": "0.15.1"
+    "crw-mcp-linux-arm64": "0.15.1"
   }
 }

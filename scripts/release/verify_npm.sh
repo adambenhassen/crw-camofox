@@ -1,6 +1,9 @@
 #!/usr/bin/env bash
-# Verify the npm main + 6 platform packages and that the main package's
-# optionalDependencies all pin to the same version.
+# Verify the npm main + 4 platform packages (darwin/linux) and that the main
+# package's optionalDependencies all pin to the same version. The win32
+# platform-package names are npm-security-held (0.0.1-security, owned by
+# npm-support), so Windows is served by the launcher's GitHub-download
+# fallback instead of a prebuilt package — nothing to verify on npm here.
 #
 # Layered checks (codex review v3 C2 + v4 C10):
 #   1. Existence of every package@version
@@ -19,8 +22,7 @@ fail=0
 
 # 1. Existence
 for p in crw-mcp crw-mcp-darwin-x64 crw-mcp-darwin-arm64 \
-         crw-mcp-linux-x64 crw-mcp-linux-arm64 \
-         crw-mcp-win32-x64 crw-mcp-win32-arm64; do
+         crw-mcp-linux-x64 crw-mcp-linux-arm64; do
   actual=$(npm view "$p@$v" version 2>/dev/null || echo "MISSING")
   if [ "$actual" = "$v" ]; then
     printf '✓ %s@%s\n' "$p" "$v"
@@ -33,8 +35,7 @@ done
 # 2. optionalDependencies pin assertion — catches stale pin sneak-through
 deps_json=$(npm view "crw-mcp@$v" optionalDependencies --json 2>/dev/null || echo '{}')
 for p in crw-mcp-darwin-x64 crw-mcp-darwin-arm64 \
-         crw-mcp-linux-x64 crw-mcp-linux-arm64 \
-         crw-mcp-win32-x64 crw-mcp-win32-arm64; do
+         crw-mcp-linux-x64 crw-mcp-linux-arm64; do
   pin=$(printf '%s' "$deps_json" | jq -r --arg p "$p" '.[$p] // "MISSING"')
   # Accept exact, ^v, ~v
   if [ "$pin" = "$v" ] || [ "$pin" = "^$v" ] || [ "$pin" = "~$v" ]; then
@@ -51,7 +52,7 @@ trap 'rm -rf "$tmp"' EXIT
 (cd "$tmp" && npm init -y >/dev/null && npm install --silent "crw-mcp@$v" >/dev/null 2>&1) \
   || { err "npm install crw-mcp@$v failed"; fail=1; }
 # shellcheck disable=SC2015
-resolved=$(cd "$tmp" && npm ls --all 2>/dev/null | grep -E "crw-mcp-(darwin|linux|win32)" | head -1 || true)
+resolved=$(cd "$tmp" && npm ls --all 2>/dev/null | grep -E "crw-mcp-(darwin|linux)" | head -1 || true)
 if [ -n "$resolved" ] && ! printf '%s' "$resolved" | grep -q "@$v"; then
   err "platform pkg resolved to wrong version: $resolved"
   fail=1

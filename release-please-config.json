@@ -103,16 +103,6 @@
         },
         {
           "type": "json",
-          "path": "mcp/crw-mcp-win32-x64/package.json",
-          "jsonpath": "$.version"
-        },
-        {
-          "type": "json",
-          "path": "mcp/crw-mcp-win32-arm64/package.json",
-          "jsonpath": "$.version"
-        },
-        {
-          "type": "json",
           "path": "mcp/crw-mcp/package.json",
           "jsonpath": "$.optionalDependencies['crw-mcp-darwin-x64']"
         },
@@ -130,16 +120,6 @@
           "type": "json",
           "path": "mcp/crw-mcp/package.json",
           "jsonpath": "$.optionalDependencies['crw-mcp-linux-arm64']"
-        },
-        {
-          "type": "json",
-          "path": "mcp/crw-mcp/package.json",
-          "jsonpath": "$.optionalDependencies['crw-mcp-win32-x64']"
-        },
-        {
-          "type": "json",
-          "path": "mcp/crw-mcp/package.json",
-          "jsonpath": "$.optionalDependencies['crw-mcp-win32-arm64']"
         },
         {
           "type": "toml",
