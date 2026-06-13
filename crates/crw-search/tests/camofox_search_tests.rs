@@ -100,3 +100,109 @@ async fn fetch_tolerates_empty_results() {
     let resp = client.fetch(&params("nothing here")).await.unwrap();
     assert_eq!(resp.results.len(), 0);
 }
+
+/// Two back-to-back searches must drive ONE warm tab — not create+delete a tab
+/// per query — so the camofox context never hits zero tabs and never trips the
+/// upstream eager-teardown race. We assert exactly one `POST /tabs` across two
+/// `fetch` calls (and that we never DELETE the warm tab).
+#[tokio::test]
+async fn reuses_one_warm_tab_across_sequential_searches() {
+    let server = MockServer::start().await;
+    let rows = serde_json::to_string(&json!([
+        { "url": "https://a.example", "title": "A", "content": "" },
+    ]))
+    .unwrap();
+
+    // Exactly one tab is ever created, regardless of how many searches run.
+    Mock::given(method("POST"))
+        .and(path("/tabs"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({ "tabId": "tab-1" })))
+        .expect(1)
+        .mount(&server)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/tabs/tab-1/navigate"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({ "ok": true })))
+        .expect(2)
+        .mount(&server)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/tabs/tab-1/wait"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({ "ok": true })))
+        .mount(&server)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/tabs/tab-1/evaluate"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({ "result": rows })))
+        .mount(&server)
+        .await;
+    // The warm tab must never be deleted — fail loudly if it is.
+    Mock::given(method("DELETE"))
+        .and(path("/tabs/tab-1"))
+        .respond_with(ResponseTemplate::new(200))
+        .expect(0)
+        .mount(&server)
+        .await;
+
+    let client = CamofoxSearchClient::new(server.uri(), None, Duration::from_secs(10));
+    client.fetch(&params("first")).await.expect("first search ok");
+    client.fetch(&params("second")).await.expect("second search ok");
+    // wiremock verifies `.expect(..)` counts on drop.
+}
+
+/// If the warm tab went stale (context idle-evicted or camofox restarted), the
+/// first navigate fails; the client must drop the dead tab, create a fresh one,
+/// and retry the search — recovering transparently.
+#[tokio::test]
+async fn recreates_tab_and_retries_after_stale_failure() {
+    let server = MockServer::start().await;
+    let rows = serde_json::to_string(&json!([
+        { "url": "https://a.example", "title": "A", "content": "" },
+    ]))
+    .unwrap();
+
+    // First create hands out the (soon-stale) tab-1; the next create hands out
+    // tab-2. up_to_n_times + priority makes tab-1 serve once, then tab-2.
+    Mock::given(method("POST"))
+        .and(path("/tabs"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({ "tabId": "tab-1" })))
+        .up_to_n_times(1)
+        .with_priority(1)
+        .mount(&server)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/tabs"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({ "tabId": "tab-2" })))
+        .with_priority(2)
+        .mount(&server)
+        .await;
+    // tab-1 is dead: navigate returns 500 (the upstream "window is null" shape).
+    Mock::given(method("POST"))
+        .and(path("/tabs/tab-1/navigate"))
+        .respond_with(ResponseTemplate::new(500))
+        .mount(&server)
+        .await;
+    // tab-2 is healthy.
+    Mock::given(method("POST"))
+        .and(path("/tabs/tab-2/navigate"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({ "ok": true })))
+        .mount(&server)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/tabs/tab-2/wait"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({ "ok": true })))
+        .mount(&server)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/tabs/tab-2/evaluate"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({ "result": rows })))
+        .mount(&server)
+        .await;
+
+    let client = CamofoxSearchClient::new(server.uri(), None, Duration::from_secs(10));
+    let resp = client
+        .fetch(&params("recover"))
+        .await
+        .expect("search should recover by recreating the tab");
+    assert_eq!(resp.results.len(), 1);
+}
