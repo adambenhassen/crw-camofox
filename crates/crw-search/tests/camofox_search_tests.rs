@@ -9,7 +9,7 @@ use std::time::Duration;
 use crw_search::SearxngParams;
 use crw_search::camofox_search::CamofoxSearchClient;
 use serde_json::json;
-use wiremock::matchers::{method, path};
+use wiremock::matchers::{body_partial_json, method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
 fn params(q: &str) -> SearxngParams {
@@ -30,10 +30,12 @@ async fn mock_with_rows(rows: serde_json::Value) -> MockServer {
     // The scrape JS returns a JSON *string* (the client `JSON.parse`s it).
     let result_string = serde_json::to_string(&rows).unwrap();
 
+    // The real camofox-browser requires both userId and sessionKey — guard it.
     Mock::given(method("POST"))
         .and(path("/tabs"))
+        .and(body_partial_json(json!({ "sessionKey": "search" })))
         .respond_with(ResponseTemplate::new(200).set_body_json(json!({
-            "ok": true, "tabId": "tab-1", "sessionKey": "s-1"
+            "ok": true, "tabId": "tab-1", "sessionKey": "search"
         })))
         .mount(&server)
         .await;

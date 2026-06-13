@@ -25,6 +25,11 @@ use crate::traits::PageFetcher;
 /// constant value lets the browser reuse one warm profile across fetches.
 const USER_ID: &str = "crw";
 
+/// Browser-context key. `/tabs` requires both `userId` and `sessionKey`. A
+/// fixed key reuses one context (tabs are created and deleted per fetch, so the
+/// context never accumulates tabs and sessions don't leak toward MAX_SESSIONS).
+const SESSION_KEY: &str = "render";
+
 /// JS evaluated to extract the fully-rendered DOM after navigation.
 const OUTER_HTML_EXPR: &str = "document.documentElement.outerHTML";
 
@@ -115,7 +120,10 @@ impl PageFetcher for CamofoxRenderer {
 
         // 1. Open a tab navigated at `url`.
         let create = self
-            .post_json("/tabs", json!({ "userId": USER_ID, "url": url }))
+            .post_json(
+                "/tabs",
+                json!({ "userId": USER_ID, "sessionKey": SESSION_KEY, "url": url }),
+            )
             .await?;
         if !create.status().is_success() {
             return Err(CrwError::RendererError(format!(

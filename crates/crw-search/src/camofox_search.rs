@@ -22,6 +22,11 @@ use crate::params::SearxngParams;
 /// renderer tier's so search and scrape don't share a profile).
 const USER_ID: &str = "crw-search";
 
+/// Browser-context key. `/tabs` requires both `userId` and `sessionKey`. Fixed
+/// so the context is reused (tabs are created and deleted per query, so it
+/// never accumulates tabs and sessions don't leak toward MAX_SESSIONS).
+const SESSION_KEY: &str = "search";
+
 /// JS evaluated in the Google SERP to extract result rows. Returns a JSON
 /// *string* (via `JSON.stringify`) so the camofox `/evaluate` `result` field
 /// comes back as a string we can parse. Selectors are intentionally broad and
@@ -112,7 +117,9 @@ impl CamofoxSearchClient {
     /// [`SearxngResponse`]. Typed [`SearchError`]s match the SearXNG client so
     /// the route layer's existing error mapping applies unchanged.
     pub async fn fetch(&self, params: &SearxngParams) -> Result<SearxngResponse, SearchError> {
-        let create = self.post("/tabs", json!({ "userId": USER_ID })).await?;
+        let create = self
+            .post("/tabs", json!({ "userId": USER_ID, "sessionKey": SESSION_KEY }))
+            .await?;
         if !create.status().is_success() {
             return Err(SearchError::Upstream {
                 status: create.status().as_u16(),

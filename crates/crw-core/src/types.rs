@@ -116,6 +116,8 @@ pub enum RequestedRenderer {
     #[serde(rename = "chrome_proxy")]
     ChromeProxy,
     Playwright,
+    /// Camofox (Firefox/Camoufox) heavy/stealth tier.
+    Camofox,
 }
 
 impl RequestedRenderer {
@@ -128,6 +130,7 @@ impl RequestedRenderer {
             RequestedRenderer::Chrome => Some("chrome"),
             RequestedRenderer::ChromeProxy => Some("chrome_proxy"),
             RequestedRenderer::Playwright => Some("playwright"),
+            RequestedRenderer::Camofox => Some("camofox"),
         }
     }
 }

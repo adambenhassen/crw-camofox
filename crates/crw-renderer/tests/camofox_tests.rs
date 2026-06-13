@@ -8,6 +8,8 @@ use std::collections::HashMap;
 use std::time::Duration;
 
 use axum::extract::Path;
+use axum::http::StatusCode;
+use axum::response::IntoResponse;
 use axum::routing::{delete, get, post};
 use axum::{Json, Router};
 use crw_core::Deadline;
@@ -18,8 +20,18 @@ use tokio::net::TcpListener;
 
 const RENDERED_HTML: &str = "<html><body><h1>camofox rendered</h1></body></html>";
 
-async fn create_tab(Json(_body): Json<Value>) -> Json<Value> {
-    Json(json!({ "ok": true, "tabId": "tab-1", "sessionKey": "s-1" }))
+async fn create_tab(Json(body): Json<Value>) -> impl IntoResponse {
+    // The real camofox-browser requires both userId and sessionKey.
+    if body.get("sessionKey").and_then(|v| v.as_str()).is_none() {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({ "error": "userId and sessionKey required" })),
+        );
+    }
+    (
+        StatusCode::OK,
+        Json(json!({ "ok": true, "tabId": "tab-1", "sessionKey": "s-1" })),
+    )
 }
 
 async fn wait(Path(_id): Path<String>, Json(_body): Json<Value>) -> Json<Value> {
