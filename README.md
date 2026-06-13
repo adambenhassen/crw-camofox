@@ -53,6 +53,14 @@ and the fork stays easy to sync:
 CDP/Chrome/SearXNG code all remain in the tree, just off by default — flip a config
 flag or a compose profile to get upstream behavior back.
 
+**Field notes — used in production by Hermes.** This fork backs the **Hermes**
+agent over MCP, with Hermes' built-in `web` and `browser` tools **disabled** so
+every fetch/search routes through this fork instead of its flaky native tools.
+In that setup the upstream **SearXNG backend was returning nothing at all** —
+empty results for every query. The **Camofox-driven Google backend reliably
+finds results**, and the Camofox render tier even **loads pages sitting behind
+bot checks** that the previous stack couldn't get past.
+
 > The sections below are inherited from upstream and describe the engine, API, and
 > managed `api.fastcrw.com` offering (which this fork does not operate).
 
