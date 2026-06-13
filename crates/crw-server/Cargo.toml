@@ -12,6 +12,9 @@ description = "Firecrawl-compatible API server for the CRW web scraper"
 [features]
 default = []
 cdp = ["crw-renderer/cdp"]
+# Camofox (camofox-browser REST) renderer tier. The runtime wiring lives in the
+# cdp-gated renderer ladder, so enable it together with `cdp`.
+camofox = ["crw-renderer/camofox", "cdp"]
 test-utils = []
 # Optional self-host monitor mode. Default OFF. Activating it links the
 # `crw-monitor` crate (and only then its SQLite/HMAC stack). The open-core

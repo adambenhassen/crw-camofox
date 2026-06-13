@@ -45,7 +45,7 @@ ENV CARGO_PROFILE_RELEASE_LTO=thin \
 RUN set -eux; \
     RUST_TARGET="$(cat /rust_target)"; \
     cargo build --release --target "$RUST_TARGET" \
-      -p crw-server --features cdp -p crw-mcp -p crw-cli; \
+      -p crw-server --features cdp,camofox -p crw-mcp -p crw-cli; \
     mkdir -p /out; \
     cp "target/${RUST_TARGET}/release/crw" \
        "target/${RUST_TARGET}/release/crw-server" \

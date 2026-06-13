@@ -491,6 +491,9 @@ pub enum RendererMode {
     Lightpanda,
     Chrome,
     Playwright,
+    /// Camofox (Firefox via camofox-browser REST). The heavy/stealth JS tier;
+    /// in the default ladder it takes Chrome's slot (after LightPanda).
+    Camofox,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -533,6 +536,12 @@ pub struct RendererConfig {
     pub playwright: Option<CdpEndpoint>,
     #[serde(default)]
     pub chrome: Option<CdpEndpoint>,
+    /// Camofox tier — the `camofox-browser` REST endpoint (Firefox/Camoufox).
+    /// Not a CDP endpoint. When set (and the binary is built with the
+    /// `camofox` feature) it is inserted in Chrome's ladder slot, after
+    /// LightPanda. See [`CamofoxEndpoint`].
+    #[serde(default)]
+    pub camofox: Option<CamofoxEndpoint>,
     /// Residential-proxy Chrome tier (opt-in 4th renderer). Same Chromium
     /// browser as `chrome`, but egress routed through a forwarder that adds
     /// upstream proxy auth (e.g. DataImpulse). Tried after Chrome fails —
@@ -770,6 +779,7 @@ impl Default for RendererConfig {
             lightpanda: None,
             playwright: None,
             chrome: None,
+            camofox: None,
             chrome_proxy: None,
             chrome_proxy_timeout_ms: None,
             chrome_intercept_resources: false,
@@ -865,6 +875,10 @@ impl RendererConfig {
         if want(RendererMode::Chrome) && self.chrome.is_some() {
             n += 1;
         }
+        // Camofox shares the cdp-gated ladder build; count it as a JS tier.
+        if want(RendererMode::Camofox) && self.camofox.is_some() {
+            n += 1;
+        }
         n
     }
 
@@ -905,6 +919,11 @@ impl RendererConfig {
             sum = sum.saturating_add(self.chrome_timeout());
             cdp_tier_count += 1;
         }
+        // Camofox is the heavy tier (Chrome's slot) — budget it like Chrome.
+        if want(RendererMode::Camofox) && self.camofox.is_some() {
+            sum = sum.saturating_add(self.chrome_timeout());
+            cdp_tier_count += 1;
+        }
         sum.saturating_add(cdp_tier_count.saturating_mul(CDP_TIER_OVERHEAD_MS))
     }
 }
@@ -915,6 +934,16 @@ fn default_pool_size() -> usize {
 #[derive(Debug, Clone, Deserialize)]
 pub struct CdpEndpoint {
     pub ws_url: String,
+}
+
+/// HTTP endpoint for the Camofox (camofox-browser) renderer tier. Unlike
+/// [`CdpEndpoint`] this is a plain REST base URL (e.g. `http://camofox:9377`),
+/// not a CDP websocket. `api_key`, when set, is sent as `Authorization: Bearer`.
+#[derive(Debug, Clone, Deserialize)]
+pub struct CamofoxEndpoint {
+    pub base_url: String,
+    #[serde(default)]
+    pub api_key: Option<String>,
 }
 
 /// Stealth mode configuration for evading bot detection.

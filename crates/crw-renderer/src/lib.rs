@@ -39,6 +39,8 @@ pub mod breaker;
 pub mod browser;
 #[cfg(feature = "cdp")]
 pub mod browser_pool;
+#[cfg(feature = "camofox")]
+pub mod camofox;
 #[cfg(feature = "cdp")]
 pub mod cdp;
 #[cfg(feature = "cdp")]
@@ -84,6 +86,7 @@ fn renderer_kind_for(name: &str) -> Option<RendererKind> {
         "lightpanda" => Some(RendererKind::Lightpanda),
         "chrome" => Some(RendererKind::Chrome),
         "chrome_proxy" => Some(RendererKind::ChromeProxy),
+        "camofox" => Some(RendererKind::Camofox),
         _ => None,
     }
 }
@@ -144,6 +147,8 @@ fn credit_for(kind: RendererKind) -> u32 {
         // Engine-internal cost only. SaaS billing reads request-body
         // `renderer` string and still charges 1 credit per scrape regardless.
         RendererKind::ChromeProxy => 2,
+        // Camofox is the heavy/stealth tier — same internal cost as Chrome.
+        RendererKind::Camofox => 2,
     }
 }
 
@@ -319,6 +324,20 @@ impl FallbackRenderer {
                             .into(),
                     ));
                 }
+            }
+            // Camofox (Firefox via camofox-browser REST) takes Chrome's slot:
+            // tried after LightPanda and before the CDP chrome tiers. It is not
+            // CDP, so it carries no browser-context pool.
+            #[cfg(feature = "camofox")]
+            if want(RendererMode::Camofox)
+                && let Some(cf) = &config.camofox
+            {
+                js_renderers.push(Arc::new(camofox::CamofoxRenderer::new(
+                    "camofox",
+                    &cf.base_url,
+                    cf.api_key.clone(),
+                    Duration::from_millis(config.chrome_timeout()),
+                )));
             }
             if want(RendererMode::Playwright) {
                 if let Some(pw) = &config.playwright {
