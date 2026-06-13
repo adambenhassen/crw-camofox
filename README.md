@@ -154,6 +154,20 @@ claude mcp add -e CRW_API_URL=https://api.fastcrw.com -e CRW_API_KEY=… \
 Per-client config recipes (Claude Desktop, Cursor, Windsurf, Cline,
 Continue.dev) live under [docs.fastcrw.com/mcp-clients/](https://docs.fastcrw.com/mcp-clients/).
 
+**Interactive browser automation:** `crw-mcp` *fetches* pages; for agents that
+must *operate* a site across steps (log in, fill forms, click through flows),
+**`crw-browse-camofox`** is a second MCP server that drives a live
+[Camofox](https://github.com/redf0x1/camofox-browser) (Firefox) browser — 24
+tools (navigate, snapshot with `[eN]` refs, click, type, press, scroll,
+evaluate, screenshot, cookies, …). Point it at a running camofox-browser:
+
+```bash
+claude mcp add camofox -- crw-browse-camofox --base-url http://localhost:9377
+```
+
+See the [interactive automation docs](https://docs.fastcrw.com/mcp/#interactive-browser-automation-camofox).
+(`crw-browse` remains as the CDP/Chrome equivalent.)
+
 ---
 
 ## Self-host vs Managed
