@@ -19,7 +19,7 @@ rate_limit_rps = 10              # Max requests/second (global). 0 = unlimited.
 #   is small. Set to false to enforce a strict SLO regardless of tier sizing.
 
 [renderer]
-mode = "auto"                     # auto | lightpanda | playwright | chrome | none
+mode = "auto"                     # auto | lightpanda | playwright | chrome | camofox | none
 page_timeout_ms = 30000
 pool_size = 4
 # render_js_default = true        # alias: force_js = true
@@ -45,6 +45,14 @@ ws_url = "ws://127.0.0.1:9222/"
 
 # [renderer.playwright]
 # ws_url = "ws://playwright:9222"
+
+# Camofox (camofox-browser REST) — the Firefox/Camoufox anti-detect tier. Not a
+# CDP endpoint: `base_url` is the camofox-browser HTTP server. In `auto` mode it
+# takes Chrome's ladder slot (tried after LightPanda). When set, it also backs
+# `/v1/search` (browser-driven Google) in preference to SearXNG.
+# [renderer.camofox]
+# base_url = "http://127.0.0.1:9377"
+# api_key = "..."                 # only if the camofox server runs with auth
 
 [crawler]
 max_concurrency = 10
@@ -143,10 +151,11 @@ always_run = false
 #   azure_api_version = "2024-05-01-preview"
 #   max_tokens = 4096
 
-# /v1/search endpoint — proxies to a SearXNG instance.
-# When `searxng_url` is unset the endpoint returns a clear 400 error
-# (`search_disabled`); the bundled docker-compose flips it to the
-# `searxng` sidecar.
+# /v1/search endpoint. Two backends:
+#   - Camofox (default when [renderer.camofox] is set): browser-driven Google.
+#   - SearXNG (opt-in): set `searxng_url` below. Camofox takes precedence when
+#     both are configured.
+# When neither is configured the endpoint returns a clear 400 (`search_disabled`).
 [search]
 enabled = true
 # searxng_url = "http://localhost:8080"

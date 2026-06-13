@@ -20,10 +20,18 @@ services:
       chrome-stealth:
         condition: service_started
         required: false
-      # SearXNG sidecar — backs `/v1/search`. Wait for healthy so the first
-      # search request after `compose up` doesn't race the cold start.
+      # Camofox (Firefox/Camoufox via camofox-browser REST) — the heavy/stealth
+      # JS tier (takes Chrome's ladder slot) and the `/v1/search` backend. Wait
+      # for healthy so the first render/search after `compose up` doesn't race
+      # the browser cold start.
+      camofox:
+        condition: service_healthy
+      # SearXNG is now opt-in (`--profile searxng`); it no longer gates startup.
+      # When the profile is off the service isn't created, so this required:false
+      # entry is satisfied immediately. Bring it back with `--profile searxng`.
       searxng:
         condition: service_healthy
+        required: false
     environment:
       - RUST_LOG=info
       - CRW_CONFIG=config.docker
@@ -79,6 +87,10 @@ services:
   # docker-compose.override.yml.
   searxng:
     image: searxng/searxng:2026.5.9-0cba32c15
+    # Opt-in: search now flows through Camofox by default, so SearXNG is gated
+    # behind its own profile and does not start with a plain `compose up`.
+    # Re-enable with `docker compose --profile searxng up`.
+    profiles: ["searxng"]
     restart: unless-stopped
     # Hardening: SearXNG handles arbitrary user queries and proxies third-party
     # engines, so it has the largest abuse surface in this stack. We strip
@@ -114,8 +126,37 @@ services:
       retries: 5
       start_period: 15s
 
+  # Heavy/stealth JS renderer + `/v1/search` backend. Camofox wraps the
+  # Camoufox (Firefox) anti-detect browser behind a REST API on :9377. In the
+  # default ladder it takes Chrome's slot — LightPanda handles the light cases,
+  # Camofox the heavy SPA / anti-bot ones. Firefox is heavier than LightPanda,
+  # hence the larger mem_limit.
+  #
+  # CAMOFOX_HOST=0.0.0.0 is required so the server is reachable over the docker
+  # bridge as `camofox:9377` (it binds loopback otherwise). Set CAMOFOX_API_KEY
+  # in `.env` for any non-loopback / shared deployment.
+  camofox:
+    # Pinned (never `:latest`) so upgrades are deliberate — matches the searxng
+    # pinning rationale above. Base image is node:22-slim (ships curl, not wget).
+    image: ghcr.io/redf0x1/camofox-browser:2.4.5
+    restart: unless-stopped
+    environment:
+      - CAMOFOX_HOST=0.0.0.0
+      - CAMOFOX_PORT=9377
+      - CAMOFOX_API_KEY=${CAMOFOX_API_KEY:-}
+      - CAMOFOX_AUTH_MODE=${CAMOFOX_AUTH_MODE:-auto}
+    mem_limit: 2g
+    memswap_limit: 2g
+    shm_size: "1g"
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://localhost:9377/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+
   # Primary JS renderer — lightweight (~64 MB), fast startup.
-  # Handles most static-JS sites. Falls back to Chrome for complex SPAs.
+  # Handles most static-JS sites. Falls back to Camofox for complex SPAs.
   #
   # `restart: unless-stopped` is load-bearing: LightPanda is known to OOM
   # or segfault on adversarial pages (heavy SPA bundles, Cloudflare turnstile),

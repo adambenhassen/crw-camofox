@@ -1,5 +1,5 @@
 # Docker-specific overrides (layered on top of config.default.toml).
-# Renderer failover order: HTTP → LightPanda → Chrome.
+# Renderer failover order: HTTP → LightPanda → Camofox (Chrome is opt-in).
 
 [request]
 # Bench analysis (May 2026): 12 of 14 zero-byte misses on the 150-URL diagnose
@@ -67,19 +67,28 @@ chrome_context_pool_enabled = true
 [renderer.lightpanda]
 ws_url = "ws://lightpanda:9222/"
 
-[renderer.chrome]
-ws_url = "ws://chrome:9222/"
+# Camofox (camofox-browser REST) — the heavy/stealth JS tier. Takes Chrome's
+# ladder slot by default (tried after LightPanda). Reachable on the compose
+# bridge as `camofox:9377`. When the camofox server runs with auth, set the key
+# here or via `CRW_RENDERER__CAMOFOX__API_KEY`.
+[renderer.camofox]
+base_url = "http://camofox:9377"
+
+# Chrome (CDP) is now opt-in — Camofox replaces it in the default ladder. To
+# swap back to Chrome, uncomment this and bring up the heavy profile
+# (`docker compose --profile heavy up`), optionally removing [renderer.camofox].
+# [renderer.chrome]
+# ws_url = "ws://chrome:9222/"
 
 [renderer.chrome_pool]
 size = 4
 
-# /v1/search points at the bundled SearXNG sidecar. On the reference
-# docker-compose stack the sidecar is reachable as `searxng:8080` over the
-# default bridge network (the service is named `searxng`). To point CRW at an
-# external SearXNG instead, override this without editing the file by setting
-# `CRW_SEARCH__SEARXNG_URL=http://your-host:8080` (env wins over this default).
+# /v1/search now flows through Camofox (Firefox) by default — it drives Google
+# directly via the camofox-browser tier configured above. SearXNG is opt-in: to
+# use it instead, start the searxng profile (`docker compose --profile searxng
+# up`) and uncomment `searxng_url` below (or set `CRW_SEARCH__SEARXNG_URL`).
 [search]
-searxng_url = "http://searxng:8080"
+# searxng_url = "http://searxng:8080"
 # Multi-query expansion (cycle-2 of the answer-quality loop): the proven win.
 # On a 50-q SimpleQA+FRAMES sample it lifted overall 64%->76% and FRAMES
 # 56%->80% by unioning an entity-rewrite's results with the original. Baked on

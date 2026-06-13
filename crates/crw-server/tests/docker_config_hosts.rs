@@ -96,6 +96,11 @@ fn docker_config_hosts_match_compose_services() {
     if let Some(u) = get("renderer", "chrome", "ws_url") {
         hosts.push(("renderer.chrome.ws_url", u));
     }
+    // Camofox is the default heavy/search tier — its REST host must resolve to a
+    // real compose service too (same #90 failure mode as the others).
+    if let Some(u) = get("renderer", "camofox", "base_url") {
+        hosts.push(("renderer.camofox.base_url", u));
+    }
     if let Some(u) = doc
         .get("search")
         .and_then(|s| s.get("searxng_url"))
