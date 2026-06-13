@@ -10,6 +10,7 @@ members = [
     "crates/crw-mcp",
     "crates/crw-mcp-proto",
     "crates/crw-browse",
+    "crates/crw-browse-camofox",
     "crates/crw-cli",
     "crates/crw-monitor",
 ]
