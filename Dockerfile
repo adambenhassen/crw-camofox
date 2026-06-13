@@ -7,23 +7,32 @@
 # minutes; only the tiny runtime layer (ca-certificates) still touches QEMU.
 FROM --platform=$BUILDPLATFORM rust:1.93-bookworm AS builder
 
-# Provided automatically by buildx: amd64 | arm64.
+# Provided automatically by buildx: amd64 | arm64. BUILDARCH is the native arch
+# of the build host, so `$TARGETARCH != $BUILDARCH` ⇒ we are cross-compiling and
+# need the target's cross toolchain (the native rustc image only ships its own).
 ARG TARGETARCH
+ARG BUILDARCH
 
 WORKDIR /app
 
-# Install the Rust target + (for arm64) the cross linker, and record the
-# rustc target triple for the build step.
+# Install the Rust target + (when cross-compiling) the target cross toolchain,
+# and record the rustc target triple for the build step. crossbuild-essential-*
+# = the target gcc/g++ AND the target libc dev headers (the bare cross gcc alone
+# lacks sys/types.h etc., which broke aws-lc-sys's C build).
 RUN set -eux; \
     case "$TARGETARCH" in \
-      amd64) RUST_TARGET=x86_64-unknown-linux-gnu ;; \
+      amd64) RUST_TARGET=x86_64-unknown-linux-gnu; \
+             if [ "$BUILDARCH" != "amd64" ]; then \
+               apt-get update; \
+               apt-get install -y --no-install-recommends crossbuild-essential-amd64; \
+               rm -rf /var/lib/apt/lists/*; \
+             fi ;; \
       arm64) RUST_TARGET=aarch64-unknown-linux-gnu; \
-             apt-get update; \
-             # crossbuild-essential-arm64 = the aarch64 gcc/g++ AND the target
-             # libc dev headers (libc6-dev-arm64-cross). The bare cross gcc
-             # alone lacks sys/types.h etc., which broke aws-lc-sys's C build.
-             apt-get install -y --no-install-recommends crossbuild-essential-arm64; \
-             rm -rf /var/lib/apt/lists/* ;; \
+             if [ "$BUILDARCH" != "arm64" ]; then \
+               apt-get update; \
+               apt-get install -y --no-install-recommends crossbuild-essential-arm64; \
+               rm -rf /var/lib/apt/lists/*; \
+             fi ;; \
       *) echo "unsupported TARGETARCH=$TARGETARCH" >&2; exit 1 ;; \
     esac; \
     rustup target add "$RUST_TARGET"; \
@@ -31,8 +40,10 @@ RUN set -eux; \
 
 COPY . .
 
-# Linker for the aarch64 cross target (ignored when building amd64 natively).
-ENV CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER=aarch64-linux-gnu-gcc
+# Cross linker per target (each var is consulted only when building that target,
+# and resolves to the native gcc when building that arch natively).
+ENV CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER=aarch64-linux-gnu-gcc \
+    CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_LINKER=x86_64-linux-gnu-gcc
 
 # The workspace release profile uses fat LTO + codegen-units=1, whose final
 # link of crw-server (aws-lc-sys + the full dep graph) needs several GB and
@@ -65,6 +76,7 @@ COPY config.docker.toml /app/config.docker.toml
 
 WORKDIR /app
 
+LABEL org.opencontainers.image.source=https://github.com/adambenhassen/crw-camofox
 LABEL io.modelcontextprotocol.server.name="io.github.us/crw"
 
 EXPOSE 3000
