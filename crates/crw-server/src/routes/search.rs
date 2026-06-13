@@ -11,9 +11,10 @@ use crw_core::types::{
 use crw_crawl::single::scrape_url;
 use crw_extract::answer;
 use crw_extract::summary;
+use crate::state::SearchBackend;
 use crw_search::{
-    SearchError, SearxngClient, SearxngParams, SearxngResponse, map_to_searxng_params,
-    transform_flat, transform_flat_reranked, transform_grouped,
+    SearchError, SearxngParams, SearxngResponse, map_to_searxng_params, transform_flat,
+    transform_flat_reranked, transform_grouped,
 };
 use futures::stream::{self, StreamExt};
 use std::collections::HashMap;
@@ -153,12 +154,12 @@ pub async fn search_inner(
     validate_request(&req, state.config.search.max_limit)?;
 
     let client = state
-        .searxng
+        .search
         .as_ref()
         .ok_or_else(|| {
             CrwError::SearchDisabled(
-                "Search is disabled. Set [search].searxng_url in config or define \
-                 CRW_SEARCH__SEARXNG_URL to point at a SearXNG instance."
+                "Search is disabled. Set [renderer.camofox] to search via Camofox (Google), \
+                 or set [search].searxng_url / CRW_SEARCH__SEARXNG_URL for a SearXNG instance."
                     .into(),
             )
         })?
@@ -959,7 +960,7 @@ fn map_search_error(err: SearchError, timeout_ms: u64, base_url: &str) -> CrwErr
 /// failure semantics as the single-fetch path); a failed variant fetch is
 /// ignored. If the rewrite is empty/trivial, this is exactly the single fetch.
 async fn fetch_expanded(
-    client: &SearxngClient,
+    client: &SearchBackend,
     query: &str,
     base_params: &SearxngParams,
     llm: &LlmConfig,

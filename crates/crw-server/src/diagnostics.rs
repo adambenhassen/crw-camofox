@@ -23,16 +23,25 @@ pub fn sanitize_url_origin(raw: &str) -> String {
 }
 
 /// One-line summary of the search subsystem's configured state, for the startup
-/// log. Distinguishes the three states that otherwise collapse to a single
-/// "search disabled" at request time:
-///   - `enabled = false`            → intentionally off
-///   - enabled, `searxng_url` unset → misconfigured (every call will 503)
-///   - enabled, `searxng_url` set   → active (host shown, origin-sanitized)
-pub fn search_startup_status(cfg: &SearchConfig) -> (Level, String) {
+/// log. `camofox_base_url` is the configured `[renderer.camofox]` endpoint, if
+/// any — it is the default backend and takes precedence over SearXNG. The states:
+///   - `enabled = false`              → intentionally off
+///   - camofox configured             → active via Camofox (Google)
+///   - else searxng_url set           → active via SearXNG
+///   - else                           → misconfigured (every call will 503)
+pub fn search_startup_status(
+    cfg: &SearchConfig,
+    camofox_base_url: Option<&str>,
+) -> (Level, String) {
     if !cfg.enabled {
         (
             Level::INFO,
             "search: disabled ([search].enabled = false)".to_string(),
+        )
+    } else if let Some(url) = camofox_base_url {
+        (
+            Level::INFO,
+            format!("search: enabled (camofox={})", sanitize_url_origin(url)),
         )
     } else if let Some(url) = &cfg.searxng_url {
         (
@@ -42,7 +51,9 @@ pub fn search_startup_status(cfg: &SearchConfig) -> (Level, String) {
     } else {
         (
             Level::WARN,
-            "search: enabled but no [search].searxng_url — /v1/search will return 503".to_string(),
+            "search: enabled but no [renderer.camofox] or [search].searxng_url — \
+             /v1/search will return 503"
+                .to_string(),
         )
     }
 }
@@ -87,7 +98,7 @@ mod tests {
 
     #[test]
     fn startup_status_enabled_with_url() {
-        let (level, msg) = search_startup_status(&cfg(true, Some("http://searxng:8080")));
+        let (level, msg) = search_startup_status(&cfg(true, Some("http://searxng:8080")), None);
         assert_eq!(level, Level::INFO);
         assert!(
             msg.contains("enabled (searxng=http://searxng:8080)"),
@@ -96,22 +107,32 @@ mod tests {
     }
 
     #[test]
-    fn startup_status_enabled_no_url_warns() {
-        let (level, msg) = search_startup_status(&cfg(true, None));
+    fn startup_status_camofox_takes_precedence() {
+        // Camofox configured + searxng_url set → Camofox wins in the log.
+        let (level, msg) =
+            search_startup_status(&cfg(true, Some("http://searxng:8080")), Some("http://camofox:9377"));
+        assert_eq!(level, Level::INFO);
+        assert!(msg.contains("enabled (camofox=http://camofox:9377)"), "{msg}");
+    }
+
+    #[test]
+    fn startup_status_enabled_no_backend_warns() {
+        let (level, msg) = search_startup_status(&cfg(true, None), None);
         assert_eq!(level, Level::WARN);
-        assert!(msg.contains("no [search].searxng_url"), "{msg}");
+        assert!(msg.contains("no [renderer.camofox]"), "{msg}");
     }
 
     #[test]
     fn startup_status_disabled() {
-        let (level, msg) = search_startup_status(&cfg(false, Some("http://searxng:8080")));
+        let (level, msg) = search_startup_status(&cfg(false, Some("http://searxng:8080")), None);
         assert_eq!(level, Level::INFO);
         assert!(msg.contains("disabled"), "{msg}");
     }
 
     #[test]
     fn startup_status_never_leaks_credentials() {
-        let (_, msg) = search_startup_status(&cfg(true, Some("https://u:secret@host:8080/tok")));
+        let (_, msg) =
+            search_startup_status(&cfg(true, Some("https://u:secret@host:8080/tok")), None);
         assert!(!msg.contains("secret"), "{msg}");
         assert!(!msg.contains("tok"), "{msg}");
         assert!(msg.contains("https://host:8080"), "{msg}");

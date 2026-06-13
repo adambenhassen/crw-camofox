@@ -8,13 +8,41 @@ use crw_core::types::{
 use crw_crawl::crawl::{CrawlOptions, run_crawl};
 use crw_crawl::single::scrape_url;
 use crw_renderer::FallbackRenderer;
-use crw_search::SearxngClient;
+use crw_search::{CamofoxSearchClient, SearchError, SearxngClient, SearxngParams, SearxngResponse};
 use futures::stream::StreamExt;
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::sync::{RwLock, watch};
 use uuid::Uuid;
+
+/// The active `/v1/search` upstream. Either the SearXNG client (opt-in, when
+/// `[search].searxng_url` is set) or the Camofox-direct Google client (default,
+/// when `[renderer.camofox]` is configured). Both expose the same
+/// `fetch(&SearxngParams) -> Result<SearxngResponse, SearchError>` and
+/// `base_url()`, so the search route is agnostic to which is in use. Neither
+/// upstream code path is removed — this only selects between them.
+#[derive(Clone)]
+pub enum SearchBackend {
+    Searxng(Arc<SearxngClient>),
+    Camofox(Arc<CamofoxSearchClient>),
+}
+
+impl SearchBackend {
+    pub async fn fetch(&self, params: &SearxngParams) -> Result<SearxngResponse, SearchError> {
+        match self {
+            SearchBackend::Searxng(c) => c.fetch(params).await,
+            SearchBackend::Camofox(c) => c.fetch(params).await,
+        }
+    }
+
+    pub fn base_url(&self) -> &str {
+        match self {
+            SearchBackend::Searxng(c) => c.base_url(),
+            SearchBackend::Camofox(c) => c.base_url(),
+        }
+    }
+}
 
 /// Validate that a request's pinned renderer is available before accepting
 /// the job. Returns `InvalidRequest` (→ HTTP 400) when the named renderer is
@@ -123,9 +151,10 @@ pub struct AppState {
     /// is a single merged JSON object, not a `Vec<ScrapeData>`.
     pub extract_jobs: Arc<RwLock<HashMap<Uuid, ExtractRecord>>>,
     pub crawl_semaphore: Arc<tokio::sync::Semaphore>,
-    /// SearXNG client. `None` when `[search].searxng_url` is unset, in which
-    /// case `/v1/search` returns a clear `search_disabled` error.
-    pub searxng: Option<Arc<SearxngClient>>,
+    /// Active search upstream (Camofox-direct Google by default, SearXNG when
+    /// opted in). `None` when neither is configured, in which case `/v1/search`
+    /// returns a clear `search_disabled` error.
+    pub search: Option<SearchBackend>,
     /// Server-wide default /map URL filter. `None` disables the filter
     /// entirely (legacy behaviour). Per-request overrides may swap or
     /// extend this at handler time.
@@ -165,6 +194,29 @@ impl AppState {
             None
         };
 
+        // Camofox-direct search. When `[renderer.camofox]` is set, `/v1/search`
+        // drives Google through the camofox-browser tier (SERPs trip anti-bot
+        // walls, so search bypasses the renderer ladder). Independent of the
+        // renderer's `camofox` cargo feature — it only needs the REST endpoint.
+        let camofox_search = if config.search.enabled
+            && let Some(cf) = config.renderer.camofox.as_ref()
+        {
+            Some(Arc::new(CamofoxSearchClient::new(
+                cf.base_url.clone(),
+                cf.api_key.clone(),
+                Duration::from_millis(config.search.timeout_ms),
+            )))
+        } else {
+            None
+        };
+
+        // Prefer Camofox when configured; otherwise fall back to SearXNG.
+        let search = match (camofox_search, searxng) {
+            (Some(cf), _) => Some(SearchBackend::Camofox(cf)),
+            (None, Some(sx)) => Some(SearchBackend::Searxng(sx)),
+            (None, None) => None,
+        };
+
         let url_filter_cfg =
             crw_crawl::url_filter::UrlFilterCfg::from_map_config(&config.map.url_filter);
         // One-shot snapshot of how many rules the filter knows about. Helps
@@ -199,7 +251,7 @@ impl AppState {
             crawl_jobs: Arc::new(RwLock::new(HashMap::new())),
             extract_jobs: Arc::new(RwLock::new(HashMap::new())),
             crawl_semaphore: Arc::new(tokio::sync::Semaphore::new(MAX_CONCURRENT_CRAWLS)),
-            searxng,
+            search,
             url_filter,
         };
 
