@@ -1,10 +1,10 @@
 <div class="page-intro">
   <div class="page-kicker">Core Endpoint</div>
   <h1>Search</h1>
-  <p class="page-subtitle">Search the web first, then optionally scrape the results you care about. Works out of the box on self-hosted CRW via the bundled SearXNG sidecar — no third-party API key needed. Free, self-hostable alternative to Tavily / Serper / Brave Search.</p>
+  <p class="page-subtitle">Search the web first, then optionally scrape the results you care about. Works out of the box on self-hosted CRW via the Camofox (Firefox) browser tier driving Google — no third-party API key needed. SearXNG remains available as an opt-in backend. Free, self-hostable alternative to Tavily / Serper / Brave Search.</p>
   <div class="page-capabilities">
     <div class="page-capability"><strong>Best for:</strong> unknown URLs</div>
-    <div class="page-capability"><strong>Self-hosted:</strong> bundled SearXNG sidecar</div>
+    <div class="page-capability"><strong>Self-hosted:</strong> Camofox-driven Google (SearXNG opt-in)</div>
     <div class="page-capability"><strong>Hosted:</strong> fastcrw.com (managed)</div>
     <div class="page-capability"><strong>Start with:</strong> search only, then add scraping</div>
   </div>
@@ -25,7 +25,7 @@
 </div>
 
 :::note
-**Self-hosted users**: `docker compose up` boots a SearXNG sidecar automatically (reachable inside the Compose network as `searxng:8080`). `/v1/search` is live on `http://localhost:3000` with no extra setup. To point at an existing SearXNG instance instead, set `CRW_SEARCH__SEARXNG_URL=http://your-host:8080` and remove the `searxng` service from your compose file. To disable search entirely, set `[search].enabled = false` — the route returns a clear `search_disabled` error (HTTP 503). See the [Docker → Search (SearXNG)](/docker) section for the full setup, the `SEARXNG_BASE_URL` vs `searxng_url` distinction, and cold-start timing.
+**Self-hosted users**: `docker compose up` boots the `camofox` service (the Camoufox/Firefox browser, reachable inside the Compose network as `camofox:9377`), and `/v1/search` drives Google through it with no extra setup. To use SearXNG instead, start the opt-in profile (`docker compose --profile searxng up`) and set `searxng_url` (or `CRW_SEARCH__SEARXNG_URL=http://your-host:8080`) — Camofox takes precedence when both are configured. To disable search entirely, set `[search].enabled = false` — the route returns a clear `search_disabled` error (HTTP 503). See the [Docker → Search](/docker) section for the full setup.
 :::
 
 ## Searching the web with CRW

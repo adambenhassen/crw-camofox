@@ -162,7 +162,7 @@ Continue.dev) live under [docs.fastcrw.com/mcp-clients/](https://docs.fastcrw.co
 |---|---|---|
 | Best when | You want full data residency, AGPL is fine, you can run your own proxy strategy, latency to your infra matters more than ours. | You want zero infra, a global proxy network, a dashboard, usage metering, and AGPL carve-out for closed-source product code. |
 | Install | `docker run -p 3000:3000 ghcr.io/us/crw` or `cargo install crw-server`. | Sign up at [fastcrw.com](https://fastcrw.com) — 500 free credits, no card. |
-| Search | Bundled SearXNG sidecar (`docker compose up`). | Managed search backend. |
+| Search | Camofox-driven Google by default (`docker compose up`); SearXNG opt-in (`--profile searxng`). | Managed search backend. |
 | Proxy rotation | Bring your own pool via env vars. | Built-in. |
 | Cost | $0 + your hosting bill. | From $13/mo; pricing on [fastcrw.com/pricing](https://fastcrw.com/pricing). |
 | License obligations | AGPL-3.0 applies if you expose the API to third parties. | AGPL carve-out included. |
@@ -216,14 +216,21 @@ curl -fsSL https://raw.githubusercontent.com/us/crw/main/install.sh | CRW_BINARY
 docker run -p 3000:3000 ghcr.io/us/crw
 ```
 
-Docker Compose ships with `lightpanda` by default; `chrome` is opt-in:
+Docker Compose ships with `lightpanda` + `camofox` by default (ladder:
+HTTP → LightPanda → Camofox). `chrome` and SearXNG are opt-in:
 
 ```bash
-docker compose up -d                                         # http + lightpanda
-docker compose --profile heavy up -d                         # + chrome failover
+docker compose up -d                                         # http + lightpanda + camofox
+docker compose --profile heavy up -d                         # + chrome failover (CDP)
+docker compose --profile searxng up -d                       # + SearXNG search backend
 docker compose -f docker-compose.yml \
   -f docker-compose.stealth.yml --profile stealth up -d      # browserless stealth tier
 ```
+
+[Camofox](https://github.com/redf0x1/camofox-browser) wraps the Camoufox
+(Firefox) anti-detect browser; it is the default heavy/stealth JS tier and backs
+`/v1/search`. To swap it back for Chrome, set `[renderer.chrome]` and clear
+`[renderer.camofox]` in your config.
 
 See the [self-hosting guide](https://docs.fastcrw.com/#self-hosting) for
 production hardening, auth, reverse proxy, and resource tuning.
@@ -240,7 +247,7 @@ production hardening, auth, reverse proxy, and resource tuning.
 | `DELETE` | `/v1/crawl/:id` | Cancel a running crawl job |
 | `POST` | `/v1/map` | Discover all URLs on a site |
 | `POST` | `/v1/extract` | Structured JSON extraction from a URL via JSON Schema |
-| `POST` | `/v1/search` | Web search via SearXNG sidecar, with optional content scraping |
+| `POST` | `/v1/search` | Web search via Camofox-driven Google (or opt-in SearXNG), with optional content scraping |
 | `POST` | `/v1/change-tracking/diff` | Diff a scrape against a supplied snapshot (the [monitoring](https://us.github.io/crw/monitoring) primitive) — single or batch |
 | `GET` | `/health` | Health check (no auth required) |
 | `POST` | `/mcp` | Streamable HTTP MCP transport |

@@ -21,7 +21,7 @@ curl -X POST http://localhost:3000/v1/scrape \
 ## What You Get
 
 - the same core self-hosted routes: `scrape`, `crawl`, `map`, `mcp`, `health`
-- `search` too, when you run the Docker stack — it boots a SearXNG sidecar so `/v1/search` and the `crw_search` MCP tool work out of the box (see [Docker → Search (SearXNG)](/docker))
+- `search` too, when you run the Docker stack — it boots the Camofox (Firefox) browser so `/v1/search` (Camofox-driven Google) and the `crw_search` MCP tool work out of the box; SearXNG is an opt-in alternative (see [Docker → Search](/docker))
 - optional auth with Bearer tokens
 - optional browser-backed rendering
 - your own reverse proxy, logging, rate limits, and deployment choices

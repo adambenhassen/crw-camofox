@@ -11,7 +11,7 @@ CRW includes a built-in MCP (Model Context Protocol) server that gives any MCP-c
 | Mode | When | Tools | Description |
 |------|------|-------|-------------|
 | **Embedded** (default) | No `--api-url` / `CRW_API_URL` set | scrape, crawl, map | Self-contained. No server needed. The scraping engine runs inside the MCP process. |
-| **Proxy / Server** | `--api-url` / `CRW_API_URL` set | scrape, crawl, map + **search** | Forwards tool calls to a remote CRW server — the [fastcrw.com](https://fastcrw.com) cloud **or your own self-hosted server**. `crw_search` works whenever that server has SearXNG configured (the Docker stack enables it by default). |
+| **Proxy / Server** | `--api-url` / `CRW_API_URL` set | scrape, crawl, map + **search** | Forwards tool calls to a remote CRW server — the [fastcrw.com](https://fastcrw.com) cloud **or your own self-hosted server**. `crw_search` works whenever that server has a search backend configured (the Docker stack enables Camofox-driven search by default; SearXNG is opt-in). |
 
 ## Where to use what
 
@@ -150,7 +150,7 @@ cargo build -p crw-mcp --no-default-features --release
 | `crw_crawl` | Start async crawl → returns job ID | `POST /v1/crawl` | All modes |
 | `crw_check_crawl_status` | Poll crawl status and get results | `GET /v1/crawl/:id` | All modes |
 | `crw_map` | Discover all URLs on a site | `POST /v1/map` | All modes |
-| `crw_search` | Search the web → titles, URLs, descriptions | `POST /v1/search` | **Server with SearXNG** (cloud or self-hosted) |
+| `crw_search` | Search the web → titles, URLs, descriptions | `POST /v1/search` | **Server with a search backend** — Camofox (default) or SearXNG (cloud or self-hosted) |
 
 ## Browser Automation (`crw-browse`)
 
@@ -234,7 +234,7 @@ For cloud mode and file-based configs, continue in [MCP Client Setup](#mcp-clien
 
 ### crw_search (server-backed)
 
-Available when connected to a CRW **server** that has SearXNG configured — the [fastcrw.com](https://fastcrw.com) cloud, or your own self-hosted server (the Docker stack enables it by default; see [Docker → Search (SearXNG)](/docker)). Point the MCP at it with `--api-url` / `CRW_API_URL`. It is *not* available from the standalone embedded MCP binary, which has no search backend.
+Available when connected to a CRW **server** that has a search backend configured — the [fastcrw.com](https://fastcrw.com) cloud, or your own self-hosted server (the Docker stack enables Camofox-driven search by default, with SearXNG opt-in; see [Docker → Search](/docker)). Point the MCP at it with `--api-url` / `CRW_API_URL`. It is *not* available from the standalone embedded MCP binary, which has no search backend.
 
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|

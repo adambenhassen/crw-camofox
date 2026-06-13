@@ -33,27 +33,44 @@ The bundled `docker-compose.yml` starts these services:
 | Service | Port | Default? | Description |
 |---------|------|----------|-------------|
 | **crw** | 3000 | ✅ | API server (loads `config.docker.toml`) |
-| **searxng** | 8080 | ✅ | SearXNG meta-search backend for `/v1/search` |
 | **lightpanda** | 9222 | ✅ | Lightweight headless browser for JS rendering |
-| **chrome** | 9222 | `--profile heavy` | Full Chromium fallback for complex SPAs |
+| **camofox** | 9377 | ✅ | [Camofox](https://github.com/redf0x1/camofox-browser) (Camoufox/Firefox) — heavy/stealth JS tier + `/v1/search` backend |
+| **chrome** | 9222 | `--profile heavy` | Full Chromium fallback for complex SPAs (CDP) |
 | **chrome-stealth** | 3000 | `--profile stealth` | Anti-fingerprint Chromium (browserless, SSPL-licensed) |
+| **searxng** | 8080 | `--profile searxng` | SearXNG meta-search backend for `/v1/search` (opt-in alternative to Camofox) |
 
 The `crw` service reads its configuration from the mounted `config.docker.toml` (via
-`CRW_CONFIG=config.docker`), which already points each renderer and the search backend at the matching
-service name on Compose's default bridge network (`lightpanda:9222`, `chrome:9222`, `searxng:8080`). You
+`CRW_CONFIG=config.docker`), which already points each renderer at the matching
+service name on Compose's default bridge network (`lightpanda:9222`, `camofox:9377`). You
 don't need to wire renderer URLs through environment variables — they're in the config file.
 
-The optional `chrome` / `chrome-stealth` tiers are opt-in so small hosts skip the ~500 MB Chromium image:
+The renderer ladder is `HTTP → LightPanda → Camofox`. The optional `chrome` / `chrome-stealth`
+tiers are opt-in so small hosts skip the ~500 MB Chromium image:
 
 ```bash
-docker compose --profile heavy up -d      # add the vanilla Chromium fallback
+docker compose --profile heavy up -d      # add the vanilla Chromium fallback (CDP)
 docker compose --profile stealth up -d    # add the anti-fingerprint tier (review the SSPL license first)
 ```
 
-## Search (SearXNG)
+## Search
 
-`/v1/search` (and the `crw_search` MCP tool) is backed by the bundled **searxng** service, reachable inside
-the Compose network as `searxng:8080`. This is configured by default in `config.docker.toml`:
+`/v1/search` (and the `crw_search` MCP tool) is backed by the bundled **camofox** service by default —
+it drives Google through the Camoufox (Firefox) anti-detect browser, reachable inside the Compose network
+as `camofox:9377`. This is configured in `config.docker.toml`:
+
+```toml
+[renderer.camofox]
+base_url = "http://camofox:9377"
+```
+
+### Using SearXNG instead (opt-in)
+
+Start the SearXNG profile and set `searxng_url`. Camofox takes precedence when both are configured, so
+also clear `[renderer.camofox]` if you want SearXNG to serve search:
+
+```bash
+docker compose --profile searxng up -d
+```
 
 ```toml
 [search]
