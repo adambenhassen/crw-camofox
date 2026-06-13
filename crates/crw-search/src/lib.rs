@@ -11,6 +11,7 @@
 //!
 //! [`SearchRequest`]: crw_core::types::SearchRequest
 
+pub mod camofox_search;
 pub mod client;
 pub mod params;
 pub mod rerank;
@@ -18,6 +19,7 @@ pub mod structured;
 pub mod transform;
 pub mod wikidata;
 
+pub use camofox_search::CamofoxSearchClient;
 pub use client::{SearchError, SearxngClient, SearxngResponse, SearxngResult};
 pub use params::{SearxngParams, clean_query, map_to_searxng_params};
 pub use rerank::{rerank, rerank_relevance};
