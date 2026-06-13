@@ -35,6 +35,29 @@ Works with: [Claude Code](https://docs.fastcrw.com/mcp-clients/#claude-code) · 
 
 ---
 
+## 🦊 This is the Camofox fork
+
+This is a fork of [`crw`](https://github.com/us/crw) that swaps the browser layer
+to [**Camofox**](https://github.com/redf0x1/camofox-browser) (the Camoufox/Firefox
+anti-detect browser, driven over its REST API) and re-backs search on it. Changes
+vs. upstream — all **additive and config-toggled**, so nothing upstream is deleted
+and the fork stays easy to sync:
+
+| Area | Upstream `crw` | This fork |
+|------|----------------|-----------|
+| Default JS render ladder | `HTTP → LightPanda → Chrome` (CDP) | `HTTP → LightPanda → Camofox` (Firefox). Chrome kept, **config-swappable** (`[renderer.chrome]`). |
+| Stealth tier | browserless Chromium (SSPL) | Camofox (engine-level fingerprint evasion). Browserless left opt-in. |
+| `/v1/search` backend | SearXNG sidecar | **Camofox-driven Google** by default. SearXNG kept, opt-in (`--profile searxng`). |
+| Interactive MCP | `crw-browse` (CDP, 2 tools) | **`crw-browse-camofox`** added — 24 tools over Camofox REST. `crw-browse` untouched. |
+
+CDP/Chrome/SearXNG code all remain in the tree, just off by default — flip a config
+flag or a compose profile to get upstream behavior back.
+
+> The sections below are inherited from upstream and describe the engine, API, and
+> managed `api.fastcrw.com` offering (which this fork does not operate).
+
+---
+
 ## Why fastCRW?
 
 - **Rust-native, single static binary** — no Redis, no Node.js, no Python venv, no headless-browser sidecar in the request path. One binary, one config file, one process.
