@@ -839,6 +839,7 @@ version = "0.15.2"
 dependencies = [
  "anyhow",
  "axum",
+ "base64",
  "clap",
  "console 0.15.11",
  "crw-browse",
