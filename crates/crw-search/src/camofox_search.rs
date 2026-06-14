@@ -49,9 +49,35 @@ const RETRY_BACKOFF: Duration = Duration::from_millis(750);
 /// comes back as a string we can parse. Selectors are intentionally broad and
 /// kept in this one place — Google rewrites its SERP DOM periodically, so this
 /// is the single spot to fix when extraction drifts.
-const SCRAPE_JS: &str = r#"JSON.stringify(Array.from(document.querySelectorAll('div.g, div.MjjYud')).map(function(el){var a=el.querySelector('a[href]');var h=el.querySelector('h3');var s=el.querySelector('.VwiC3b, [data-sncf], .st');return (a&&h)?{url:a.href,title:h.innerText,content:s?s.innerText:''}:null;}).filter(Boolean))"#;
+const GOOGLE_SCRAPE_JS: &str = r#"JSON.stringify(Array.from(document.querySelectorAll('div.g, div.MjjYud')).map(function(el){var a=el.querySelector('a[href]');var h=el.querySelector('h3');var s=el.querySelector('.VwiC3b, [data-sncf], .st');return (a&&h)?{url:a.href,title:h.innerText,content:s?s.innerText:''}:null;}).filter(Boolean))"#;
 
-/// One scraped SERP row, as emitted by [`SCRAPE_JS`].
+/// Bing SERP extractor. `li.b_algo` rows, `h2 a` for title/url, `.b_caption p`
+/// for the snippet.
+const BING_SCRAPE_JS: &str = r#"JSON.stringify(Array.from(document.querySelectorAll('li.b_algo')).map(function(el){var a=el.querySelector('h2 a[href]');var s=el.querySelector('.b_caption p, p');return a?{url:a.href,title:a.innerText,content:s?s.innerText:''}:null;}).filter(Boolean))"#;
+
+/// DuckDuckGo SERP extractor. Result blocks expose `h2 a` (new layout) or
+/// `a.result__a` (html layout), with a sibling snippet node.
+const DDG_SCRAPE_JS: &str = r#"JSON.stringify(Array.from(document.querySelectorAll('article[data-testid="result"], div.result')).map(function(el){var a=el.querySelector('h2 a[href], a.result__a[href]');var s=el.querySelector('[data-result="snippet"], .result__snippet');return a?{url:a.href,title:a.innerText,content:s?s.innerText:''}:null;}).filter(Boolean))"#;
+
+/// Generic fallback: harvest external content anchors with non-trivial link
+/// text, skipping chrome. Lower precision, zero per-engine maintenance. Used by
+/// every engine without a dedicated extractor.
+const GENERIC_SCRAPE_JS: &str = r#"JSON.stringify(Array.from(document.querySelectorAll('a[href^="http"]')).map(function(a){var t=(a.innerText||'').trim();return (t.length>15)?{url:a.href,title:t,content:''}:null;}).filter(Boolean).slice(0,30))"#;
+
+/// The extractor JS for a given engine. Google/Bing/DuckDuckGo have dedicated
+/// SERP selectors; every other engine uses the generic harvester. This is the
+/// single place to fix when an engine's DOM drifts.
+fn scrape_js(engine: crw_core::types::SearchEngine) -> &'static str {
+    use crw_core::types::SearchEngine::*;
+    match engine {
+        Google => GOOGLE_SCRAPE_JS,
+        Bing => BING_SCRAPE_JS,
+        DuckDuckGo => DDG_SCRAPE_JS,
+        _ => GENERIC_SCRAPE_JS,
+    }
+}
+
+/// One scraped SERP row, as emitted by the per-engine extractors ([`scrape_js`]).
 #[derive(Deserialize)]
 struct ScrapedRow {
     url: String,
@@ -224,7 +250,7 @@ impl CamofoxSearchClient {
         let eval = self
             .post(
                 &format!("/tabs/{tab_id}/evaluate"),
-                json!({ "userId": USER_ID, "expression": SCRAPE_JS }),
+                json!({ "userId": USER_ID, "expression": GOOGLE_SCRAPE_JS }),
             )
             .await?;
         let raw = eval
@@ -284,5 +310,28 @@ fn is_stale_tab(e: &SearchError) -> bool {
         SearchError::Upstream { status, .. } => *status == 404 || *status >= 500,
         SearchError::Transport(_) => true,
         SearchError::Timeout | SearchError::InvalidResponse(_) => false,
+    }
+}
+
+#[cfg(test)]
+mod extractor_tests {
+    use super::*;
+    use crw_core::types::SearchEngine;
+
+    #[test]
+    fn google_uses_existing_scrape_js() {
+        assert!(scrape_js(SearchEngine::Google).contains("div.g"));
+    }
+
+    #[test]
+    fn bing_and_ddg_have_dedicated_extractors() {
+        assert!(scrape_js(SearchEngine::Bing).contains("li.b_algo"));
+        assert!(scrape_js(SearchEngine::DuckDuckGo).contains("article"));
+    }
+
+    #[test]
+    fn other_engines_fall_back_to_generic() {
+        assert_eq!(scrape_js(SearchEngine::Amazon), scrape_js(SearchEngine::Tiktok));
+        assert_eq!(scrape_js(SearchEngine::Reddit), GENERIC_SCRAPE_JS);
     }
 }
