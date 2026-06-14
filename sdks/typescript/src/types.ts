@@ -46,12 +46,25 @@ export interface MapOptions {
   [key: string]: unknown;
 }
 
+/** Search engines for the Camofox backend (`/v1/search` `engines`). */
+export type SearchEngine =
+  | "google"
+  | "bing"
+  | "duckduckgo"
+  | "wikipedia"
+  | "youtube"
+  | "reddit"
+  | "amazon"
+  | "github";
+
 export interface SearchOptions {
   limit?: number;
   lang?: string;
   tbs?: string;
   sources?: string[];
   categories?: string[];
+  /** Camofox backend only: engine(s) to query (omit for Google). Merged/deduped by URL, max 4. Ignored by SearXNG. */
+  engines?: SearchEngine[];
   scrapeOptions?: Json;
   [key: string]: unknown;
 }

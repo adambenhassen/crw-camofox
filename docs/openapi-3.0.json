@@ -384,6 +384,24 @@
               "type": "string"
             }
           },
+          "engines": {
+            "type": "array",
+            "maxItems": 4,
+            "items": {
+              "type": "string",
+              "enum": [
+                "google",
+                "bing",
+                "duckduckgo",
+                "wikipedia",
+                "youtube",
+                "reddit",
+                "amazon",
+                "github"
+              ]
+            },
+            "description": "Camofox backend only: engine(s) to query (omit for Google). Multiple are merged/deduped by URL. Max 4. Ignored by SearXNG."
+          },
           "scrapeOptions": {
             "$ref": "#/components/schemas/ScrapeOptions"
           }

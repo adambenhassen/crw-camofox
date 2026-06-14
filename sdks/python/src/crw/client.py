@@ -257,6 +257,7 @@ class CrwClient:
         tbs: str | None = None,
         sources: list[str] | None = None,
         categories: list[str] | None = None,
+        engines: list[str] | None = None,
         scrape_options: dict[str, Any] | None = None,
         **kwargs: Any,
     ) -> list[dict] | dict:
@@ -274,6 +275,11 @@ class CrwClient:
             tbs: Time filter (``"qdr:h"``, ``"qdr:d"``, ``"qdr:w"``, ``"qdr:m"``, ``"qdr:y"``).
             sources: Result types (``"web"``, ``"news"``, ``"images"``). Groups response when set.
             categories: Category filters (``"github"``, ``"research"``, ``"pdf"``).
+            engines: Camofox backend only — engine(s) to query (omit for Google).
+                One or more of ``"google"``, ``"bing"``, ``"duckduckgo"``,
+                ``"wikipedia"``, ``"youtube"``, ``"reddit"``, ``"amazon"``,
+                ``"github"``. Multiple are merged/deduped by URL (max 4).
+                Ignored by the SearXNG backend.
             scrape_options: Scrape each result URL, e.g. ``{"formats": ["markdown"]}``.
 
         Returns:
@@ -288,6 +294,8 @@ class CrwClient:
             args["sources"] = sources
         if categories:
             args["categories"] = categories
+        if engines:
+            args["engines"] = engines
         if scrape_options:
             args["scrapeOptions"] = scrape_options
         args.update(kwargs)

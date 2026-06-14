@@ -206,6 +206,15 @@ class TestSearch:
         assert body["limit"] == 5
         assert result == mock_response
 
+    def test_search_http_forwards_engines(self) -> None:
+        client = CrwClient(api_url="https://fastcrw.com/api", api_key="fc-test")
+
+        with patch.object(client, "_http_post", return_value=[]) as mock_post:
+            client.search("rust web scraping", engines=["google", "bing"])
+
+        body = mock_post.call_args[0][1]
+        assert body["engines"] == ["google", "bing"]
+
 
 # ---------------------------------------------------------------------------
 # Close / context manager

@@ -248,7 +248,7 @@ pub fn tool_definitions(proxy_mode: bool) -> Value {
     tools.push(json!({
         "name": "crw_search",
         "title": "Web search",
-        "description": "Search the web (needs a configured search backend; embedded uses a local SearXNG sidecar). Returns results with url/title/description/snippet.",
+        "description": "Search the web (needs a configured search backend; this build defaults to Camofox-driven Google, SearXNG opt-in). Returns results with url/title/description/snippet.",
         "annotations": {
             "readOnlyHint": true,
             "destructiveHint": false,
@@ -288,6 +288,15 @@ pub fn tool_definitions(proxy_mode: bool) -> Value {
                     "type": "array",
                     "items": { "type": "string" },
                     "description": "Category bias; e.g. \"pdf\", \"github\", \"research\", or a native SearXNG category"
+                },
+                "engines": {
+                    "type": "array",
+                    "items": {
+                        "type": "string",
+                        "enum": ["google", "bing", "duckduckgo", "wikipedia", "youtube", "reddit", "amazon", "github"]
+                    },
+                    "maxItems": 4,
+                    "description": "Camofox backend only: engine(s) to query (omit for Google). Multiple are merged/deduped. Max 4. Ignored by SearXNG."
                 },
                 "scrapeOptions": {
                     "type": "object",
@@ -852,6 +861,39 @@ mod tests {
         assert!(enum_vals.iter().any(|v| v == "lightpanda"));
         assert!(enum_vals.iter().any(|v| v == "auto"));
         assert!(enum_vals.iter().any(|v| v == "playwright"));
+    }
+
+    #[test]
+    fn crw_search_schema_advertises_engines() {
+        let defs = tool_definitions(false);
+        let search = tool_by_name(&defs, "crw_search");
+        let props = &search["inputSchema"]["properties"];
+        assert_eq!(props["engines"]["type"], "array");
+        let enum_vals = props["engines"]["items"]["enum"]
+            .as_array()
+            .expect("engines.items.enum must be an array");
+        for e in [
+            "google",
+            "bing",
+            "duckduckgo",
+            "wikipedia",
+            "youtube",
+            "reddit",
+            "amazon",
+            "github",
+        ] {
+            assert!(
+                enum_vals.iter().any(|v| v == e),
+                "engines enum missing {e}"
+            );
+        }
+        let required = search["inputSchema"]["required"]
+            .as_array()
+            .expect("required array");
+        assert!(
+            !required.iter().any(|v| v == "engines"),
+            "engines must not be required"
+        );
     }
 
     #[test]
