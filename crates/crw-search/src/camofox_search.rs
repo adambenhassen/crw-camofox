@@ -625,4 +625,78 @@ mod github_api_tests {
         let err = client.github_search("rust").await.unwrap_err();
         assert!(matches!(err, SearchError::Upstream { status: 403, .. }));
     }
+
+    /// Partial-failure skip: a multi-engine fetch where one engine fails must
+    /// still return the others' rows (the failed engine is skipped, not fatal).
+    /// Here Google (browser) succeeds and GitHub (API) 500s; the response holds
+    /// only Google's row.
+    #[tokio::test]
+    async fn fetch_skips_failed_engine_and_returns_partial() {
+        let server = MockServer::start().await;
+        // Camofox browser flow for the Google engine → one row.
+        let rows = serde_json::to_string(&json!([
+            { "url": "https://rust-lang.org", "title": "Rust", "content": "" },
+        ]))
+        .unwrap();
+        Mock::given(method("POST"))
+            .and(path("/tabs"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({ "tabId": "t1" })))
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/tabs/t1/navigate"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({ "ok": true })))
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/tabs/t1/wait"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({ "ok": true })))
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/tabs/t1/evaluate"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({ "result": rows })))
+            .mount(&server)
+            .await;
+        // GitHub API fails.
+        Mock::given(method("GET"))
+            .and(path("/search/repositories"))
+            .respond_with(ResponseTemplate::new(500))
+            .mount(&server)
+            .await;
+
+        let mut client =
+            CamofoxSearchClient::new(server.uri(), None, None, Duration::from_secs(5));
+        client.github_api_base = server.uri();
+
+        let params = SearxngParams {
+            q: "rust".to_string(),
+            camofox_engines: vec![SearchEngine::Google, SearchEngine::Github],
+            ..Default::default()
+        };
+        let resp = client.fetch(&params).await.expect("partial success, not error");
+        assert_eq!(resp.results.len(), 1);
+        assert_eq!(resp.results[0].url.as_deref(), Some("https://rust-lang.org"));
+        assert_eq!(resp.results[0].engine.as_deref(), Some("google"));
+    }
+
+    /// When *every* engine fails, the fetch surfaces an error (not an empty Ok).
+    #[tokio::test]
+    async fn fetch_errors_when_all_engines_fail() {
+        let server = MockServer::start().await;
+        // Tab creation fails → the Google engine errors; no other engine.
+        Mock::given(method("POST"))
+            .and(path("/tabs"))
+            .respond_with(ResponseTemplate::new(500))
+            .mount(&server)
+            .await;
+
+        let client = CamofoxSearchClient::new(server.uri(), None, None, Duration::from_secs(5));
+        let params = SearxngParams {
+            q: "rust".to_string(),
+            camofox_engines: vec![SearchEngine::Google],
+            ..Default::default()
+        };
+        assert!(client.fetch(&params).await.is_err());
+    }
 }
