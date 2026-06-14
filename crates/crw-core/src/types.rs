@@ -986,6 +986,63 @@ impl SearchSource {
     }
 }
 
+/// A search engine selectable for the Camofox backend. Each variant maps to a
+/// Camofox-browser navigate macro (`@<engine>_search`). Serialized lowercase so
+/// the public API / MCP schema reads `"google"`, `"bing"`, … Unknown values are
+/// rejected at deserialize. The SearXNG backend ignores this enum (it has its
+/// own engine routing).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum SearchEngine {
+    #[default]
+    Google,
+    Bing,
+    #[serde(rename = "duckduckgo")]
+    DuckDuckGo,
+    Reddit,
+    Github,
+    #[serde(rename = "stackoverflow")]
+    StackOverflow,
+    Wikipedia,
+    Youtube,
+    Amazon,
+    Twitter,
+    Linkedin,
+    Facebook,
+    Instagram,
+    Tiktok,
+}
+
+impl SearchEngine {
+    /// The Camofox navigate macro for this engine, e.g. `"@google_search"`.
+    pub fn macro_name(self) -> &'static str {
+        match self {
+            SearchEngine::Google => "@google_search",
+            SearchEngine::Bing => "@bing_search",
+            SearchEngine::DuckDuckGo => "@duckduckgo_search",
+            SearchEngine::Reddit => "@reddit_search",
+            SearchEngine::Github => "@github_search",
+            SearchEngine::StackOverflow => "@stackoverflow_search",
+            SearchEngine::Wikipedia => "@wikipedia_search",
+            SearchEngine::Youtube => "@youtube_search",
+            SearchEngine::Amazon => "@amazon_search",
+            SearchEngine::Twitter => "@twitter_search",
+            SearchEngine::Linkedin => "@linkedin_search",
+            SearchEngine::Facebook => "@facebook_search",
+            SearchEngine::Instagram => "@instagram_search",
+            SearchEngine::Tiktok => "@tiktok_search",
+        }
+    }
+
+    /// Short label used to tag results with their originating engine (the macro
+    /// name without the `@`/`_search` affixes), e.g. `"google"`, `"duckduckgo"`.
+    pub fn label(self) -> &'static str {
+        self.macro_name()
+            .trim_start_matches('@')
+            .trim_end_matches("_search")
+    }
+}
+
 /// User-facing category modifiers.
 ///
 /// Three values carry curated, Firecrawl-compatible behavior:
@@ -1115,6 +1172,11 @@ pub struct SearchRequest {
     /// User-facing category modifiers. Max 5 entries (matches SaaS).
     #[serde(default)]
     pub categories: Option<Vec<SearchCategory>>,
+    /// Engines to search via the Camofox backend. `None`/empty ⇒ `[google]`.
+    /// Multiple engines are fanned out and merged. Capped server-side. Ignored
+    /// by the opt-in SearXNG backend.
+    #[serde(default)]
+    pub engines: Option<Vec<SearchEngine>>,
     /// When set, every `web` result is enriched in-process via the scrape
     /// pipeline (parallel, bounded by `[crawler].max_concurrency`).
     #[serde(default)]
@@ -1716,4 +1778,46 @@ pub struct ChangeTrackingResult {
     /// True when the diff AST was truncated (mirrors `DiffAst.truncated`).
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub truncated: bool,
+}
+
+#[cfg(test)]
+mod search_engine_tests {
+    use super::*;
+
+    #[test]
+    fn search_engine_serde_is_lowercase() {
+        let e: SearchEngine = serde_json::from_str("\"duckduckgo\"").unwrap();
+        assert_eq!(e, SearchEngine::DuckDuckGo);
+        assert_eq!(serde_json::to_string(&SearchEngine::Bing).unwrap(), "\"bing\"");
+    }
+
+    #[test]
+    fn search_engine_macro_name() {
+        assert_eq!(SearchEngine::Google.macro_name(), "@google_search");
+        assert_eq!(SearchEngine::StackOverflow.macro_name(), "@stackoverflow_search");
+    }
+
+    #[test]
+    fn search_engine_label_strips_affixes() {
+        assert_eq!(SearchEngine::Google.label(), "google");
+        assert_eq!(SearchEngine::DuckDuckGo.label(), "duckduckgo");
+    }
+
+    #[test]
+    fn search_engine_default_is_google() {
+        assert_eq!(SearchEngine::default(), SearchEngine::Google);
+    }
+
+    #[test]
+    fn search_request_engines_defaults_to_none_and_omitted() {
+        let r: SearchRequest = serde_json::from_str(r#"{"query":"rust"}"#).unwrap();
+        assert!(r.engines.is_none());
+    }
+
+    #[test]
+    fn search_request_parses_engines_list() {
+        let r: SearchRequest =
+            serde_json::from_str(r#"{"query":"rust","engines":["google","bing"]}"#).unwrap();
+        assert_eq!(r.engines.unwrap(), vec![SearchEngine::Google, SearchEngine::Bing]);
+    }
 }

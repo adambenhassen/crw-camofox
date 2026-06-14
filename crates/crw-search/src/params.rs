@@ -158,6 +158,7 @@ mod tests {
             tbs: None,
             sources: None,
             categories: None,
+            engines: None,
             scrape_options: None,
             summarize_results: None,
             answer: None,
