@@ -102,6 +102,8 @@ pub async fn run(args: SearchArgs) {
         engines: None,
         pageno: None,
         safesearch: args.safesearch,
+        // Camofox-only; the SearXNG client this CLI uses ignores it.
+        camofox_engines: vec![crw_core::types::SearchEngine::Google],
     };
 
     let response = match client.fetch(&params).await {

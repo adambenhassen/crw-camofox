@@ -130,6 +130,10 @@ use crate::state::AppState;
 
 const MAX_QUERY_CHARS: usize = 2000;
 
+/// Max engines per `/v1/search` request. Camofox runs them sequentially on one
+/// warm tab, so the cap bounds worst-case latency (N engines ≈ N× a search).
+const MAX_ENGINES: usize = 4;
+
 /// `POST /v1/search` — search the web via SearXNG, optionally enriching
 /// each `web` result by running it through the scrape pipeline in-process.
 ///
@@ -913,6 +917,14 @@ fn validate_request(req: &SearchRequest, max_limit: u32) -> Result<(), CrwError>
             "categories accepts at most 5 entries".into(),
         ));
     }
+    if let Some(engines) = &req.engines
+        && engines.len() > MAX_ENGINES
+    {
+        return Err(CrwError::InvalidRequest(format!(
+            "engines accepts at most {MAX_ENGINES} entries (got {})",
+            engines.len()
+        )));
+    }
     if let Some(opts) = req.scrape_options.as_ref() {
         // Search enrichment can only carry formats that fit the
         // `SearchResult` shape. `plainText` and `json` (LLM extract) require
@@ -1170,6 +1182,7 @@ mod tests {
             tbs: None,
             sources: None,
             categories: None,
+            engines: None,
             scrape_options: None,
             summarize_results: None,
             answer: None,
@@ -1247,6 +1260,36 @@ mod tests {
     #[test]
     fn validate_accepts_basic_request() {
         assert!(validate_request(&req("rust async"), 20).is_ok());
+    }
+
+    #[test]
+    fn validate_rejects_too_many_engines() {
+        use crw_core::types::SearchEngine;
+        let mut r = req("rust");
+        r.engines = Some(vec![
+            SearchEngine::Google,
+            SearchEngine::Bing,
+            SearchEngine::DuckDuckGo,
+            SearchEngine::Reddit,
+            SearchEngine::Github,
+        ]);
+        assert!(matches!(
+            validate_request(&r, 20),
+            Err(CrwError::InvalidRequest(_))
+        ));
+    }
+
+    #[test]
+    fn validate_accepts_engines_at_cap() {
+        use crw_core::types::SearchEngine;
+        let mut r = req("rust");
+        r.engines = Some(vec![
+            SearchEngine::Google,
+            SearchEngine::Bing,
+            SearchEngine::DuckDuckGo,
+            SearchEngine::Reddit,
+        ]);
+        assert!(validate_request(&r, 20).is_ok());
     }
 
     #[test]
