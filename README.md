@@ -48,7 +48,7 @@ and the fork stays easy to sync:
 | Default JS render ladder | `HTTP → LightPanda → Chrome` (CDP) | `HTTP → LightPanda → Camofox` (Firefox). Chrome kept, **config-swappable** (`[renderer.chrome]`). |
 | Stealth tier | browserless Chromium (SSPL) | Camofox (engine-level fingerprint evasion). Browserless left opt-in. |
 | `/v1/search` backend | SearXNG sidecar | **Camofox-driven Google** by default. SearXNG kept, opt-in (`--profile searxng`). |
-| Interactive MCP | `crw-browse` (CDP, 2 tools) | **`crw-browse-camofox`** added — 24 tools over Camofox REST. `crw-browse` untouched. |
+| Interactive MCP | `crw-browse` (CDP, 2 tools) | Upstream **[`camofox-mcp`](https://github.com/redf0x1/camofox-mcp)** wired into the Docker stack — 47 tools over Camofox REST. `crw-browse` untouched. |
 
 CDP/Chrome/SearXNG code all remain in the tree, just off by default — flip a config
 flag or a compose profile to get upstream behavior back.
@@ -187,16 +187,14 @@ Continue.dev) live under [docs.fastcrw.com/mcp-clients/](https://docs.fastcrw.co
 
 **Interactive browser automation:** `crw-mcp` *fetches* pages; for agents that
 must *operate* a site across steps (log in, fill forms, click through flows),
-**`crw-browse-camofox`** is a second MCP server that drives a live
-[Camofox](https://github.com/redf0x1/camofox-browser) (Firefox) browser — 24
-tools (navigate, snapshot with `[eN]` refs, click, type, press, scroll,
-evaluate, screenshot, cookies, …). Point it at a running camofox-browser:
+the Docker stack runs the upstream
+**[`camofox-mcp`](https://github.com/redf0x1/camofox-mcp)** server, which drives
+a live [Camofox](https://github.com/redf0x1/camofox-browser) (Firefox) browser —
+47 tools (navigate, snapshot, click, type, press, scroll, evaluate, screenshot,
+cookies, …) over MCP. `docker compose up` starts it as `camofox-mcp`, bridged to
+the `camofox` browser; agents reach it at `http://camofox-mcp:8080/mcp`.
 
-```bash
-claude mcp add camofox -- crw-browse-camofox --base-url http://localhost:9377
-```
-
-See the [interactive automation docs](https://docs.fastcrw.com/mcp/#interactive-browser-automation-camofox).
+See the upstream [camofox-mcp docs](https://github.com/redf0x1/camofox-mcp).
 (`crw-browse` remains as the CDP/Chrome equivalent.)
 
 ---

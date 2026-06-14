@@ -159,6 +159,38 @@ services:
       retries: 5
       start_period: 20s
 
+  # Interactive browser MCP for AI agents (e.g. Hermes), bridging the camofox
+  # browser REST API to MCP over Streamable HTTP. This is the upstream companion
+  # to camofox-browser — we run it unmodified rather than maintaining our own
+  # bridge. Reachable on the compose network as `camofox-mcp:8080`; agents
+  # connect to http://camofox-mcp:8080/mcp. Pinned (never `:latest`) to match
+  # the camofox/searxng pinning rationale above.
+  #
+  # The port is NOT published to the host by default — like camofox, it should
+  # only be reached from sibling services. To expose it (and run an external
+  # agent against it), uncomment the host mapping AND set CAMOFOX_HTTP_API_KEY
+  # in `.env` (`openssl rand -hex 24`): these tools drive a real browser.
+  camofox-mcp:
+    image: ghcr.io/redf0x1/camofox-mcp:v1.14.4
+    restart: unless-stopped
+    depends_on:
+      camofox:
+        condition: service_healthy
+    command: ["node", "dist/http.js"]
+    environment:
+      - CAMOFOX_TRANSPORT=http
+      - CAMOFOX_HTTP_HOST=0.0.0.0
+      # localhost won't resolve to the browser from here — use the service name.
+      - CAMOFOX_URL=http://camofox:9377
+      # Bearer token for inbound MCP requests; empty disables auth (acceptable
+      # only while the port stays on the compose network, as below).
+      - CAMOFOX_HTTP_API_KEY=${CAMOFOX_HTTP_API_KEY:-}
+    # ports:
+    #   - "127.0.0.1:9378:8080"
+    mem_limit: 512m
+    memswap_limit: 512m
+    pids_limit: 256
+
   # Primary JS renderer — lightweight (~64 MB), fast startup.
   # Handles most static-JS sites. Falls back to Camofox for complex SPAs.
   #

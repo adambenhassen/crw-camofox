@@ -816,24 +816,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "crw-browse-camofox"
-version = "0.15.2"
-dependencies = [
- "anyhow",
- "base64",
- "clap",
- "reqwest 0.13.2",
- "rmcp",
- "schemars",
- "serde",
- "serde_json",
- "tokio",
- "tracing",
- "tracing-subscriber",
- "wiremock",
-]
-
-[[package]]
 name = "crw-cli"
 version = "0.15.2"
 dependencies = [

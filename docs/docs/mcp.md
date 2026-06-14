@@ -25,12 +25,13 @@ CRW ships separate MCP servers for two different jobs:
 | Server | For | Tools |
 |--------|-----|-------|
 | **`crw-mcp`** | One-shot scraping / search | `scrape`, `crawl`, `map`, `search` |
-| **`crw-browse-camofox`** | *Interactive* browser automation on Camofox (recommended) | 24 tools — navigate, snapshot, click, type, … |
+| **[`camofox-mcp`](https://github.com/redf0x1/camofox-mcp)** (upstream) | *Interactive* browser automation on Camofox (recommended) | 47 tools — navigate, snapshot, click, type, … |
 | **`crw-browse`** | Interactive automation over CDP (Chrome-family; legacy) | `goto`, `tree`, … |
 
 Use `crw-mcp` to *fetch* content. Use an interactive server when the agent must
 *operate* a site across steps — log in, fill a multi-step form, click through a
-flow, then read the result. **`crw-browse-camofox`** drives a real
+flow, then read the result. The upstream
+**[`camofox-mcp`](https://github.com/redf0x1/camofox-mcp)** server drives a real
 [Camofox](https://github.com/redf0x1/camofox-browser) (Camoufox/Firefox) browser
 and is the recommended interactive server now that Camofox is CRW's default;
 **`crw-browse`** is the original CDP-based equivalent for Chrome/Lightpanda.
@@ -360,59 +361,45 @@ The `crw_search` tool declares an `outputSchema` and therefore returns its resul
 
 ## Interactive browser automation (Camofox)
 
-`crw-browse-camofox` is a second, standalone MCP server (its own binary) for
-**stateful, interactive** browser control. Where `crw_scrape` fetches one page,
-this drives a live [Camofox](https://github.com/redf0x1/camofox-browser)
-(Camoufox/Firefox) session across multiple steps — the agent navigates, reads
-the page, acts, and re-checks, all on one persistent tab.
+For **stateful, interactive** browser control the Camofox stack uses the upstream
+**[`camofox-mcp`](https://github.com/redf0x1/camofox-mcp)** server. Where
+`crw_scrape` fetches one page, this drives a live
+[Camofox](https://github.com/redf0x1/camofox-browser) (Camoufox/Firefox) session
+across multiple steps — the agent navigates, reads the page, acts, and re-checks
+on one persistent tab. It bridges MCP clients to the camofox-browser REST API and
+does **not** embed a browser, so point it at a running camofox-browser. We run it
+unmodified rather than maintaining our own bridge.
 
-It bridges MCP clients to the camofox-browser REST API: each tool is a thin
-forward to a Camofox endpoint. crw-browse-camofox does **not** embed a browser —
-point it at a running camofox-browser server (the bundled Docker stack starts
-one as `camofox`, or run `docker run -p 9377:9377 ghcr.io/redf0x1/camofox-browser`).
+### In the Docker stack (recommended)
 
-### Setup
+`docker compose up` starts it as the `camofox-mcp` service, already wired to the
+`camofox` browser and serving Streamable HTTP. Agents on the compose network
+reach it at `http://camofox-mcp:8080/mcp`. The port is not published to the host
+by default; to expose it, uncomment the host mapping and set
+`CAMOFOX_HTTP_API_KEY` (see `docker-compose.yml`).
+
+### Standalone
 
 ```bash
-# Build (or use the binary shipped in the crw Docker image):
-cargo run -p crw-browse-camofox -- --base-url http://localhost:9377
+# stdio (Claude Desktop / Cursor / Cline) — defaults CAMOFOX_URL to :9377:
+npx camofox-mcp@latest
+
+# HTTP:
+docker run -p 9378:8080 \
+  -e CAMOFOX_TRANSPORT=http -e CAMOFOX_HTTP_HOST=0.0.0.0 \
+  -e CAMOFOX_URL=http://host.docker.internal:9377 \
+  ghcr.io/redf0x1/camofox-mcp:v1.14.4 node dist/http.js
 ```
 
-Claude Code / Cursor / Cline MCP config (stdio):
+stdio MCP config:
 
 ```json
 {
   "mcpServers": {
-    "camofox": {
-      "command": "crw-browse-camofox",
-      "args": ["--base-url", "http://localhost:9377"]
-    }
+    "camofox": { "command": "npx", "args": ["camofox-mcp@latest"] }
   }
 }
 ```
 
-Flags / env: `--base-url` (`CRW_CAMOFOX_BASE_URL`, default `http://localhost:9377`),
-`--api-key` (`CRW_CAMOFOX_API_KEY`, when camofox runs with auth),
-`--timeout-ms` (`CRW_CAMOFOX_TIMEOUT_MS`), `--wait-ms` (`CRW_CAMOFOX_WAIT_MS`).
-
-### Tools
-
-A typical flow: `navigate` → `snapshot` (returns an accessibility tree where
-interactive elements carry `[eN]` ref tokens) → `click`/`type_text` those refs →
-`press` to submit → `snapshot` again to see the result.
-
-| Group | Tools |
-|-------|-------|
-| Navigate | `navigate`, `back`, `forward`, `reload`, `wait` |
-| Perceive | `snapshot`, `screenshot`, `links`, `images` |
-| Act | `click`, `type_text`, `press`, `scroll`, `scroll_element` |
-| Script | `evaluate`, `evaluate_extended`, `extract_structured`, `act` |
-| Inspect / state | `console`, `cookies` |
-| Session | `display` (headless/headed/virtual + noVNC URL), `close`, `trace_start`, `trace_stop` |
-
-`display` with `mode: "virtual"` returns a noVNC URL so you can **watch and
-take over** the browser live — handy for debugging an agent flow or solving a
-one-off challenge by hand.
-
-> Interactive automation needs a running camofox-browser. The server returns a
-> clear error (`no active page; call navigate first`) until the first `navigate`.
+See the [upstream README](https://github.com/redf0x1/camofox-mcp) for the full
+47-tool list, environment variables, and auth options.
