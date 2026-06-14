@@ -189,6 +189,10 @@ pub struct CamofoxSearchClient {
     /// Search API (not the browser) because GitHub web search rate-limits
     /// unauthenticated scraping. `None` falls back to the lower unauth quota.
     github_token: Option<String>,
+    /// Base URL of the GitHub REST API for the `github` engine. Always
+    /// `https://api.github.com` in production; overridden in tests to point at
+    /// a mock server.
+    github_api_base: String,
     timeout: Duration,
     /// The single warm tab id, lazily created and reused across queries. The
     /// mutex doubles as the search serializer: holding it for the whole `fetch`
@@ -218,6 +222,7 @@ impl CamofoxSearchClient {
             base_url,
             api_key,
             github_token,
+            github_api_base: "https://api.github.com".to_string(),
             timeout,
             tab: tokio::sync::Mutex::new(None),
         }
@@ -423,7 +428,7 @@ impl CamofoxSearchClient {
     /// GitHub requires a `User-Agent`; the token (when set) is sent as a bearer.
     async fn github_search(&self, query: &str) -> Result<Vec<SearxngResult>, SearchError> {
         let q: String = url::form_urlencoded::byte_serialize(query.as_bytes()).collect();
-        let url = format!("https://api.github.com/search/repositories?q={q}&per_page=10");
+        let url = format!("{}/search/repositories?q={q}&per_page=10", self.github_api_base);
         let mut req = self
             .http
             .get(url)
@@ -558,5 +563,66 @@ mod extractor_tests {
         assert_eq!(rd["url"], "https://www.reddit.com/search/?q=rust+lang");
         let am = navigate_body(SearchEngine::Amazon, "rust lang");
         assert_eq!(am["url"], "https://www.amazon.com/s?k=rust+lang");
+    }
+}
+
+#[cfg(test)]
+mod github_api_tests {
+    use super::*;
+    use wiremock::matchers::{method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    /// `github_search` hits the REST Search API and maps `items[]` into result
+    /// rows: `html_url` → url, `full_name` → title, `description` → content,
+    /// with the engine tagged `github` and descending position scores.
+    #[tokio::test]
+    async fn github_search_maps_items_to_rows() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/search/repositories"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "items": [
+                    { "html_url": "https://github.com/a/one", "full_name": "a/one", "description": "first" },
+                    { "html_url": "https://github.com/b/two", "full_name": "b/two", "description": null },
+                ]
+            })))
+            .mount(&server)
+            .await;
+
+        let mut client =
+            CamofoxSearchClient::new("http://unused", None, Some("tok".into()), Duration::from_secs(5));
+        client.github_api_base = server.uri();
+
+        let rows = client.github_search("rust").await.expect("github search ok");
+        assert_eq!(rows.len(), 2);
+
+        let first = &rows[0];
+        assert_eq!(first.url.as_deref(), Some("https://github.com/a/one"));
+        assert_eq!(first.title.as_deref(), Some("a/one"));
+        assert_eq!(first.content.as_deref(), Some("first"));
+        assert_eq!(first.engine.as_deref(), Some("github"));
+        // A null description maps to no content.
+        assert_eq!(rows[1].content, None);
+        // Descending score by position so the merge ranks earlier hits higher.
+        assert!(rows[0].score.unwrap() > rows[1].score.unwrap());
+    }
+
+    /// A non-2xx GitHub response surfaces as an `Upstream` error (not a panic or
+    /// silent empty), so the fetch loop records it and skips the engine.
+    #[tokio::test]
+    async fn github_search_maps_error_status() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/search/repositories"))
+            .respond_with(ResponseTemplate::new(403))
+            .mount(&server)
+            .await;
+
+        let mut client =
+            CamofoxSearchClient::new("http://unused", None, None, Duration::from_secs(5));
+        client.github_api_base = server.uri();
+
+        let err = client.github_search("rust").await.unwrap_err();
+        assert!(matches!(err, SearchError::Upstream { status: 403, .. }));
     }
 }
