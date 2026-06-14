@@ -331,7 +331,10 @@ impl CamofoxSearchClient {
             return Ok(id.clone());
         }
         let create = self
-            .post("/tabs", json!({ "userId": USER_ID, "sessionKey": SESSION_KEY }))
+            .post(
+                "/tabs",
+                json!({ "userId": USER_ID, "sessionKey": SESSION_KEY }),
+            )
             .await?;
         if !create.status().is_success() {
             return Err(SearchError::Upstream {
@@ -383,7 +386,9 @@ impl CamofoxSearchClient {
         let raw = eval
             .json::<EvaluateResponse>()
             .await
-            .map_err(|e| SearchError::InvalidResponse(format!("camofox: bad evaluate response: {e}")))?
+            .map_err(|e| {
+                SearchError::InvalidResponse(format!("camofox: bad evaluate response: {e}"))
+            })?
             .result
             .unwrap_or_default();
 
@@ -428,7 +433,10 @@ impl CamofoxSearchClient {
     /// GitHub requires a `User-Agent`; the token (when set) is sent as a bearer.
     async fn github_search(&self, query: &str) -> Result<Vec<SearxngResult>, SearchError> {
         let q: String = url::form_urlencoded::byte_serialize(query.as_bytes()).collect();
-        let url = format!("{}/search/repositories?q={q}&per_page=10", self.github_api_base);
+        let url = format!(
+            "{}/search/repositories?q={q}&per_page=10",
+            self.github_api_base
+        );
         let mut req = self
             .http
             .get(url)
@@ -450,10 +458,9 @@ impl CamofoxSearchClient {
                 body: "github: search failed".to_string(),
             });
         }
-        let data = resp
-            .json::<GithubSearchResponse>()
-            .await
-            .map_err(|e| SearchError::InvalidResponse(format!("github: bad search response: {e}")))?;
+        let data = resp.json::<GithubSearchResponse>().await.map_err(|e| {
+            SearchError::InvalidResponse(format!("github: bad search response: {e}"))
+        })?;
 
         let n = data.items.len();
         Ok(data
@@ -558,7 +565,10 @@ mod extractor_tests {
             "https://en.wikipedia.org/wiki/Special:Search?search=rust+lang&fulltext=1"
         );
         let y = navigate_body(SearchEngine::Youtube, "rust lang");
-        assert_eq!(y["url"], "https://www.youtube.com/results?search_query=rust+lang");
+        assert_eq!(
+            y["url"],
+            "https://www.youtube.com/results?search_query=rust+lang"
+        );
         let rd = navigate_body(SearchEngine::Reddit, "rust lang");
         assert_eq!(rd["url"], "https://www.reddit.com/search/?q=rust+lang");
         let am = navigate_body(SearchEngine::Amazon, "rust lang");
@@ -589,11 +599,18 @@ mod github_api_tests {
             .mount(&server)
             .await;
 
-        let mut client =
-            CamofoxSearchClient::new("http://unused", None, Some("tok".into()), Duration::from_secs(5));
+        let mut client = CamofoxSearchClient::new(
+            "http://unused",
+            None,
+            Some("tok".into()),
+            Duration::from_secs(5),
+        );
         client.github_api_base = server.uri();
 
-        let rows = client.github_search("rust").await.expect("github search ok");
+        let rows = client
+            .github_search("rust")
+            .await
+            .expect("github search ok");
         assert_eq!(rows.len(), 2);
 
         let first = &rows[0];
@@ -665,8 +682,7 @@ mod github_api_tests {
             .mount(&server)
             .await;
 
-        let mut client =
-            CamofoxSearchClient::new(server.uri(), None, None, Duration::from_secs(5));
+        let mut client = CamofoxSearchClient::new(server.uri(), None, None, Duration::from_secs(5));
         client.github_api_base = server.uri();
 
         let params = SearxngParams {
@@ -674,9 +690,15 @@ mod github_api_tests {
             camofox_engines: vec![SearchEngine::Google, SearchEngine::Github],
             ..Default::default()
         };
-        let resp = client.fetch(&params).await.expect("partial success, not error");
+        let resp = client
+            .fetch(&params)
+            .await
+            .expect("partial success, not error");
         assert_eq!(resp.results.len(), 1);
-        assert_eq!(resp.results[0].url.as_deref(), Some("https://rust-lang.org"));
+        assert_eq!(
+            resp.results[0].url.as_deref(),
+            Some("https://rust-lang.org")
+        );
         assert_eq!(resp.results[0].engine.as_deref(), Some("google"));
     }
 

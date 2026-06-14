@@ -1832,7 +1832,10 @@ mod search_engine_tests {
     fn search_engine_serde_is_lowercase() {
         let e: SearchEngine = serde_json::from_str("\"duckduckgo\"").unwrap();
         assert_eq!(e, SearchEngine::DuckDuckGo);
-        assert_eq!(serde_json::to_string(&SearchEngine::Bing).unwrap(), "\"bing\"");
+        assert_eq!(
+            serde_json::to_string(&SearchEngine::Bing).unwrap(),
+            "\"bing\""
+        );
     }
 
     #[test]
@@ -1877,7 +1880,10 @@ mod search_engine_tests {
     fn search_request_parses_engines_list() {
         let r: SearchRequest =
             serde_json::from_str(r#"{"query":"rust","engines":["google","bing"]}"#).unwrap();
-        assert_eq!(r.engines.unwrap(), vec![SearchEngine::Google, SearchEngine::Bing]);
+        assert_eq!(
+            r.engines.unwrap(),
+            vec![SearchEngine::Google, SearchEngine::Bing]
+        );
     }
 
     #[test]
@@ -1886,14 +1892,20 @@ mod search_engine_tests {
         // `"[\"bing\"]"` instead of the array `["bing"]`.
         let r: SearchRequest =
             serde_json::from_str(r#"{"query":"rust","engines":"[\"google\",\"bing\"]"}"#).unwrap();
-        assert_eq!(r.engines.unwrap(), vec![SearchEngine::Google, SearchEngine::Bing]);
+        assert_eq!(
+            r.engines.unwrap(),
+            vec![SearchEngine::Google, SearchEngine::Bing]
+        );
     }
 
     #[test]
     fn search_request_accepts_comma_separated_engines_string() {
         let r: SearchRequest =
             serde_json::from_str(r#"{"query":"rust","engines":"google, bing"}"#).unwrap();
-        assert_eq!(r.engines.unwrap(), vec![SearchEngine::Google, SearchEngine::Bing]);
+        assert_eq!(
+            r.engines.unwrap(),
+            vec![SearchEngine::Google, SearchEngine::Bing]
+        );
     }
 
     #[test]
@@ -1902,7 +1914,10 @@ mod search_engine_tests {
             r#"{"query":"rust","sources":"[\"web\",\"news\"]","categories":"github,pdf"}"#,
         )
         .unwrap();
-        assert_eq!(r.sources.unwrap(), vec![SearchSource::Web, SearchSource::News]);
+        assert_eq!(
+            r.sources.unwrap(),
+            vec![SearchSource::Web, SearchSource::News]
+        );
         assert_eq!(
             r.categories.unwrap(),
             vec![SearchCategory::Github, SearchCategory::Pdf]
@@ -1911,8 +1926,7 @@ mod search_engine_tests {
 
     #[test]
     fn search_request_empty_engines_string_is_none() {
-        let r: SearchRequest =
-            serde_json::from_str(r#"{"query":"rust","engines":""}"#).unwrap();
+        let r: SearchRequest = serde_json::from_str(r#"{"query":"rust","engines":""}"#).unwrap();
         assert!(r.engines.is_none());
     }
 }

@@ -109,10 +109,15 @@ mod tests {
     #[test]
     fn startup_status_camofox_takes_precedence() {
         // Camofox configured + searxng_url set → Camofox wins in the log.
-        let (level, msg) =
-            search_startup_status(&cfg(true, Some("http://searxng:8080")), Some("http://camofox:9377"));
+        let (level, msg) = search_startup_status(
+            &cfg(true, Some("http://searxng:8080")),
+            Some("http://camofox:9377"),
+        );
         assert_eq!(level, Level::INFO);
-        assert!(msg.contains("enabled (camofox=http://camofox:9377)"), "{msg}");
+        assert!(
+            msg.contains("enabled (camofox=http://camofox:9377)"),
+            "{msg}"
+        );
     }
 
     #[test]

@@ -399,7 +399,10 @@ mod tests {
     #[test]
     fn parse_engines_rejects_unknown() {
         let err = parse_engines("google,nope").unwrap_err();
-        assert!(err.contains("nope"), "error should name the bad token: {err}");
+        assert!(
+            err.contains("nope"),
+            "error should name the bad token: {err}"
+        );
     }
 
     #[test]

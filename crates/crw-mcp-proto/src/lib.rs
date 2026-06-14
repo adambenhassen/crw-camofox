@@ -882,10 +882,7 @@ mod tests {
             "amazon",
             "github",
         ] {
-            assert!(
-                enum_vals.iter().any(|v| v == e),
-                "engines enum missing {e}"
-            );
+            assert!(enum_vals.iter().any(|v| v == e), "engines enum missing {e}");
         }
         let required = search["inputSchema"]["required"]
             .as_array()

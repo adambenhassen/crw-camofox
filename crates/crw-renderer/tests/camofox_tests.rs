@@ -81,12 +81,7 @@ async fn fetch_returns_evaluated_html() {
     let renderer = CamofoxRenderer::new("camofox", &base, None, Duration::from_secs(10));
 
     let result = renderer
-        .fetch(
-            "https://example.com",
-            &HashMap::new(),
-            None,
-            deadline(),
-        )
+        .fetch("https://example.com", &HashMap::new(), None, deadline())
         .await
         .expect("camofox fetch should succeed against the mock");
 
@@ -101,7 +96,12 @@ async fn fetch_returns_evaluated_html() {
 
 #[tokio::test]
 async fn name_and_js_support() {
-    let renderer = CamofoxRenderer::new("camofox", "http://127.0.0.1:1", None, Duration::from_secs(5));
+    let renderer = CamofoxRenderer::new(
+        "camofox",
+        "http://127.0.0.1:1",
+        None,
+        Duration::from_secs(5),
+    );
     assert_eq!(renderer.name(), "camofox");
     assert!(renderer.supports_js());
 }
@@ -115,10 +115,18 @@ async fn is_available_reads_health() {
 
 #[tokio::test]
 async fn fetch_fails_when_deadline_expired() {
-    let renderer = CamofoxRenderer::new("camofox", "http://127.0.0.1:1", None, Duration::from_secs(5));
+    let renderer = CamofoxRenderer::new(
+        "camofox",
+        "http://127.0.0.1:1",
+        None,
+        Duration::from_secs(5),
+    );
     let expired = Deadline::now_plus(Duration::from_millis(0));
     let res = renderer
         .fetch("https://example.com", &HashMap::new(), None, expired)
         .await;
-    assert!(res.is_err(), "expired deadline should short-circuit before any HTTP call");
+    assert!(
+        res.is_err(),
+        "expired deadline should short-circuit before any HTTP call"
+    );
 }

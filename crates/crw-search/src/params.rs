@@ -200,7 +200,10 @@ mod tests {
         let mut r = req("rust");
         r.engines = Some(vec![SearchEngine::Bing, SearchEngine::DuckDuckGo]);
         let p = map_to_searxng_params(&r, &cfg());
-        assert_eq!(p.camofox_engines, vec![SearchEngine::Bing, SearchEngine::DuckDuckGo]);
+        assert_eq!(
+            p.camofox_engines,
+            vec![SearchEngine::Bing, SearchEngine::DuckDuckGo]
+        );
     }
 
     #[test]

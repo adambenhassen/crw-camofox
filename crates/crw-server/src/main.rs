@@ -89,7 +89,11 @@ async fn run_server() {
     // a credentialed `searxng_url` never reaches the logs.
     let (search_level, search_msg) = crw_server::diagnostics::search_startup_status(
         &config.search,
-        config.renderer.camofox.as_ref().map(|c| c.base_url.as_str()),
+        config
+            .renderer
+            .camofox
+            .as_ref()
+            .map(|c| c.base_url.as_str()),
     );
     match search_level {
         tracing::Level::WARN => tracing::warn!("{search_msg}"),

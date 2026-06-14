@@ -89,11 +89,7 @@ impl CamofoxRenderer {
         }
     }
 
-    async fn post_json(
-        &self,
-        path: &str,
-        body: serde_json::Value,
-    ) -> CrwResult<reqwest::Response> {
+    async fn post_json(&self, path: &str, body: serde_json::Value) -> CrwResult<reqwest::Response> {
         self.auth(self.client.post(format!("{}{path}", self.base_url)))
             .json(&body)
             .send()
@@ -156,9 +152,9 @@ impl PageFetcher for CamofoxRenderer {
                     json!({ "userId": USER_ID, "expression": OUTER_HTML_EXPR }),
                 )
                 .await?;
-            resp.json::<EvaluateResponse>()
-                .await
-                .map_err(|e| CrwError::RendererError(format!("camofox: bad evaluate response: {e}")))
+            resp.json::<EvaluateResponse>().await.map_err(|e| {
+                CrwError::RendererError(format!("camofox: bad evaluate response: {e}"))
+            })
         }
         .await;
 

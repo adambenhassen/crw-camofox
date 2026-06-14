@@ -96,7 +96,10 @@ async fn fetch_maps_scraped_rows_to_searxng_response() {
     // Rank must descend with SERP position so the existing score-sort keeps order.
     let s0 = resp.results[0].score.unwrap_or(0.0);
     let s1 = resp.results[1].score.unwrap_or(0.0);
-    assert!(s0 > s1, "expected descending scores by position, got {s0} !> {s1}");
+    assert!(
+        s0 > s1,
+        "expected descending scores by position, got {s0} !> {s1}"
+    );
 }
 
 /// Two engines run over the one warm tab; identical URLs returned by both must
@@ -124,7 +127,10 @@ async fn two_engines_merge_and_dedupe_by_url() {
     let first = &resp.results[0];
     assert_eq!(first.url.as_deref(), Some("https://a.example"));
     // Both engines recorded, positions accumulated, scores summed.
-    assert_eq!(first.engines, vec!["google".to_string(), "bing".to_string()]);
+    assert_eq!(
+        first.engines,
+        vec!["google".to_string(), "bing".to_string()]
+    );
     assert_eq!(first.positions.len(), 2);
     assert_eq!(first.score, Some(4.0)); // (2 from google) + (2 from bing)
 }
@@ -181,8 +187,14 @@ async fn reuses_one_warm_tab_across_sequential_searches() {
         .await;
 
     let client = CamofoxSearchClient::new(server.uri(), None, None, Duration::from_secs(10));
-    client.fetch(&params("first")).await.expect("first search ok");
-    client.fetch(&params("second")).await.expect("second search ok");
+    client
+        .fetch(&params("first"))
+        .await
+        .expect("first search ok");
+    client
+        .fetch(&params("second"))
+        .await
+        .expect("second search ok");
     // wiremock verifies `.expect(..)` counts on drop.
 }
 

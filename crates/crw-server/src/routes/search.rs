@@ -1,3 +1,4 @@
+use crate::state::SearchBackend;
 use axum::Json;
 use axum::extract::State;
 use axum::extract::rejection::JsonRejection;
@@ -11,7 +12,6 @@ use crw_core::types::{
 use crw_crawl::single::scrape_url;
 use crw_extract::answer;
 use crw_extract::summary;
-use crate::state::SearchBackend;
 use crw_search::{
     SearchError, SearxngParams, SearxngResponse, map_to_searxng_params, transform_flat,
     transform_flat_reranked, transform_grouped,

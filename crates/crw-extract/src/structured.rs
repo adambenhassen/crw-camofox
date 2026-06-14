@@ -703,7 +703,10 @@ mod tests {
         // The base_url carries the API-version segment (`/v1`), matching the
         // summary path: we only append `/chat/completions`.
         assert_eq!(
-            openai_chat_url(Some("https://api.deepseek.com/v1"), "https://api.openai.com"),
+            openai_chat_url(
+                Some("https://api.deepseek.com/v1"),
+                "https://api.openai.com"
+            ),
             "https://api.deepseek.com/v1/chat/completions"
         );
     }
@@ -729,7 +732,10 @@ mod tests {
     #[test]
     fn openai_url_trims_trailing_slash() {
         assert_eq!(
-            openai_chat_url(Some("https://api.deepseek.com/v1/"), "https://api.openai.com"),
+            openai_chat_url(
+                Some("https://api.deepseek.com/v1/"),
+                "https://api.openai.com"
+            ),
             "https://api.deepseek.com/v1/chat/completions"
         );
     }
