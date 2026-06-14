@@ -210,6 +210,13 @@ pub struct SearchConfig {
     /// SearXNG engines invoked when the request includes `categories: ["github"]`.
     #[serde(default = "default_github_engines")]
     pub github_engines: Vec<String>,
+    /// Personal-access token for the `github` search engine (Camofox backend).
+    /// GitHub's web search rate-limits unauthenticated scraping almost
+    /// immediately, so that engine uses the GitHub REST Search API instead;
+    /// a token lifts the rate limit (30 req/min vs ~10). `None` still works at
+    /// the lower unauthenticated quota. Settable via `CRW_SEARCH__GITHUB_TOKEN`.
+    #[serde(default)]
+    pub github_token: Option<String>,
     /// Re-rank the flat result pool for the LLM answer / summarize path
     /// (RRF + junk/coverage/geo filter + BM25 + domain dedupe) instead of the
     /// raw SearXNG-score sort. Defaults to `true`. The plain (non-LLM) path is
@@ -350,6 +357,7 @@ impl Default for SearchConfig {
             max_limit: default_search_max_limit(),
             research_engines: default_research_engines(),
             github_engines: default_github_engines(),
+            github_token: None,
             rerank_enabled: true,
             query_expand: false,
             query_expand_variants: default_query_expand_variants(),

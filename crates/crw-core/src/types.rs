@@ -986,11 +986,15 @@ impl SearchSource {
     }
 }
 
-/// A search engine selectable for the Camofox backend. Each variant maps to a
-/// Camofox-browser navigate macro (`@<engine>_search`). Serialized lowercase so
+/// A search engine selectable for the Camofox backend. Serialized lowercase so
 /// the public API / MCP schema reads `"google"`, `"bing"`, … Unknown values are
 /// rejected at deserialize. The SearXNG backend ignores this enum (it has its
 /// own engine routing).
+///
+/// The set is deliberately small: these four are the engines verified to return
+/// clean, structured results through `camofox-browser` (Google via its search
+/// macro; Bing/DuckDuckGo/GitHub by navigating their search URL directly). How
+/// each is driven and scraped lives in `crw-search`'s camofox client, not here.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum SearchEngine {
@@ -999,47 +1003,19 @@ pub enum SearchEngine {
     Bing,
     #[serde(rename = "duckduckgo")]
     DuckDuckGo,
-    Reddit,
     Github,
-    #[serde(rename = "stackoverflow")]
-    StackOverflow,
-    Wikipedia,
-    Youtube,
-    Amazon,
-    Twitter,
-    Linkedin,
-    Facebook,
-    Instagram,
-    Tiktok,
 }
 
 impl SearchEngine {
-    /// The Camofox navigate macro for this engine, e.g. `"@google_search"`.
-    pub fn macro_name(self) -> &'static str {
-        match self {
-            SearchEngine::Google => "@google_search",
-            SearchEngine::Bing => "@bing_search",
-            SearchEngine::DuckDuckGo => "@duckduckgo_search",
-            SearchEngine::Reddit => "@reddit_search",
-            SearchEngine::Github => "@github_search",
-            SearchEngine::StackOverflow => "@stackoverflow_search",
-            SearchEngine::Wikipedia => "@wikipedia_search",
-            SearchEngine::Youtube => "@youtube_search",
-            SearchEngine::Amazon => "@amazon_search",
-            SearchEngine::Twitter => "@twitter_search",
-            SearchEngine::Linkedin => "@linkedin_search",
-            SearchEngine::Facebook => "@facebook_search",
-            SearchEngine::Instagram => "@instagram_search",
-            SearchEngine::Tiktok => "@tiktok_search",
-        }
-    }
-
-    /// Short label used to tag results with their originating engine (the macro
-    /// name without the `@`/`_search` affixes), e.g. `"google"`, `"duckduckgo"`.
+    /// Short label used to tag results with their originating engine,
+    /// e.g. `"google"`, `"duckduckgo"`.
     pub fn label(self) -> &'static str {
-        self.macro_name()
-            .trim_start_matches('@')
-            .trim_end_matches("_search")
+        match self {
+            SearchEngine::Google => "google",
+            SearchEngine::Bing => "bing",
+            SearchEngine::DuckDuckGo => "duckduckgo",
+            SearchEngine::Github => "github",
+        }
     }
 }
 
@@ -1792,15 +1768,18 @@ mod search_engine_tests {
     }
 
     #[test]
-    fn search_engine_macro_name() {
-        assert_eq!(SearchEngine::Google.macro_name(), "@google_search");
-        assert_eq!(SearchEngine::StackOverflow.macro_name(), "@stackoverflow_search");
+    fn search_engine_label() {
+        assert_eq!(SearchEngine::Google.label(), "google");
+        assert_eq!(SearchEngine::DuckDuckGo.label(), "duckduckgo");
+        assert_eq!(SearchEngine::Github.label(), "github");
     }
 
     #[test]
-    fn search_engine_label_strips_affixes() {
-        assert_eq!(SearchEngine::Google.label(), "google");
-        assert_eq!(SearchEngine::DuckDuckGo.label(), "duckduckgo");
+    fn search_engine_rejects_unsupported() {
+        // Engines the browser can't serve (bing macro aside, these aren't in
+        // the enum at all) must fail to deserialize rather than silently pass.
+        assert!(serde_json::from_str::<SearchEngine>("\"stackoverflow\"").is_err());
+        assert!(serde_json::from_str::<SearchEngine>("\"reddit\"").is_err());
     }
 
     #[test]

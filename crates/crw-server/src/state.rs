@@ -204,6 +204,7 @@ impl AppState {
             Some(Arc::new(CamofoxSearchClient::new(
                 cf.base_url.clone(),
                 cf.api_key.clone(),
+                config.search.github_token.clone(),
                 Duration::from_millis(config.search.timeout_ms),
             )))
         } else {

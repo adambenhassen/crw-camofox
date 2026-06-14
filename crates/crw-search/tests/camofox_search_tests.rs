@@ -78,7 +78,7 @@ async fn fetch_maps_scraped_rows_to_searxng_response() {
     ]))
     .await;
 
-    let client = CamofoxSearchClient::new(server.uri(), None, Duration::from_secs(10));
+    let client = CamofoxSearchClient::new(server.uri(), None, None, Duration::from_secs(10));
     let resp = client
         .fetch(&params("rust async"))
         .await
@@ -110,7 +110,7 @@ async fn two_engines_merge_and_dedupe_by_url() {
     ]))
     .await;
 
-    let client = CamofoxSearchClient::new(server.uri(), None, Duration::from_secs(10));
+    let client = CamofoxSearchClient::new(server.uri(), None, None, Duration::from_secs(10));
     let resp = client
         .fetch(&params_with_engines(
             "rust async",
@@ -132,7 +132,7 @@ async fn two_engines_merge_and_dedupe_by_url() {
 #[tokio::test]
 async fn fetch_tolerates_empty_results() {
     let server = mock_with_rows(json!([])).await;
-    let client = CamofoxSearchClient::new(server.uri(), None, Duration::from_secs(10));
+    let client = CamofoxSearchClient::new(server.uri(), None, None, Duration::from_secs(10));
     let resp = client.fetch(&params("nothing here")).await.unwrap();
     assert_eq!(resp.results.len(), 0);
 }
@@ -180,7 +180,7 @@ async fn reuses_one_warm_tab_across_sequential_searches() {
         .mount(&server)
         .await;
 
-    let client = CamofoxSearchClient::new(server.uri(), None, Duration::from_secs(10));
+    let client = CamofoxSearchClient::new(server.uri(), None, None, Duration::from_secs(10));
     client.fetch(&params("first")).await.expect("first search ok");
     client.fetch(&params("second")).await.expect("second search ok");
     // wiremock verifies `.expect(..)` counts on drop.
@@ -235,7 +235,7 @@ async fn recreates_tab_and_retries_after_stale_failure() {
         .mount(&server)
         .await;
 
-    let client = CamofoxSearchClient::new(server.uri(), None, Duration::from_secs(10));
+    let client = CamofoxSearchClient::new(server.uri(), None, None, Duration::from_secs(10));
     let resp = client
         .fetch(&params("recover"))
         .await

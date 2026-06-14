@@ -175,6 +175,11 @@ max_limit = 20
 research_engines = ["arxiv", "crossref", "google scholar", "semantic scholar"]
 # Engines invoked when the request includes `categories: ["github"]`.
 github_engines = ["github"]
+# Personal-access token for the `github` search engine (Camofox backend). That
+# engine uses the GitHub REST Search API (GitHub web search rate-limits
+# unauthenticated scraping); a token lifts the limit to 30 req/min. Prefer the
+# CRW_SEARCH__GITHUB_TOKEN env var over committing a token here.
+# github_token = "ghp_..."
 
 # ── /v1/map URL filter ──────────────────────────────────────────────────
 # Strips tracking params and drops transactional action URLs from /map

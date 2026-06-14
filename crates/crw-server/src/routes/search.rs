@@ -1266,13 +1266,8 @@ mod tests {
     fn validate_rejects_too_many_engines() {
         use crw_core::types::SearchEngine;
         let mut r = req("rust");
-        r.engines = Some(vec![
-            SearchEngine::Google,
-            SearchEngine::Bing,
-            SearchEngine::DuckDuckGo,
-            SearchEngine::Reddit,
-            SearchEngine::Github,
-        ]);
+        // Five entries (duplicates allowed) exceeds the cap of 4.
+        r.engines = Some(vec![SearchEngine::Google; 5]);
         assert!(matches!(
             validate_request(&r, 20),
             Err(CrwError::InvalidRequest(_))
@@ -1287,7 +1282,7 @@ mod tests {
             SearchEngine::Google,
             SearchEngine::Bing,
             SearchEngine::DuckDuckGo,
-            SearchEngine::Reddit,
+            SearchEngine::Github,
         ]);
         assert!(validate_request(&r, 20).is_ok());
     }

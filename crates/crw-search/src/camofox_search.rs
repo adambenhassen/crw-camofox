@@ -1,9 +1,13 @@
-//! Camofox-backed Google search client.
+//! Camofox-backed web-search client.
 //!
 //! Search SERPs trip anti-bot / consent walls immediately, so search does NOT
 //! use the renderer failover ladder — it drives the camofox-browser (Firefox)
-//! tier directly: navigate a tab with the built-in `@google_search` macro,
-//! wait, then scrape the result rows via `/evaluate`.
+//! tier directly: navigate a tab to the engine's SERP, wait, then scrape the
+//! result rows via `/evaluate`. Google uses the browser's built-in
+//! `@google_search` macro; Bing/DuckDuckGo/GitHub have no working macro in
+//! camofox-browser, so we navigate their search URL directly (see
+//! [`navigate_body`]). Multiple engines requested in one call run sequentially
+//! on the warm tab and their rows are merged (see [`merge_results`]).
 //!
 //! Concurrency: camofox-browser keys one persistent context per `userId` and
 //! eagerly tears that context down when its tab count hits zero, leaving a
@@ -53,29 +57,51 @@ const RETRY_BACKOFF: Duration = Duration::from_millis(750);
 /// is the single spot to fix when extraction drifts.
 const GOOGLE_SCRAPE_JS: &str = r#"JSON.stringify(Array.from(document.querySelectorAll('div.g, div.MjjYud')).map(function(el){var a=el.querySelector('a[href]');var h=el.querySelector('h3');var s=el.querySelector('.VwiC3b, [data-sncf], .st');return (a&&h)?{url:a.href,title:h.innerText,content:s?s.innerText:''}:null;}).filter(Boolean))"#;
 
-/// Bing SERP extractor. `li.b_algo` rows, `h2 a` for title/url, `.b_caption p`
-/// for the snippet.
-const BING_SCRAPE_JS: &str = r#"JSON.stringify(Array.from(document.querySelectorAll('li.b_algo')).map(function(el){var a=el.querySelector('h2 a[href]');var s=el.querySelector('.b_caption p, p');return a?{url:a.href,title:a.innerText,content:s?s.innerText:''}:null;}).filter(Boolean))"#;
+/// Bing SERP extractor. `li.b_algo` rows; `h2 a` for title/url, `.b_caption p`
+/// for the snippet. Bing wraps result links in a `bing.com/ck/a?…&u=a1<base64>`
+/// click-tracker — the inline `unwrap` decodes that `u` param back to the real
+/// destination (and leaves already-direct links untouched).
+const BING_SCRAPE_JS: &str = r#"JSON.stringify((function(){function unwrap(u){try{var m=u.match(/[?&]u=a1([^&]+)/);if(m){var b=m[1].replace(/-/g,'+').replace(/_/g,'/');while(b.length%4)b+='=';return decodeURIComponent(escape(atob(b)));}}catch(e){}return u;}return Array.from(document.querySelectorAll('li.b_algo')).map(function(el){var a=el.querySelector('h2 a[href]');var s=el.querySelector('.b_caption p, p');return a?{url:unwrap(a.href),title:a.innerText,content:s?s.innerText:''}:null;}).filter(Boolean);})())"#;
 
-/// DuckDuckGo SERP extractor. Result blocks expose `h2 a` (new layout) or
-/// `a.result__a` (html layout), with a sibling snippet node.
+/// DuckDuckGo SERP extractor (the `duckduckgo.com/?q=` layout). Result blocks
+/// are `article[data-testid="result"]` with `h2 a` and a snippet node; the
+/// `div.result` / `a.result__a` fallbacks cover the lite/html layout.
 const DDG_SCRAPE_JS: &str = r#"JSON.stringify(Array.from(document.querySelectorAll('article[data-testid="result"], div.result')).map(function(el){var a=el.querySelector('h2 a[href], a.result__a[href]');var s=el.querySelector('[data-result="snippet"], .result__snippet');return a?{url:a.href,title:a.innerText,content:s?s.innerText:''}:null;}).filter(Boolean))"#;
 
-/// Generic fallback: harvest external content anchors with non-trivial link
-/// text, skipping chrome. Lower precision, zero per-engine maintenance. Used by
-/// every engine without a dedicated extractor.
-const GENERIC_SCRAPE_JS: &str = r#"JSON.stringify(Array.from(document.querySelectorAll('a[href^="http"]')).map(function(a){var t=(a.innerText||'').trim();return (t.length>15)?{url:a.href,title:t,content:''}:null;}).filter(Boolean).slice(0,30))"#;
-
-/// The extractor JS for a given engine. Google/Bing/DuckDuckGo have dedicated
-/// SERP selectors; every other engine uses the generic harvester. This is the
-/// single place to fix when an engine's DOM drifts.
-fn scrape_js(engine: crw_core::types::SearchEngine) -> &'static str {
-    use crw_core::types::SearchEngine::*;
+/// The extractor JS for a browser-driven engine. Each has dedicated selectors
+/// tuned against its live SERP — this is the single place to fix when a DOM
+/// drifts. GitHub is *not* browser-driven (it uses the REST Search API), so it
+/// never reaches here.
+fn scrape_js(engine: SearchEngine) -> &'static str {
     match engine {
-        Google => GOOGLE_SCRAPE_JS,
-        Bing => BING_SCRAPE_JS,
-        DuckDuckGo => DDG_SCRAPE_JS,
-        _ => GENERIC_SCRAPE_JS,
+        SearchEngine::Google => GOOGLE_SCRAPE_JS,
+        SearchEngine::Bing => BING_SCRAPE_JS,
+        SearchEngine::DuckDuckGo => DDG_SCRAPE_JS,
+        SearchEngine::Github => unreachable!("github uses the REST Search API, not the browser"),
+    }
+}
+
+/// The camofox `navigate` request body for a browser-driven engine + query.
+/// Google uses the browser's built-in `@google_search` macro (it handles the
+/// consent/redirect dance). Bing/DuckDuckGo have no working macro in
+/// camofox-browser, so we navigate their search URL directly — the macro is
+/// only URL shorthand anyway. `query` is form-url-encoded into the `q`
+/// parameter. GitHub is handled via the REST Search API and never reaches here.
+fn navigate_body(engine: SearchEngine, query: &str) -> serde_json::Value {
+    let q: String = url::form_urlencoded::byte_serialize(query.as_bytes()).collect();
+    match engine {
+        SearchEngine::Google => {
+            json!({ "userId": USER_ID, "macro": "@google_search", "query": query })
+        }
+        SearchEngine::Bing => {
+            json!({ "userId": USER_ID, "url": format!("https://www.bing.com/search?q={q}") })
+        }
+        SearchEngine::DuckDuckGo => {
+            json!({ "userId": USER_ID, "url": format!("https://duckduckgo.com/?q={q}") })
+        }
+        SearchEngine::Github => {
+            unreachable!("github uses the REST Search API, not the browser")
+        }
     }
 }
 
@@ -99,6 +125,22 @@ struct EvaluateResponse {
     result: Option<String>,
 }
 
+/// GitHub REST Search API (`/search/repositories`) response — only the fields
+/// we map into a result row.
+#[derive(Deserialize)]
+struct GithubSearchResponse {
+    #[serde(default)]
+    items: Vec<GithubRepo>,
+}
+
+#[derive(Deserialize)]
+struct GithubRepo {
+    html_url: String,
+    full_name: String,
+    #[serde(default)]
+    description: Option<String>,
+}
+
 /// Search client backed by a camofox-browser REST endpoint. Returns the same
 /// [`SearxngResponse`] shape as [`crate::client::SearxngClient`] so callers can
 /// treat the two interchangeably.
@@ -106,6 +148,10 @@ pub struct CamofoxSearchClient {
     http: reqwest::Client,
     base_url: String,
     api_key: Option<String>,
+    /// Optional GitHub PAT for the `github` engine, which uses the GitHub REST
+    /// Search API (not the browser) because GitHub web search rate-limits
+    /// unauthenticated scraping. `None` falls back to the lower unauth quota.
+    github_token: Option<String>,
     timeout: Duration,
     /// The single warm tab id, lazily created and reused across queries. The
     /// mutex doubles as the search serializer: holding it for the whole `fetch`
@@ -118,7 +164,13 @@ pub struct CamofoxSearchClient {
 impl CamofoxSearchClient {
     /// Build a client pointed at the camofox-browser base URL
     /// (e.g. `http://camofox:9377`). `timeout` caps each HTTP round-trip.
-    pub fn new(base_url: impl Into<String>, api_key: Option<String>, timeout: Duration) -> Self {
+    /// `github_token` authenticates the `github` engine's Search-API calls.
+    pub fn new(
+        base_url: impl Into<String>,
+        api_key: Option<String>,
+        github_token: Option<String>,
+        timeout: Duration,
+    ) -> Self {
         let base_url = base_url.into().trim_end_matches('/').to_string();
         let http = reqwest::Client::builder()
             .timeout(timeout)
@@ -128,6 +180,7 @@ impl CamofoxSearchClient {
             http,
             base_url,
             api_key,
+            github_token,
             timeout,
             tab: tokio::sync::Mutex::new(None),
         }
@@ -184,17 +237,23 @@ impl CamofoxSearchClient {
         let mut any_ok = false;
 
         for &engine in &params.camofox_engines {
-            let outcome = match self.attempt(&mut tab, engine, params).await {
-                Ok(rows) => Ok(rows),
-                Err(e) if is_stale_tab(&e) => {
-                    // Warm tab/context died (idle eviction or camofox restart).
-                    // Drop the dead id, let any in-flight relaunch settle, then
-                    // recreate and retry this engine once.
-                    *tab = None;
-                    tokio::time::sleep(RETRY_BACKOFF).await;
-                    self.attempt(&mut tab, engine, params).await
+            // GitHub uses the REST Search API, not the browser — no tab, no
+            // stale-tab retry. Every other engine drives the warm camofox tab.
+            let outcome = if matches!(engine, SearchEngine::Github) {
+                self.github_search(&params.q).await
+            } else {
+                match self.attempt(&mut tab, engine, params).await {
+                    Ok(rows) => Ok(rows),
+                    Err(e) if is_stale_tab(&e) => {
+                        // Warm tab/context died (idle eviction or camofox
+                        // restart). Drop the dead id, let any in-flight relaunch
+                        // settle, then recreate and retry this engine once.
+                        *tab = None;
+                        tokio::time::sleep(RETRY_BACKOFF).await;
+                        self.attempt(&mut tab, engine, params).await
+                    }
+                    Err(e) => Err(e),
                 }
-                Err(e) => Err(e),
             };
             match outcome {
                 Ok(rows) => {
@@ -256,7 +315,7 @@ impl CamofoxSearchClient {
         let nav = self
             .post(
                 &format!("/tabs/{tab_id}/navigate"),
-                json!({ "userId": USER_ID, "macro": engine.macro_name(), "query": params.q }),
+                navigate_body(engine, &params.q),
             )
             .await?;
         if !nav.status().is_success() {
@@ -320,6 +379,63 @@ impl CamofoxSearchClient {
 
         Ok(results)
     }
+
+    /// Search GitHub repositories via the REST Search API. Used instead of the
+    /// browser because GitHub's web search rate-limits unauthenticated scraping
+    /// almost immediately; the API gives clean JSON and a token lifts the quota.
+    /// GitHub requires a `User-Agent`; the token (when set) is sent as a bearer.
+    async fn github_search(&self, query: &str) -> Result<Vec<SearxngResult>, SearchError> {
+        let q: String = url::form_urlencoded::byte_serialize(query.as_bytes()).collect();
+        let url = format!("https://api.github.com/search/repositories?q={q}&per_page=10");
+        let mut req = self
+            .http
+            .get(url)
+            .header("Accept", "application/vnd.github+json")
+            .header("User-Agent", "crw-search");
+        if let Some(token) = &self.github_token {
+            req = req.bearer_auth(token);
+        }
+        let resp = req.send().await.map_err(|e: reqwest::Error| {
+            if e.is_timeout() {
+                SearchError::Timeout
+            } else {
+                SearchError::Transport(e.without_url().to_string())
+            }
+        })?;
+        if !resp.status().is_success() {
+            return Err(SearchError::Upstream {
+                status: resp.status().as_u16(),
+                body: "github: search failed".to_string(),
+            });
+        }
+        let data = resp
+            .json::<GithubSearchResponse>()
+            .await
+            .map_err(|e| SearchError::InvalidResponse(format!("github: bad search response: {e}")))?;
+
+        let n = data.items.len();
+        Ok(data
+            .items
+            .into_iter()
+            .enumerate()
+            .map(|(i, r)| SearxngResult {
+                url: Some(r.html_url),
+                title: Some(r.full_name),
+                engine: Some("github".to_string()),
+                content: r.description.filter(|d| !d.is_empty()),
+                score: Some((n - i) as f64),
+                engines: vec!["github".to_string()],
+                positions: vec![(i + 1) as u32],
+                category: Some("general".to_string()),
+                template: None,
+                published_date: None,
+                img_src: None,
+                thumbnail_src: None,
+                img_format: None,
+                resolution: None,
+            })
+            .collect())
+    }
 }
 
 /// Merge per-engine result rows into one response, deduped by URL. A URL seen
@@ -372,19 +488,23 @@ mod extractor_tests {
     use crw_core::types::SearchEngine;
 
     #[test]
-    fn google_uses_existing_scrape_js() {
+    fn browser_engines_have_dedicated_extractors() {
+        // GitHub is excluded: it uses the REST Search API, not the browser.
         assert!(scrape_js(SearchEngine::Google).contains("div.g"));
-    }
-
-    #[test]
-    fn bing_and_ddg_have_dedicated_extractors() {
         assert!(scrape_js(SearchEngine::Bing).contains("li.b_algo"));
         assert!(scrape_js(SearchEngine::DuckDuckGo).contains("article"));
     }
 
     #[test]
-    fn other_engines_fall_back_to_generic() {
-        assert_eq!(scrape_js(SearchEngine::Amazon), scrape_js(SearchEngine::Tiktok));
-        assert_eq!(scrape_js(SearchEngine::Reddit), GENERIC_SCRAPE_JS);
+    fn google_navigates_by_macro_others_by_url() {
+        let g = navigate_body(SearchEngine::Google, "rust lang");
+        assert_eq!(g["macro"], "@google_search");
+        assert_eq!(g["query"], "rust lang");
+
+        // Non-macro browser engines navigate a search URL, query url-encoded.
+        let b = navigate_body(SearchEngine::Bing, "rust lang");
+        assert_eq!(b["url"], "https://www.bing.com/search?q=rust+lang");
+        let d = navigate_body(SearchEngine::DuckDuckGo, "rust lang");
+        assert_eq!(d["url"], "https://duckduckgo.com/?q=rust+lang");
     }
 }
