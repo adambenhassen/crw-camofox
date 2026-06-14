@@ -141,6 +141,7 @@ That is the flat response shape used when `sources` is not set.
 | `tbs` | string | -- | Recency filter: `qdr:h`, `qdr:d`, `qdr:w`, `qdr:m`, `qdr:y` |
 | `sources` | string[] | -- | Result groups such as `"web"`, `"news"`, `"images"` |
 | `categories` | string[] | -- | Curated filters (`"github"`, `"research"`, `"pdf"`) **plus** any native SearXNG category (`"science"`, `"it"`, `"news"`, `"files"`, …) passed straight through. Max 5 entries. See [Curated vs. passthrough categories](#curated-vs-passthrough-categories) |
+| `engines` | string[] | `["google"]` | **Camofox backend only.** Which engine(s) to search; results from multiple engines are merged and deduped by URL. Max 4. Valid values: `google`, `bing`, `duckduckgo`, `reddit`, `github`, `stackoverflow`, `wikipedia`, `youtube`, `amazon`, `twitter`, `linkedin`, `facebook`, `instagram`, `tiktok`. Engines run **sequentially** on the warm browser tab, so N engines ≈ N× latency. Ignored by the SearXNG backend. |
 | `scrapeOptions` | object | -- | Scrape each result URL after search |
 | `summarizeResults` | boolean | `false` | When `true`, each scraped result is summarized by the LLM and the digest appears in `result.summary`. Needs LLM config (BYOK or server). Fan-out is bounded by `[extraction.llm].max_concurrency`. |
 | `answer` | boolean | `false` | When `true`, after scraping the top results crw synthesizes a single answer over them. The answer + `citations` land on the response wrapper. |

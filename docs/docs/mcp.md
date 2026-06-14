@@ -263,6 +263,7 @@ Available when connected to a CRW **server** that has a search backend configure
 | `limit` | integer | no | Max results (default: 5) |
 | `lang` | string | no | Language code (e.g. `"en"`, `"tr"`) |
 | `country` | string | no | Country code (e.g. `"us"`, `"tr"`) |
+| `engines` | string[] | no | Camofox backend only. Engine(s) to query, default `["google"]`, max 4 (e.g. `["google","bing","duckduckgo"]`). Results are merged and deduped. Ignored by the SearXNG backend. |
 | `scrapeOptions` | object | no | Scrape each result page (e.g. `{"formats": ["markdown"]}`) |
 
 ## Example Agent Tool Flow
