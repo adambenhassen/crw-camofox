@@ -77,6 +77,16 @@ const WIKIPEDIA_SCRAPE_JS: &str = r#"JSON.stringify(Array.from(document.querySel
 /// attribute (the inner text is lazy/empty until hover).
 const YOUTUBE_SCRAPE_JS: &str = r#"JSON.stringify(Array.from(document.querySelectorAll('ytd-video-renderer a#video-title')).map(function(a){var t=(a.getAttribute('title')||a.innerText||'').trim();return (a.href&&t)?{url:a.href,title:t,content:''}:null;}).filter(Boolean))"#;
 
+/// Reddit search extractor. Post links are `a[href*="/comments/"]`; Reddit
+/// renders several anchors per post (thumbnail + title), so we dedupe by the
+/// query-stripped permalink and keep the first non-trivial link text.
+const REDDIT_SCRAPE_JS: &str = r#"JSON.stringify((function(){var seen={};var out=[];document.querySelectorAll('a[href*="/comments/"]').forEach(function(a){var u=a.href.split('?')[0];var t=(a.innerText||'').trim();if(t.length>5&&!seen[u]){seen[u]=1;out.push({url:u,title:t,content:''});}});return out;})())"#;
+
+/// Amazon product-search extractor. Each `[data-component-type="s-search-result"]`
+/// card holds the product link (`a[href*="/dp/"]`) and title (`h2 span`/`h2`);
+/// dedupe by the query-stripped `/dp/` URL.
+const AMAZON_SCRAPE_JS: &str = r#"JSON.stringify((function(){var seen={};var out=[];document.querySelectorAll('[data-component-type="s-search-result"]').forEach(function(el){var a=el.querySelector('a[href*="/dp/"]');var h=el.querySelector('h2 span, h2');if(a&&h){var u=a.href.split('?')[0];var t=(h.innerText||'').trim();if(t&&!seen[u]){seen[u]=1;out.push({url:u,title:t,content:''});}}});return out;})())"#;
+
 /// The extractor JS for a browser-driven engine. Each has dedicated selectors
 /// tuned against its live SERP — this is the single place to fix when a DOM
 /// drifts. GitHub is *not* browser-driven (it uses the REST Search API), so it
@@ -88,6 +98,8 @@ fn scrape_js(engine: SearchEngine) -> &'static str {
         SearchEngine::DuckDuckGo => DDG_SCRAPE_JS,
         SearchEngine::Wikipedia => WIKIPEDIA_SCRAPE_JS,
         SearchEngine::Youtube => YOUTUBE_SCRAPE_JS,
+        SearchEngine::Reddit => REDDIT_SCRAPE_JS,
+        SearchEngine::Amazon => AMAZON_SCRAPE_JS,
         SearchEngine::Github => unreachable!("github uses the REST Search API, not the browser"),
     }
 }
@@ -117,6 +129,12 @@ fn navigate_body(engine: SearchEngine, query: &str) -> serde_json::Value {
         }
         SearchEngine::Youtube => {
             json!({ "userId": USER_ID, "url": format!("https://www.youtube.com/results?search_query={q}") })
+        }
+        SearchEngine::Reddit => {
+            json!({ "userId": USER_ID, "url": format!("https://www.reddit.com/search/?q={q}") })
+        }
+        SearchEngine::Amazon => {
+            json!({ "userId": USER_ID, "url": format!("https://www.amazon.com/s?k={q}") })
         }
         SearchEngine::Github => {
             unreachable!("github uses the REST Search API, not the browser")
@@ -514,6 +532,8 @@ mod extractor_tests {
         assert!(scrape_js(SearchEngine::DuckDuckGo).contains("article"));
         assert!(scrape_js(SearchEngine::Wikipedia).contains("mw-search-result-heading"));
         assert!(scrape_js(SearchEngine::Youtube).contains("ytd-video-renderer"));
+        assert!(scrape_js(SearchEngine::Reddit).contains("/comments/"));
+        assert!(scrape_js(SearchEngine::Amazon).contains("s-search-result"));
     }
 
     #[test]
@@ -534,5 +554,9 @@ mod extractor_tests {
         );
         let y = navigate_body(SearchEngine::Youtube, "rust lang");
         assert_eq!(y["url"], "https://www.youtube.com/results?search_query=rust+lang");
+        let rd = navigate_body(SearchEngine::Reddit, "rust lang");
+        assert_eq!(rd["url"], "https://www.reddit.com/search/?q=rust+lang");
+        let am = navigate_body(SearchEngine::Amazon, "rust lang");
+        assert_eq!(am["url"], "https://www.amazon.com/s?k=rust+lang");
     }
 }

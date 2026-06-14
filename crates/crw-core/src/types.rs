@@ -1008,6 +1008,8 @@ pub enum SearchEngine {
     Github,
     Wikipedia,
     Youtube,
+    Reddit,
+    Amazon,
 }
 
 impl SearchEngine {
@@ -1021,6 +1023,8 @@ impl SearchEngine {
             SearchEngine::Github => "github",
             SearchEngine::Wikipedia => "wikipedia",
             SearchEngine::Youtube => "youtube",
+            SearchEngine::Reddit => "reddit",
+            SearchEngine::Amazon => "amazon",
         }
     }
 }
@@ -1782,10 +1786,22 @@ mod search_engine_tests {
 
     #[test]
     fn search_engine_rejects_unsupported() {
-        // Engines the browser can't serve (bing macro aside, these aren't in
-        // the enum at all) must fail to deserialize rather than silently pass.
+        // Engines that don't return clean results (CAPTCHA / anti-bot / login)
+        // aren't in the enum and must fail to deserialize rather than pass.
         assert!(serde_json::from_str::<SearchEngine>("\"stackoverflow\"").is_err());
-        assert!(serde_json::from_str::<SearchEngine>("\"reddit\"").is_err());
+        assert!(serde_json::from_str::<SearchEngine>("\"yelp\"").is_err());
+    }
+
+    #[test]
+    fn search_engine_reddit_and_amazon_parse() {
+        assert_eq!(
+            serde_json::from_str::<SearchEngine>("\"reddit\"").unwrap(),
+            SearchEngine::Reddit
+        );
+        assert_eq!(
+            serde_json::from_str::<SearchEngine>("\"amazon\"").unwrap(),
+            SearchEngine::Amazon
+        );
     }
 
     #[test]
