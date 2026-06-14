@@ -7,7 +7,7 @@
 //! [`SearchRequest`]: crw_core::types::SearchRequest
 
 use crw_core::config::SearchConfig;
-use crw_core::types::{SearchCategory, SearchRequest};
+use crw_core::types::{SearchCategory, SearchEngine, SearchRequest};
 
 /// Owned representation of the SearXNG query parameters we send. The client
 /// constructs the URL-encoded form from these fields; this struct stays
@@ -21,6 +21,9 @@ pub struct SearxngParams {
     pub engines: Option<String>,
     pub pageno: Option<u32>,
     pub safesearch: Option<u8>,
+    /// Engines for the Camofox backend (see `SearchRequest.engines`). Defaulted
+    /// to `[Google]` by `map_to_searxng_params`. The SearXNG client ignores it.
+    pub camofox_engines: Vec<SearchEngine>,
 }
 
 /// Map the public [`SearchRequest`] to SearXNG query parameters.
@@ -130,6 +133,13 @@ pub fn map_to_searxng_params(req: &SearchRequest, config: &SearchConfig) -> Sear
         Some(engines.join(","))
     };
 
+    // Camofox engine selection. Empty/omitted ⇒ Google, preserving today's
+    // single-engine behavior. Independent of the SearXNG `engines` param above.
+    let camofox_engines = match &req.engines {
+        Some(list) if !list.is_empty() => list.clone(),
+        _ => vec![SearchEngine::Google],
+    };
+
     SearxngParams {
         q: query,
         categories,
@@ -138,6 +148,7 @@ pub fn map_to_searxng_params(req: &SearchRequest, config: &SearchConfig) -> Sear
         engines,
         pageno: None,
         safesearch: None,
+        camofox_engines,
     }
 }
 
@@ -176,6 +187,28 @@ mod tests {
             answer_list_format: None,
             max_content_chars: None,
         }
+    }
+
+    #[test]
+    fn engines_default_to_google_when_unset() {
+        let p = map_to_searxng_params(&req("rust"), &cfg());
+        assert_eq!(p.camofox_engines, vec![SearchEngine::Google]);
+    }
+
+    #[test]
+    fn engines_passed_through() {
+        let mut r = req("rust");
+        r.engines = Some(vec![SearchEngine::Bing, SearchEngine::DuckDuckGo]);
+        let p = map_to_searxng_params(&r, &cfg());
+        assert_eq!(p.camofox_engines, vec![SearchEngine::Bing, SearchEngine::DuckDuckGo]);
+    }
+
+    #[test]
+    fn empty_engines_list_defaults_to_google() {
+        let mut r = req("rust");
+        r.engines = Some(vec![]);
+        let p = map_to_searxng_params(&r, &cfg());
+        assert_eq!(p.camofox_engines, vec![SearchEngine::Google]);
     }
 
     #[test]

@@ -6,6 +6,7 @@
 
 use std::time::Duration;
 
+use crw_core::types::SearchEngine;
 use crw_search::SearxngParams;
 use crw_search::camofox_search::CamofoxSearchClient;
 use serde_json::json;
@@ -13,6 +14,10 @@ use wiremock::matchers::{body_partial_json, method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
 fn params(q: &str) -> SearxngParams {
+    params_with_engines(q, vec![SearchEngine::Google])
+}
+
+fn params_with_engines(q: &str, engines: Vec<SearchEngine>) -> SearxngParams {
     SearxngParams {
         q: q.to_string(),
         categories: None,
@@ -21,6 +26,7 @@ fn params(q: &str) -> SearxngParams {
         engines: None,
         pageno: None,
         safesearch: None,
+        camofox_engines: engines,
     }
 }
 
