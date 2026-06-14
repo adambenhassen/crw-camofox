@@ -8,14 +8,14 @@
   Self-hosted, Rust-native web crawler &amp; scraper for AI agents
 </p>
 
-The open-source alternative to Firecrawl. One static binary, ~50 MB RAM idle,
-Firecrawl-compatible REST API on **both `/v1/*` and `/v2/*`** (scrape, crawl,
-map, search, extract, plus v2 batch & parse) — a drop-in for the official
-Firecrawl SDKs — plus first-class MCP. Self-host free under
-AGPL-3.0, or hit our managed API at `api.fastcrw.com`. Reproducible 63.74%
-truth-recall on the public 1,000-URL dataset (`diagnose_3way.py`,
-2026-05-08) — see [fastcrw.com/benchmarks](https://fastcrw.com/benchmarks).
-Built in Rust because every millisecond of agent latency compounds.
+The open-source alternative to Firecrawl: one static Rust binary, ~50 MB RAM
+idle, a Firecrawl-compatible REST API on **both `/v1/*` and `/v2/*`** (scrape,
+crawl, map, search, extract, plus v2 batch & parse) — a drop-in for the official
+Firecrawl SDKs — plus first-class MCP. Self-host free under AGPL-3.0.
+
+**This fork** swaps the browser layer to [Camofox](https://github.com/redf0x1/camofox-browser)
+(Firefox anti-detect) and re-backs search on it — details [below](#-this-is-the-camofox-fork).
+Upstream offers a managed API at `api.fastcrw.com`; this fork is self-host only.
 
 <p align="center">
   <a href="https://crates.io/crates/crw-server"><img src="https://img.shields.io/crates/v/crw-server.svg" alt="crates.io"></a>
@@ -23,12 +23,6 @@ Built in Rust because every millisecond of agent latency compounds.
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-AGPL--3.0-blue.svg" alt="License"></a>
   <a href="https://github.com/us/crw/stargazers"><img src="https://img.shields.io/github/stars/us/crw?style=social" alt="GitHub Stars"></a>
   <a href="https://fastcrw.com"><img src="https://img.shields.io/badge/Managed%20Cloud-fastcrw.com-blueviolet" alt="fastcrw.com"></a>
-</p>
-
-<p align="center">
-  <a href="https://twitter.com/fastcrw"><img src="https://img.shields.io/badge/Follow%20on%20X-000000?style=for-the-badge&logo=x&logoColor=white" alt="Follow on X" /></a>
-  <a href="https://www.linkedin.com/company/fastcrw"><img src="https://img.shields.io/badge/Follow%20on%20LinkedIn-0077B5?style=for-the-badge&logo=linkedin&logoColor=white" alt="Follow on LinkedIn" /></a>
-  <a href="https://discord.gg/kkFh2SC8"><img src="https://img.shields.io/badge/Join%20our%20Discord-5865F2?style=for-the-badge&logo=discord&logoColor=white" alt="Join our Discord" /></a>
 </p>
 
 Works with: [Claude Code](https://docs.fastcrw.com/mcp-clients/#claude-code) · [Cursor](https://docs.fastcrw.com/mcp-clients/#cursor) · [Windsurf](https://docs.fastcrw.com/mcp-clients/#windsurf) · [Cline](https://docs.fastcrw.com/mcp-clients/#cline) · [Copilot](https://docs.fastcrw.com/mcp-clients/#any-mcp-client) · [Continue.dev](https://docs.fastcrw.com/mcp-clients/#continue) · [Codex](https://docs.fastcrw.com/mcp-clients/#openai-codex-cli) · [Gemini CLI](https://docs.fastcrw.com/mcp-clients/#gemini-cli)
@@ -99,44 +93,32 @@ is the qualitative architectural shape, not a comparison number.
 
 ## Quickstart
 
-Hit the managed API at `api.fastcrw.com`, or self-host the same binary.
+Self-host with one Docker command — no auth, listens on `localhost:3000`:
 
 ```bash
+docker run -p 3000:3000 ghcr.io/adambenhassen/crw-camofox
+
 # /v1/scrape — URL → markdown / HTML / JSON / links
-curl -X POST https://api.fastcrw.com/v1/scrape \
-  -H "Authorization: Bearer $CRW_API_KEY" \
+curl http://localhost:3000/v1/scrape \
   -H "Content-Type: application/json" \
   -d '{"url":"https://example.com","formats":["markdown"]}'
 ```
 
 ```bash
 # /v1/extract — structured JSON from a URL via a JSON Schema
-curl -X POST https://api.fastcrw.com/v1/extract \
-  -H "Authorization: Bearer $CRW_API_KEY" \
+curl http://localhost:3000/v1/extract \
   -H "Content-Type: application/json" \
   -d '{
     "url":"https://example.com",
-    "schema":{
-      "type":"object",
-      "properties":{"title":{"type":"string"}}
-    }
+    "schema":{"type":"object","properties":{"title":{"type":"string"}}}
   }'
 ```
 
 ```bash
 # /v1/crawl — async multi-page job (returns a job id; poll with /v1/crawl/:id)
-curl -X POST https://api.fastcrw.com/v1/crawl \
-  -H "Authorization: Bearer $CRW_API_KEY" \
+curl http://localhost:3000/v1/crawl \
   -H "Content-Type: application/json" \
   -d '{"url":"https://docs.example.com","maxDepth":2,"maxPages":50}'
-```
-
-```bash
-# Self-host (no auth, localhost) — single docker command
-docker run -p 3000:3000 ghcr.io/adambenhassen/crw-camofox
-curl http://localhost:3000/v1/scrape \
-  -H "Content-Type: application/json" \
-  -d '{"url":"https://example.com"}'
 ```
 
 Other install paths (each documented under
@@ -149,20 +131,6 @@ brew install us/crw/crw                # Homebrew
 cargo install crw-cli                  # Cargo
 curl -fsSL https://raw.githubusercontent.com/us/crw/main/install.sh | sh
 ```
-
----
-
-## Why Rust?
-
-Cold start is sub-second and the resident memory ceiling is bounded by the
-crawl queue, not by a JavaScript runtime or a headless browser parked in
-the background. An agent that issues N scrapes per task pays the network
-floor N times — anything you add on top (process spawn, JIT warmup,
-browser navigation overhead) multiplies. Pushing the request-path
-language down to Rust strips that surcharge out of every call. The same
-property lets one static binary saturate a $5 VPS instead of needing a
-multi-container compose stack, which is why the idle footprint is in the
-tens of MB rather than the hundreds.
 
 ---
 
@@ -305,9 +273,24 @@ The Firecrawl compatibility matrix (field-by-field diff) lives in
 
 ## Benchmark
 
-Reproduce it yourself first — the canonical harness is `diagnose_3way.py`
-(matches truth text against `md + strip_md_links(md)`, applied identically
-to all three tools — a fairness control, not a looser number):
+3-way scrape benchmark on the full 1,000-URL
+[Firecrawl `scrape-content-dataset-v1`](https://huggingface.co/datasets/firecrawl/scrape-content-dataset-v1)
+(`diagnose_3way.py`, 2026-05-08, concurrency 5, timeout 120s):
+
+| Metric | fastCRW | crawl4ai | Firecrawl |
+|---|---|---|---|
+| **Truth-recall (522/819 labeled URLs)** | **63.74%** | 59.95% | 56.04% |
+| Scrape-success (of 1,000) | 877 (87.7%) | 835 (83.5%) | 897 (89.7%) |
+| Thrown errors (3,000 requests) | 0 | 0 | 0 |
+| p50 latency | **1914 ms** | 1916 ms | 2305 ms |
+| p90 latency | 14157 ms | **4754 ms** | 6937 ms |
+
+Recall is measured against the 819 labeled/matchable URLs. p50 ties Firecrawl;
+p90 is the worst of the three — the stealth fallback that recovers the URLs the
+others miss is also what lengthens the tail.
+
+Reproduce it yourself — the canonical harness is `diagnose_3way.py` (matches
+truth text identically across all three tools):
 
 ```bash
 cd ~/coding/crw/crw-opencore
@@ -322,29 +305,6 @@ uv run python bench/diagnose_3way.py \
   --concurrency 5 --timeout 120 \
   --out bench/server-runs/diag3w-1000-full.jsonl
 ```
-
-3-way scrape benchmark, full 1,000-URL run on
-[Firecrawl's `scrape-content-dataset-v1`](https://huggingface.co/datasets/firecrawl/scrape-content-dataset-v1)
-(`diagnose_3way.py`, 2026-05-08, concurrency 5, timeout 120s):
-
-| Metric | fastCRW | crawl4ai | Firecrawl |
-|---|---|---|---|
-| **Truth-recall (522/819 labeled URLs)** | **63.74%** | 59.95% | 56.04% |
-| Scrape-success (of 1,000) | 877 (87.7%) | 835 (83.5%) | 897 (89.7%) |
-| Thrown errors (3,000 requests) | 0 | 0 | 0 |
-| p50 latency | **1914 ms** | 1916 ms | 2305 ms |
-| p90 latency | 14157 ms | **4754 ms** | 6937 ms |
-
-Single 1,000-URL run (N=1,000 crushes variance; the 150-URL subset
-oscillated ±0.83pp). The **63.74% denominator is 819 labeled/matchable
-URLs** — not 3,000 requests, not 1,000. Read the **87.7% scrape-success
-adjacent to "0 errors"**: 12.3% returned no usable content without
-throwing. fastCRW's **p50 is on par with Firecrawl (1914 vs 1916 ms)** —
-a 2 ms gap on a single run is well inside the variance documented above,
-so we report it as a tie, not a win; its **p90 is the worst of the
-three** — the chrome-stealth fallback that recovers the URLs the others
-miss is also why the tail is worst. We publish the full distribution
-because the recall is worth the tail.
 
 Full result of record:
 [`bench/server-runs/RESULT_3WAY_1000_FULL.md`](bench/server-runs/RESULT_3WAY_1000_FULL.md).
@@ -480,18 +440,6 @@ on request — write to **hello@fastcrw.com**.
 - **LinkedIn:** [fastcrw](https://www.linkedin.com/company/fastcrw)
 - **Discord:** [discord.gg/kkFh2SC8](https://discord.gg/kkFh2SC8)
 - **MCP Registry:** [registry.modelcontextprotocol.io](https://registry.modelcontextprotocol.io/?q=crw)
-
----
-
-## Star History
-
-<a href="https://www.star-history.com/?repos=us%2Fcrw&type=timeline&legend=bottom-right">
- <picture>
-   <source media="(prefers-color-scheme: dark)" srcset="https://api.star-history.com/chart?repos=us/crw&type=timeline&theme=dark&legend=bottom-right" />
-   <source media="(prefers-color-scheme: light)" srcset="https://api.star-history.com/chart?repos=us/crw&type=timeline&legend=bottom-right" />
-   <img alt="Star History Chart" src="https://api.star-history.com/chart?repos=us/crw&type=timeline&legend=bottom-right" />
- </picture>
-</a>
 
 ---
 
