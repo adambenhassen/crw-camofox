@@ -1134,6 +1134,64 @@ pub struct SearchScrapeOptions {
     pub only_main_content: bool,
 }
 
+/// Deserialize an optional `Vec<T>` that may arrive either as a real JSON array
+/// or as a *string* encoding one. Some MCP/LLM clients JSON-encode array
+/// arguments, sending the string `"[\"bing\"]"` (or a bare `"google,bing"`)
+/// instead of the array `["bing"]`. A real array deserializes normally; a
+/// string is parsed as JSON when it looks like an array, otherwise split on
+/// commas, with each token deserialized as `T`. Empty/`null` ⇒ `None`.
+fn string_or_seq_opt<'de, D, T>(deserializer: D) -> Result<Option<Vec<T>>, D::Error>
+where
+    D: Deserializer<'de>,
+    T: serde::de::DeserializeOwned,
+{
+    use serde::de::{self, SeqAccess, Visitor};
+    use std::fmt;
+    use std::marker::PhantomData;
+
+    struct V<T>(PhantomData<T>);
+
+    impl<'de, T: serde::de::DeserializeOwned> Visitor<'de> for V<T> {
+        type Value = Option<Vec<T>>;
+
+        fn expecting(&self, f: &mut fmt::Formatter) -> fmt::Result {
+            f.write_str("an array, or a string encoding one (JSON or comma-separated)")
+        }
+
+        fn visit_unit<E>(self) -> Result<Self::Value, E> {
+            Ok(None)
+        }
+
+        fn visit_seq<A: SeqAccess<'de>>(self, mut seq: A) -> Result<Self::Value, A::Error> {
+            let mut out = Vec::new();
+            while let Some(v) = seq.next_element::<T>()? {
+                out.push(v);
+            }
+            Ok(Some(out))
+        }
+
+        fn visit_str<E: de::Error>(self, s: &str) -> Result<Self::Value, E> {
+            let s = s.trim();
+            if s.is_empty() {
+                return Ok(None);
+            }
+            let parsed: Vec<T> = if s.starts_with('[') {
+                serde_json::from_str(s).map_err(de::Error::custom)?
+            } else {
+                s.split(',')
+                    .map(str::trim)
+                    .filter(|t| !t.is_empty())
+                    .map(|t| serde_json::from_value(serde_json::Value::String(t.to_string())))
+                    .collect::<Result<Vec<T>, _>>()
+                    .map_err(de::Error::custom)?
+            };
+            Ok(Some(parsed))
+        }
+    }
+
+    deserializer.deserialize_any(V(PhantomData))
+}
+
 /// POST /v1/search request body. Mirrors the zod schema in
 /// `crw-saas/src/lib/search-schema.ts`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1153,15 +1211,15 @@ pub struct SearchRequest {
     pub tbs: Option<SearchTimeFilter>,
     /// When set, results are grouped under `web`/`news`/`images` keys.
     /// When unset, a flat array is returned.
-    #[serde(default)]
+    #[serde(default, deserialize_with = "string_or_seq_opt")]
     pub sources: Option<Vec<SearchSource>>,
     /// User-facing category modifiers. Max 5 entries (matches SaaS).
-    #[serde(default)]
+    #[serde(default, deserialize_with = "string_or_seq_opt")]
     pub categories: Option<Vec<SearchCategory>>,
     /// Engines to search via the Camofox backend. `None`/empty ⇒ `[google]`.
     /// Multiple engines are fanned out and merged. Capped server-side. Ignored
     /// by the opt-in SearXNG backend.
-    #[serde(default)]
+    #[serde(default, deserialize_with = "string_or_seq_opt")]
     pub engines: Option<Vec<SearchEngine>>,
     /// When set, every `web` result is enriched in-process via the scrape
     /// pipeline (parallel, bounded by `[crawler].max_concurrency`).
@@ -1820,5 +1878,41 @@ mod search_engine_tests {
         let r: SearchRequest =
             serde_json::from_str(r#"{"query":"rust","engines":["google","bing"]}"#).unwrap();
         assert_eq!(r.engines.unwrap(), vec![SearchEngine::Google, SearchEngine::Bing]);
+    }
+
+    #[test]
+    fn search_request_accepts_stringified_engines() {
+        // Some MCP/LLM clients JSON-encode array args, sending the *string*
+        // `"[\"bing\"]"` instead of the array `["bing"]`.
+        let r: SearchRequest =
+            serde_json::from_str(r#"{"query":"rust","engines":"[\"google\",\"bing\"]"}"#).unwrap();
+        assert_eq!(r.engines.unwrap(), vec![SearchEngine::Google, SearchEngine::Bing]);
+    }
+
+    #[test]
+    fn search_request_accepts_comma_separated_engines_string() {
+        let r: SearchRequest =
+            serde_json::from_str(r#"{"query":"rust","engines":"google, bing"}"#).unwrap();
+        assert_eq!(r.engines.unwrap(), vec![SearchEngine::Google, SearchEngine::Bing]);
+    }
+
+    #[test]
+    fn search_request_accepts_stringified_sources_and_categories() {
+        let r: SearchRequest = serde_json::from_str(
+            r#"{"query":"rust","sources":"[\"web\",\"news\"]","categories":"github,pdf"}"#,
+        )
+        .unwrap();
+        assert_eq!(r.sources.unwrap(), vec![SearchSource::Web, SearchSource::News]);
+        assert_eq!(
+            r.categories.unwrap(),
+            vec![SearchCategory::Github, SearchCategory::Pdf]
+        );
+    }
+
+    #[test]
+    fn search_request_empty_engines_string_is_none() {
+        let r: SearchRequest =
+            serde_json::from_str(r#"{"query":"rust","engines":""}"#).unwrap();
+        assert!(r.engines.is_none());
     }
 }
