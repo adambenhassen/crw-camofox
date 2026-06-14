@@ -1,8 +1,8 @@
 <p align="center">
-  <img src="docs/logo-animation.gif" alt="fastCRW" width="220" />
+  <img src="docs/crw-camofox.png" alt="crw-camofox" width="220" />
 </p>
 
-<h1 align="center">fastCRW</h1>
+<h1 align="center">crw-camofox</h1>
 
 <p align="center">
   Self-hosted, Rust-native web crawler &amp; scraper for AI agents
