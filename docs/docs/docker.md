@@ -5,8 +5,8 @@ Run crw with Docker Compose for the easiest setup with JS rendering included.
 ## Pre-built Image
 
 ```bash
-docker pull ghcr.io/us/crw:latest
-docker run -p 3000:3000 ghcr.io/us/crw:latest
+docker pull ghcr.io/adambenhassen/crw-camofox:latest
+docker run -p 3000:3000 ghcr.io/adambenhassen/crw-camofox:latest
 ```
 
 Available tags: `latest`, `0.0.1`, `0.0`

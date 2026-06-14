@@ -191,7 +191,7 @@ crw search "renewable energy trends 2024" --json --fields title,url,snippet --li
       <code>npx crw-mcp</code> ·
       <code>brew install us/crw/crw</code> ·
       <code>curl -fsSL https://raw.githubusercontent.com/us/crw/main/install.sh | sh</code> ·
-      <code>docker run -p 3000:3000 ghcr.io/us/crw:latest</code>
+      <code>docker run -p 3000:3000 ghcr.io/adambenhassen/crw-camofox:latest</code>
     </p>
 
     <h2>Resources</h2>
@@ -329,7 +329,7 @@ cargo build --release --bin crw-mcp
 <p>Binaries are placed in <code>target/release/</code>.</p>
 <h2 id="docker">Docker</h2>
 <pre><code class="language-bash"># Pre-built image
-docker run -p 3000:3000 ghcr.io/us/crw:latest
+docker run -p 3000:3000 ghcr.io/adambenhassen/crw-camofox:latest
 
 # With docker-compose (includes LightPanda sidecar)
 docker compose up

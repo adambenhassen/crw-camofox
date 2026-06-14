@@ -131,7 +131,7 @@ For Codex, Cursor, Windsurf, and others, continue in [MCP Server](#mcp).
 If you want a local or private deployment instead of the hosted API:
 
 ```bash
-docker run -p 3000:3000 ghcr.io/us/crw
+docker run -p 3000:3000 ghcr.io/adambenhassen/crw-camofox
 ```
 
 Then call the local API:

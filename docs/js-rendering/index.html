@@ -191,7 +191,7 @@ crw search "renewable energy trends 2024" --json --fields title,url,snippet --li
       <code>npx crw-mcp</code> ·
       <code>brew install us/crw/crw</code> ·
       <code>curl -fsSL https://raw.githubusercontent.com/us/crw/main/install.sh | sh</code> ·
-      <code>docker run -p 3000:3000 ghcr.io/us/crw:latest</code>
+      <code>docker run -p 3000:3000 ghcr.io/adambenhassen/crw-camofox:latest</code>
     </p>
 
     <h2>Resources</h2>
@@ -518,7 +518,7 @@ ws_url = &quot;ws://chrome:9222&quot;
 <p>The included <code>docker-compose.yml</code> runs crw with a LightPanda sidecar:</p>
 <pre><code class="language-yaml">services:
   crw:
-    image: ghcr.io/us/crw:latest
+    image: ghcr.io/adambenhassen/crw-camofox:latest
     ports:
       - &quot;3000:3000&quot;
     environment:

@@ -191,7 +191,7 @@ crw search "renewable energy trends 2024" --json --fields title,url,snippet --li
       <code>npx crw-mcp</code> ·
       <code>brew install us/crw/crw</code> ·
       <code>curl -fsSL https://raw.githubusercontent.com/us/crw/main/install.sh | sh</code> ·
-      <code>docker run -p 3000:3000 ghcr.io/us/crw:latest</code>
+      <code>docker run -p 3000:3000 ghcr.io/adambenhassen/crw-camofox:latest</code>
     </p>
 
     <h2>Resources</h2>
@@ -386,7 +386,7 @@ console.log(body.data.markdown);
 <p>For Codex, Cursor, Windsurf, and others, continue in <a href="/mcp">MCP Server</a>.</p>
 <h2 id="self-host-path">Self-host path</h2>
 <p>If you want a local or private deployment instead of the hosted API:</p>
-<pre><code class="language-bash">docker run -p 3000:3000 ghcr.io/us/crw
+<pre><code class="language-bash">docker run -p 3000:3000 ghcr.io/adambenhassen/crw-camofox
 </code></pre>
 <p>Then call the local API:</p>
 <pre><code class="language-bash">curl -X POST http://localhost:3000/v1/scrape \

@@ -48,7 +48,7 @@ pip install crw
 cargo install crw-mcp
 
 # Docker：
-docker run -i ghcr.io/us/crw crw-mcp
+docker run -i ghcr.io/adambenhassen/crw-camofox crw-mcp
 ```
 
 ## 最新动态
@@ -188,7 +188,7 @@ curl -X POST https://fastcrw.com/api/v1/scrape \
 **Docker：**
 
 ```bash
-docker run -p 3000:3000 ghcr.io/us/crw:latest
+docker run -p 3000:3000 ghcr.io/adambenhassen/crw-camofox:latest
 ```
 
 **Docker Compose（含 JS 渲染）：**
@@ -294,7 +294,7 @@ pip install crw
 cargo install crw-mcp
 
 # Docker：
-docker run -i ghcr.io/us/crw crw-mcp
+docker run -i ghcr.io/adambenhassen/crw-camofox crw-mcp
 ```
 
 **Claude Code：**

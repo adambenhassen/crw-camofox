@@ -68,7 +68,7 @@ pip install crw
 cargo install crw-mcp
 
 # Docker:
-docker run -i ghcr.io/us/crw crw-mcp
+docker run -i ghcr.io/adambenhassen/crw-camofox crw-mcp
 ```
 
 Add to your MCP client:

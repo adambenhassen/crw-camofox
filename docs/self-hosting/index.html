@@ -191,7 +191,7 @@ crw search "renewable energy trends 2024" --json --fields title,url,snippet --li
       <code>npx crw-mcp</code> ·
       <code>brew install us/crw/crw</code> ·
       <code>curl -fsSL https://raw.githubusercontent.com/us/crw/main/install.sh | sh</code> ·
-      <code>docker run -p 3000:3000 ghcr.io/us/crw:latest</code>
+      <code>docker run -p 3000:3000 ghcr.io/adambenhassen/crw-camofox:latest</code>
     </p>
 
     <h2>Resources</h2>
@@ -286,7 +286,7 @@ crw search "renewable energy trends 2024" --json --fields title,url,snippet --li
 <p>Use self-hosting when you want CRW running inside your own infrastructure. The hosted API is still the fastest first-run path; self-hosting is the better fit when network control, auth, and deployment ownership matter more than zero-setup speed.</p>
 <h2 id="quick-start">Quick Start</h2>
 <p>The shortest self-hosted path is Docker:</p>
-<pre><code class="language-bash">docker run -p 3000:3000 ghcr.io/us/crw
+<pre><code class="language-bash">docker run -p 3000:3000 ghcr.io/adambenhassen/crw-camofox
 </code></pre>
 <p>Then make a local request:</p>
 <pre><code class="language-bash">curl -X POST http://localhost:3000/v1/scrape \
@@ -296,7 +296,7 @@ crw search "renewable energy trends 2024" --json --fields title,url,snippet --li
 <h2 id="what-you-get">What You Get</h2>
 <ul>
 <li>the same core self-hosted routes: <code>scrape</code>, <code>crawl</code>, <code>map</code>, <code>mcp</code>, <code>health</code></li>
-<li><code>search</code> too, when you run the Docker stack — it boots a SearXNG sidecar so <code>/v1/search</code> and the <code>crw_search</code> MCP tool work out of the box (see <a href="/docker">Docker → Search (SearXNG)</a>)</li>
+<li><code>search</code> too, when you run the Docker stack — it boots the Camofox (Firefox) browser so <code>/v1/search</code> (Camofox-driven Google) and the <code>crw_search</code> MCP tool work out of the box; SearXNG is an opt-in alternative (see <a href="/docker">Docker → Search</a>)</li>
 <li>optional auth with Bearer tokens</li>
 <li>optional browser-backed rendering</li>
 <li>your own reverse proxy, logging, rate limits, and deployment choices</li>

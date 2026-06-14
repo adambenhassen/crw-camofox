@@ -4,7 +4,7 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>Search — CRW Docs</title>
-  <meta name="description" content="Search the web first, then optionally scrape the results you care about. Works out of the box on self-hosted CRW via the bundled SearXNG sidecar — no third-party API key needed. Free, self-hostable al">
+  <meta name="description" content="Search the web first, then optionally scrape the results you care about. Works out of the box on self-hosted CRW via the Camofox (Firefox) browser tier driving Google — no third-party API key needed. ">
   <meta name="keywords" content="web scraper, web crawler, firecrawl alternative, crawl4ai alternative, self-hosted scraper, rust web scraper, mcp server, ai web scraping, rag pipeline, llm extraction, open source crawler, headless browser scraper">
   <link rel="canonical" href="https://docs.fastcrw.com/search">
   <link rel="icon" href="/favicon.png?v=2" type="image/png">
@@ -15,13 +15,13 @@
   <meta property="og:type" content="website">
   <meta property="og:url" content="https://docs.fastcrw.com/search">
   <meta property="og:title" content="Search — CRW | Web Scraper in Rust">
-  <meta property="og:description" content="Search the web first, then optionally scrape the results you care about. Works out of the box on self-hosted CRW via the bundled SearXNG sidecar — no third-party API key needed. Free, self-hostable al">
+  <meta property="og:description" content="Search the web first, then optionally scrape the results you care about. Works out of the box on self-hosted CRW via the Camofox (Firefox) browser tier driving Google — no third-party API key needed. ">
   <meta property="og:site_name" content="CRW">
 
   <!-- Twitter Card -->
   <meta name="twitter:card" content="summary">
   <meta name="twitter:title" content="Search — CRW Docs">
-  <meta name="twitter:description" content="Search the web first, then optionally scrape the results you care about. Works out of the box on self-hosted CRW via the bundled SearXNG sidecar — no third-party API key needed. Free, self-hostable al">
+  <meta name="twitter:description" content="Search the web first, then optionally scrape the results you care about. Works out of the box on self-hosted CRW via the Camofox (Firefox) browser tier driving Google — no third-party API key needed. ">
 
   <!-- Structured Data (JSON-LD) -->
   <script type="application/ld+json">
@@ -191,7 +191,7 @@ crw search "renewable energy trends 2024" --json --fields title,url,snippet --li
       <code>npx crw-mcp</code> ·
       <code>brew install us/crw/crw</code> ·
       <code>curl -fsSL https://raw.githubusercontent.com/us/crw/main/install.sh | sh</code> ·
-      <code>docker run -p 3000:3000 ghcr.io/us/crw:latest</code>
+      <code>docker run -p 3000:3000 ghcr.io/adambenhassen/crw-camofox:latest</code>
     </p>
 
     <h2>Resources</h2>
@@ -285,10 +285,10 @@ crw search "renewable energy trends 2024" --json --fields title,url,snippet --li
       <article id="article" role="main"><div class="page-intro">
   <div class="page-kicker">Core Endpoint</div>
   <h1 id="search">Search</h1>
-  <p class="page-subtitle">Search the web first, then optionally scrape the results you care about. Works out of the box on self-hosted CRW via the bundled SearXNG sidecar — no third-party API key needed. Free, self-hostable alternative to Tavily / Serper / Brave Search.</p>
+  <p class="page-subtitle">Search the web first, then optionally scrape the results you care about. Works out of the box on self-hosted CRW via the Camofox (Firefox) browser tier driving Google — no third-party API key needed. SearXNG remains available as an opt-in backend. Free, self-hostable alternative to Tavily / Serper / Brave Search.</p>
   <div class="page-capabilities">
     <div class="page-capability"><strong>Best for:</strong> unknown URLs</div>
-    <div class="page-capability"><strong>Self-hosted:</strong> bundled SearXNG sidecar</div>
+    <div class="page-capability"><strong>Self-hosted:</strong> Camofox-driven Google (SearXNG opt-in)</div>
     <div class="page-capability"><strong>Hosted:</strong> fastcrw.com (managed)</div>
     <div class="page-capability"><strong>Start with:</strong> search only, then add scraping</div>
   </div>
@@ -305,7 +305,7 @@ crw search "renewable energy trends 2024" --json --fields title,url,snippet --li
     <a class="page-btn secondary" href="https://fastcrw.com/register" target="_blank" rel="noopener">Get API Key</a>
   </div>
 </div><p>:::note
-<strong>Self-hosted users</strong>: <code>docker compose up</code> boots a SearXNG sidecar automatically (reachable inside the Compose network as <code>searxng:8080</code>). <code>/v1/search</code> is live on <code>http://localhost:3000</code> with no extra setup. To point at an existing SearXNG instance instead, set <code>CRW_SEARCH__SEARXNG_URL=http://your-host:8080</code> and remove the <code>searxng</code> service from your compose file. To disable search entirely, set <code>[search].enabled = false</code> — the route returns a clear <code>search_disabled</code> error (HTTP 503). See the <a href="/docker">Docker → Search (SearXNG)</a> section for the full setup, the <code>SEARXNG_BASE_URL</code> vs <code>searxng_url</code> distinction, and cold-start timing.
+<strong>Self-hosted users</strong>: <code>docker compose up</code> boots the <code>camofox</code> service (the Camoufox/Firefox browser, reachable inside the Compose network as <code>camofox:9377</code>), and <code>/v1/search</code> drives Google through it with no extra setup. To use SearXNG instead, start the opt-in profile (<code>docker compose --profile searxng up</code>) and set <code>searxng_url</code> (or <code>CRW_SEARCH__SEARXNG_URL=http://your-host:8080</code>) — Camofox takes precedence when both are configured. To disable search entirely, set <code>[search].enabled = false</code> — the route returns a clear <code>search_disabled</code> error (HTTP 503). See the <a href="/docker">Docker → Search</a> section for the full setup.
 :::</p>
 <h2 id="searching-the-web-with-crw">Searching the web with CRW</h2>
 <h3 id="v1search">/v1/search</h3>
@@ -436,6 +436,12 @@ under the SearXNG-native name. Pick whichever; both are emitted.</p>
 <td>string[]</td>
 <td>--</td>
 <td>Curated filters (<code>&quot;github&quot;</code>, <code>&quot;research&quot;</code>, <code>&quot;pdf&quot;</code>) <strong>plus</strong> any native SearXNG category (<code>&quot;science&quot;</code>, <code>&quot;it&quot;</code>, <code>&quot;news&quot;</code>, <code>&quot;files&quot;</code>, …) passed straight through. Max 5 entries. See <a href="#curated-vs-passthrough-categories">Curated vs. passthrough categories</a></td>
+</tr>
+<tr>
+<td><code>engines</code></td>
+<td>string[]</td>
+<td><code>[&quot;google&quot;]</code></td>
+<td><strong>Camofox backend only.</strong> Which engine(s) to search; results from multiple engines are merged and deduped by URL (a URL found by several engines ranks higher). Max 4. Valid values: <code>google</code>, <code>bing</code>, <code>duckduckgo</code>, <code>wikipedia</code>, <code>youtube</code>, <code>reddit</code>, <code>amazon</code>, <code>github</code>. Browser engines (everything except <code>github</code>) run <strong>sequentially</strong> on the warm tab, so N engines ≈ N× latency; <code>github</code> uses the GitHub REST Search API (set <code>[search].github_token</code> to lift its rate limit). Ignored by the SearXNG backend.</td>
 </tr>
 <tr>
 <td><code>scrapeOptions</code></td>

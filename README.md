@@ -133,7 +133,7 @@ curl -X POST https://api.fastcrw.com/v1/crawl \
 
 ```bash
 # Self-host (no auth, localhost) — single docker command
-docker run -p 3000:3000 ghcr.io/us/crw
+docker run -p 3000:3000 ghcr.io/adambenhassen/crw-camofox
 curl http://localhost:3000/v1/scrape \
   -H "Content-Type: application/json" \
   -d '{"url":"https://example.com"}'
@@ -204,7 +204,7 @@ See the upstream [camofox-mcp docs](https://github.com/redf0x1/camofox-mcp).
 | | **Self-host (free)** | **Managed — `api.fastcrw.com`** |
 |---|---|---|
 | Best when | You want full data residency, AGPL is fine, you can run your own proxy strategy, latency to your infra matters more than ours. | You want zero infra, a global proxy network, a dashboard, usage metering, and AGPL carve-out for closed-source product code. |
-| Install | `docker run -p 3000:3000 ghcr.io/us/crw` or `cargo install crw-server`. | Sign up at [fastcrw.com](https://fastcrw.com) — 500 free credits, no card. |
+| Install | `docker run -p 3000:3000 ghcr.io/adambenhassen/crw-camofox` or `cargo install crw-server`. | Sign up at [fastcrw.com](https://fastcrw.com) — 500 free credits, no card. |
 | Search | Camofox-driven Google by default (`docker compose up`); SearXNG opt-in (`--profile searxng`). | Managed search backend. |
 | Proxy rotation | Bring your own pool via env vars. | Built-in. |
 | Cost | $0 + your hosting bill. | From $13/mo; pricing on [fastcrw.com/pricing](https://fastcrw.com/pricing). |
@@ -224,7 +224,7 @@ npx crw-mcp                              # zero install (npm)
 pip install crw                          # Python SDK (auto-downloads binary)
 brew install us/crw/crw-mcp              # Homebrew
 cargo install crw-mcp                    # Cargo
-docker run -i ghcr.io/us/crw crw-mcp     # Docker
+docker run -i ghcr.io/adambenhassen/crw-camofox crw-mcp     # Docker
 ```
 
 ### CLI (`crw`) — scrape URLs from your terminal
@@ -256,7 +256,7 @@ brew install us/crw/crw-server
 curl -fsSL https://raw.githubusercontent.com/us/crw/main/install.sh | CRW_BINARY=crw-server sh
 
 # Docker:
-docker run -p 3000:3000 ghcr.io/us/crw
+docker run -p 3000:3000 ghcr.io/adambenhassen/crw-camofox
 ```
 
 Docker Compose ships with `lightpanda` + `camofox` by default (ladder:

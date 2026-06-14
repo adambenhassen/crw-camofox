@@ -70,7 +70,7 @@ Binaries are placed in `target/release/`.
 
 ```bash
 # Pre-built image
-docker run -p 3000:3000 ghcr.io/us/crw:latest
+docker run -p 3000:3000 ghcr.io/adambenhassen/crw-camofox:latest
 
 # With docker-compose (includes LightPanda sidecar)
 docker compose up

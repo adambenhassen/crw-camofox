@@ -191,7 +191,7 @@ crw search "renewable energy trends 2024" --json --fields title,url,snippet --li
       <code>npx crw-mcp</code> ·
       <code>brew install us/crw/crw</code> ·
       <code>curl -fsSL https://raw.githubusercontent.com/us/crw/main/install.sh | sh</code> ·
-      <code>docker run -p 3000:3000 ghcr.io/us/crw:latest</code>
+      <code>docker run -p 3000:3000 ghcr.io/adambenhassen/crw-camofox:latest</code>
     </p>
 
     <h2>Resources</h2>
@@ -299,7 +299,7 @@ request_timeout_secs = 120
 rate_limit_rps = 10              # Max requests/second (global). 0 = unlimited.
 
 [renderer]
-mode = &quot;auto&quot;               # auto | lightpanda | playwright | chrome | none
+mode = &quot;auto&quot;               # auto | lightpanda | playwright | chrome | camofox | none
 page_timeout_ms = 30000
 pool_size = 4
 # render_js_default = true  # alias: force_js = true
@@ -324,6 +324,25 @@ ws_url = &quot;ws://127.0.0.1:9222/&quot;
 
 # [renderer.chrome_proxy]
 # ws_url = &quot;ws://chrome-proxy:9222&quot;
+
+# Camofox (camofox-browser REST) — the Firefox/Camoufox anti-detect tier. Not a
+# CDP endpoint: base_url is the camofox-browser HTTP server. In `auto` mode it
+# takes Chrome&#39;s ladder slot (after LightPanda). When set, it also backs
+# /v1/search (browser-driven Google) in preference to SearXNG.
+# [renderer.camofox]
+# base_url = &quot;http://127.0.0.1:9377&quot;
+# api_key = &quot;...&quot;                 # only if the camofox server runs with auth
+
+[search]
+enabled = true
+timeout_ms = 15000
+default_limit = 5
+max_limit = 20
+# searxng_url = &quot;http://localhost:8080&quot;   # opt-in backend; Camofox takes precedence when both are set
+# Personal-access token for the `github` search engine (Camofox backend). That
+# engine uses the GitHub REST Search API; a token lifts the limit to 30 req/min.
+# Prefer the CRW_SEARCH__GITHUB_TOKEN env var over committing a token here.
+# github_token = &quot;ghp_...&quot;
 
 [crawler]
 max_concurrency = 10
@@ -423,6 +442,22 @@ stealth = true
 <td><code>CRW_RENDERER__PROXY_DEFAULT_COUNTRY</code></td>
 </tr>
 <tr>
+<td><code>renderer.camofox.base_url</code></td>
+<td><code>CRW_RENDERER__CAMOFOX__BASE_URL</code></td>
+</tr>
+<tr>
+<td><code>renderer.camofox.api_key</code></td>
+<td><code>CRW_RENDERER__CAMOFOX__API_KEY</code></td>
+</tr>
+<tr>
+<td><code>search.searxng_url</code></td>
+<td><code>CRW_SEARCH__SEARXNG_URL</code></td>
+</tr>
+<tr>
+<td><code>search.github_token</code></td>
+<td><code>CRW_SEARCH__GITHUB_TOKEN</code></td>
+</tr>
+<tr>
 <td><code>extraction.llm.api_key</code></td>
 <td><code>CRW_EXTRACTION__LLM__API_KEY</code></td>
 </tr>
@@ -480,6 +515,10 @@ stealth = true
 <td>Always use Chrome via CDP</td>
 </tr>
 <tr>
+<td><code>camofox</code></td>
+<td>Always use Camofox (camofox-browser REST — the Firefox/Camoufox anti-detect tier)</td>
+</tr>
+<tr>
 <td><code>none</code></td>
 <td>HTTP only, no JS rendering</td>
 </tr>
@@ -491,7 +530,7 @@ stealth = true
   -e CRW_SERVER__PORT=3000 \
   -e CRW_RENDERER__MODE=lightpanda \
   -e CRW_EXTRACTION__LLM__API_KEY=sk-... \
-  ghcr.io/us/crw:latest
+  ghcr.io/adambenhassen/crw-camofox:latest
 </code></pre>
 </article>
     </main>

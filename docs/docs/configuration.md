@@ -20,7 +20,7 @@ request_timeout_secs = 120
 rate_limit_rps = 10              # Max requests/second (global). 0 = unlimited.
 
 [renderer]
-mode = "auto"               # auto | lightpanda | playwright | chrome | none
+mode = "auto"               # auto | lightpanda | playwright | chrome | camofox | none
 page_timeout_ms = 30000
 pool_size = 4
 # render_js_default = true  # alias: force_js = true
@@ -45,6 +45,25 @@ ws_url = "ws://127.0.0.1:9222/"
 
 # [renderer.chrome_proxy]
 # ws_url = "ws://chrome-proxy:9222"
+
+# Camofox (camofox-browser REST) — the Firefox/Camoufox anti-detect tier. Not a
+# CDP endpoint: base_url is the camofox-browser HTTP server. In `auto` mode it
+# takes Chrome's ladder slot (after LightPanda). When set, it also backs
+# /v1/search (browser-driven Google) in preference to SearXNG.
+# [renderer.camofox]
+# base_url = "http://127.0.0.1:9377"
+# api_key = "..."                 # only if the camofox server runs with auth
+
+[search]
+enabled = true
+timeout_ms = 15000
+default_limit = 5
+max_limit = 20
+# searxng_url = "http://localhost:8080"   # opt-in backend; Camofox takes precedence when both are set
+# Personal-access token for the `github` search engine (Camofox backend). That
+# engine uses the GitHub REST Search API; a token lifts the limit to 30 req/min.
+# Prefer the CRW_SEARCH__GITHUB_TOKEN env var over committing a token here.
+# github_token = "ghp_..."
 
 [crawler]
 max_concurrency = 10
@@ -109,6 +128,10 @@ Use the `CRW_` prefix with `__` as a nesting separator:
 | `renderer.proxy_base_user` | `CRW_RENDERER__PROXY_BASE_USER` |
 | `renderer.proxy_base_pass` | `CRW_RENDERER__PROXY_BASE_PASS` |
 | `renderer.proxy_default_country` | `CRW_RENDERER__PROXY_DEFAULT_COUNTRY` |
+| `renderer.camofox.base_url` | `CRW_RENDERER__CAMOFOX__BASE_URL` |
+| `renderer.camofox.api_key` | `CRW_RENDERER__CAMOFOX__API_KEY` |
+| `search.searxng_url` | `CRW_SEARCH__SEARXNG_URL` |
+| `search.github_token` | `CRW_SEARCH__GITHUB_TOKEN` |
 | `extraction.llm.api_key` | `CRW_EXTRACTION__LLM__API_KEY` |
 | `extraction.llm.provider` | `CRW_EXTRACTION__LLM__PROVIDER` |
 | `extraction.llm.model` | `CRW_EXTRACTION__LLM__MODEL` |
@@ -126,6 +149,7 @@ Use the `CRW_` prefix with `__` as a nesting separator:
 | `lightpanda` | Always use LightPanda via CDP |
 | `playwright` | Always use Playwright via CDP |
 | `chrome` | Always use Chrome via CDP |
+| `camofox` | Always use Camofox (camofox-browser REST — the Firefox/Camoufox anti-detect tier) |
 | `none` | HTTP only, no JS rendering |
 
 The server `mode` controls **availability** of renderers in the pool. Per-request `renderer` selects from what's available — see [JS rendering](#js-rendering). A request that pins an unavailable renderer returns HTTP 400 with the configured pool listed.
@@ -139,5 +163,5 @@ docker run -p 3000:3000 \
   -e CRW_SERVER__PORT=3000 \
   -e CRW_RENDERER__MODE=lightpanda \
   -e CRW_EXTRACTION__LLM__API_KEY=sk-... \
-  ghcr.io/us/crw:latest
+  ghcr.io/adambenhassen/crw-camofox:latest
 ```

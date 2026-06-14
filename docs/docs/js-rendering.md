@@ -228,7 +228,7 @@ The included `docker-compose.yml` runs crw with a LightPanda sidecar:
 ```yaml
 services:
   crw:
-    image: ghcr.io/us/crw:latest
+    image: ghcr.io/adambenhassen/crw-camofox:latest
     ports:
       - "3000:3000"
     environment:

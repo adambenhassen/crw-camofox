@@ -191,7 +191,7 @@ crw search "renewable energy trends 2024" --json --fields title,url,snippet --li
       <code>npx crw-mcp</code> ·
       <code>brew install us/crw/crw</code> ·
       <code>curl -fsSL https://raw.githubusercontent.com/us/crw/main/install.sh | sh</code> ·
-      <code>docker run -p 3000:3000 ghcr.io/us/crw:latest</code>
+      <code>docker run -p 3000:3000 ghcr.io/adambenhassen/crw-camofox:latest</code>
     </p>
 
     <h2>Resources</h2>
@@ -308,7 +308,7 @@ crw search "renewable energy trends 2024" --json --fields title,url,snippet --li
 <td><strong>Proxy / Server</strong></td>
 <td><code>--api-url</code> / <code>CRW_API_URL</code> set</td>
 <td>scrape, crawl, map + <strong>search</strong></td>
-<td>Forwards tool calls to a remote CRW server — the <a href="https://fastcrw.com">fastcrw.com</a> cloud <strong>or your own self-hosted server</strong>. <code>crw_search</code> works whenever that server has SearXNG configured (the Docker stack enables it by default).</td>
+<td>Forwards tool calls to a remote CRW server — the <a href="https://fastcrw.com">fastcrw.com</a> cloud <strong>or your own self-hosted server</strong>. <code>crw_search</code> works whenever that server has a search backend configured (the Docker stack enables Camofox-driven search by default; SearXNG is opt-in).</td>
 </tr>
 </tbody></table>
 <h2 id="where-to-use-what">Where to use what</h2>
@@ -316,6 +316,42 @@ crw search "renewable energy trends 2024" --json --fields title,url,snippet --li
 <li>Use this page for the MCP model, tool list, and transport choices.</li>
 <li>Use <a href="/mcp-clients">MCP Client Setup</a> for Claude Code, Codex, Cursor, Windsurf, Cline, Continue, and similar host-specific config snippets.</li>
 </ul>
+<h2 id="fetching-vs-interacting-which-mcp-server">Fetching vs. interacting — which MCP server</h2>
+<p>CRW ships separate MCP servers for two different jobs:</p>
+<table>
+<thead>
+<tr>
+<th>Server</th>
+<th>For</th>
+<th>Tools</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><strong><code>crw-mcp</code></strong></td>
+<td>One-shot scraping / search</td>
+<td><code>scrape</code>, <code>crawl</code>, <code>map</code>, <code>search</code></td>
+</tr>
+<tr>
+<td><strong><a href="https://github.com/redf0x1/camofox-mcp"><code>camofox-mcp</code></a></strong> (upstream)</td>
+<td><em>Interactive</em> browser automation on Camofox (recommended)</td>
+<td>47 tools — navigate, snapshot, click, type, …</td>
+</tr>
+<tr>
+<td><strong><code>crw-browse</code></strong></td>
+<td>Interactive automation over CDP (Chrome-family; legacy)</td>
+<td><code>goto</code>, <code>tree</code>, …</td>
+</tr>
+</tbody></table>
+<p>Use <code>crw-mcp</code> to <em>fetch</em> content. Use an interactive server when the agent must
+<em>operate</em> a site across steps — log in, fill a multi-step form, click through a
+flow, then read the result. The upstream
+<strong><a href="https://github.com/redf0x1/camofox-mcp"><code>camofox-mcp</code></a></strong> server drives a real
+<a href="https://github.com/redf0x1/camofox-browser">Camofox</a> (Camoufox/Firefox) browser
+and is the recommended interactive server now that Camofox is CRW&#39;s default;
+<strong><code>crw-browse</code></strong> is the original CDP-based equivalent for Chrome/Lightpanda.
+The rest of this page covers <code>crw-mcp</code>; the interactive servers have their own
+sections below (<a href="#interactive-browser-automation-camofox">Camofox</a>,
+<a href="#browser-automation-crw-browse">CDP</a>).</p>
 <h2 id="when-mcp-helps">When MCP Helps</h2>
 <p>MCP is useful when the agent host already expects tools to be registered through a standard interface. That reduces one layer of custom glue code between the agent and your scraping service.</p>
 <p>Typical fits:</p>
@@ -340,7 +376,7 @@ pip install crw
 cargo install crw-mcp
 
 # Docker:
-docker run -i ghcr.io/us/crw crw-mcp
+docker run -i ghcr.io/adambenhassen/crw-camofox crw-mcp
 </code></pre>
 <p>Add to your MCP client:</p>
 <pre><code class="language-bash"># Claude Code:
@@ -493,7 +529,7 @@ claude mcp add \
 <td><code>crw_search</code></td>
 <td>Search the web → titles, URLs, descriptions</td>
 <td><code>POST /v1/search</code></td>
-<td><strong>Server with SearXNG</strong> (cloud or self-hosted)</td>
+<td><strong>Server with a search backend</strong> — Camofox (default) or SearXNG (cloud or self-hosted)</td>
 </tr>
 </tbody></table>
 <h2 id="browser-automation-crw-browse">Browser Automation (<code>crw-browse</code>)</h2>
@@ -657,7 +693,7 @@ codex mcp add crw -- npx crw-mcp
 </tr>
 </tbody></table>
 <h3 id="crw_search-server-backed">crw_search (server-backed)</h3>
-<p>Available when connected to a CRW <strong>server</strong> that has SearXNG configured — the <a href="https://fastcrw.com">fastcrw.com</a> cloud, or your own self-hosted server (the Docker stack enables it by default; see <a href="/docker">Docker → Search (SearXNG)</a>). Point the MCP at it with <code>--api-url</code> / <code>CRW_API_URL</code>. It is <em>not</em> available from the standalone embedded MCP binary, which has no search backend.</p>
+<p>Available when connected to a CRW <strong>server</strong> that has a search backend configured — the <a href="https://fastcrw.com">fastcrw.com</a> cloud, or your own self-hosted server (the Docker stack enables Camofox-driven search by default, with SearXNG opt-in; see <a href="/docker">Docker → Search</a>). Point the MCP at it with <code>--api-url</code> / <code>CRW_API_URL</code>. It is <em>not</em> available from the standalone embedded MCP binary, which has no search backend.</p>
 <table>
 <thead>
 <tr>
@@ -690,6 +726,12 @@ codex mcp add crw -- npx crw-mcp
 <td>string</td>
 <td>no</td>
 <td>Country code (e.g. <code>&quot;us&quot;</code>, <code>&quot;tr&quot;</code>)</td>
+</tr>
+<tr>
+<td><code>engines</code></td>
+<td>string[]</td>
+<td>no</td>
+<td>Camofox backend only. Engine(s) to query, default <code>[&quot;google&quot;]</code>, max 4. Valid: <code>google</code>, <code>bing</code>, <code>duckduckgo</code>, <code>wikipedia</code>, <code>youtube</code>, <code>reddit</code>, <code>amazon</code>, <code>github</code> (e.g. <code>[&quot;google&quot;,&quot;bing&quot;,&quot;duckduckgo&quot;]</code>). Results are merged and deduped. Ignored by the SearXNG backend.</td>
 </tr>
 <tr>
 <td><code>scrapeOptions</code></td>
@@ -767,6 +809,40 @@ codex mcp add crw -- npx crw-mcp
 <li>Mixing operational secrets and agent prompts in the same configuration surface.</li>
 <li>Assuming MCP replaces deployment or auth decisions; it only standardizes the tool interface.</li>
 </ul>
+<h2 id="interactive-browser-automation-camofox">Interactive browser automation (Camofox)</h2>
+<p>For <strong>stateful, interactive</strong> browser control the Camofox stack uses the upstream
+<strong><a href="https://github.com/redf0x1/camofox-mcp"><code>camofox-mcp</code></a></strong> server. Where
+<code>crw_scrape</code> fetches one page, this drives a live
+<a href="https://github.com/redf0x1/camofox-browser">Camofox</a> (Camoufox/Firefox) session
+across multiple steps — the agent navigates, reads the page, acts, and re-checks
+on one persistent tab. It bridges MCP clients to the camofox-browser REST API and
+does <strong>not</strong> embed a browser, so point it at a running camofox-browser. We run it
+unmodified rather than maintaining our own bridge.</p>
+<h3 id="in-the-docker-stack-recommended">In the Docker stack (recommended)</h3>
+<p><code>docker compose up</code> starts it as the <code>camofox-mcp</code> service, already wired to the
+<code>camofox</code> browser and serving Streamable HTTP. Agents on the compose network
+reach it at <code>http://camofox-mcp:8080/mcp</code>. The port is not published to the host
+by default; to expose it, uncomment the host mapping and set
+<code>CAMOFOX_HTTP_API_KEY</code> (see <code>docker-compose.yml</code>).</p>
+<h3 id="standalone">Standalone</h3>
+<pre><code class="language-bash"># stdio (Claude Desktop / Cursor / Cline) — defaults CAMOFOX_URL to :9377:
+npx camofox-mcp@latest
+
+# HTTP:
+docker run -p 9378:8080 \
+  -e CAMOFOX_TRANSPORT=http -e CAMOFOX_HTTP_HOST=0.0.0.0 \
+  -e CAMOFOX_URL=http://host.docker.internal:9377 \
+  ghcr.io/redf0x1/camofox-mcp:v1.14.4 node dist/http.js
+</code></pre>
+<p>stdio MCP config:</p>
+<pre><code class="language-json">{
+  &quot;mcpServers&quot;: {
+    &quot;camofox&quot;: { &quot;command&quot;: &quot;npx&quot;, &quot;args&quot;: [&quot;camofox-mcp@latest&quot;] }
+  }
+}
+</code></pre>
+<p>See the <a href="https://github.com/redf0x1/camofox-mcp">upstream README</a> for the full
+47-tool list, environment variables, and auth options.</p>
 </article>
     </main>
 

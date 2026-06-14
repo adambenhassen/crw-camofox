@@ -191,7 +191,7 @@ crw search "renewable energy trends 2024" --json --fields title,url,snippet --li
       <code>npx crw-mcp</code> ·
       <code>brew install us/crw/crw</code> ·
       <code>curl -fsSL https://raw.githubusercontent.com/us/crw/main/install.sh | sh</code> ·
-      <code>docker run -p 3000:3000 ghcr.io/us/crw:latest</code>
+      <code>docker run -p 3000:3000 ghcr.io/adambenhassen/crw-camofox:latest</code>
     </p>
 
     <h2>Resources</h2>
@@ -285,8 +285,8 @@ crw search "renewable energy trends 2024" --json --fields title,url,snippet --li
       <article id="article" role="main"><h1 id="docker">Docker</h1>
 <p>Run crw with Docker Compose for the easiest setup with JS rendering included.</p>
 <h2 id="pre-built-image">Pre-built Image</h2>
-<pre><code class="language-bash">docker pull ghcr.io/us/crw:latest
-docker run -p 3000:3000 ghcr.io/us/crw:latest
+<pre><code class="language-bash">docker pull ghcr.io/adambenhassen/crw-camofox:latest
+docker run -p 3000:3000 ghcr.io/adambenhassen/crw-camofox:latest
 </code></pre>
 <p>Available tags: <code>latest</code>, <code>0.0.1</code>, <code>0.0</code></p>
 <h2 id="docker-compose">Docker Compose</h2>
@@ -320,22 +320,22 @@ is small.</p>
 <td>API server (loads <code>config.docker.toml</code>)</td>
 </tr>
 <tr>
-<td><strong>searxng</strong></td>
-<td>8080</td>
-<td>✅</td>
-<td>SearXNG meta-search backend for <code>/v1/search</code></td>
-</tr>
-<tr>
 <td><strong>lightpanda</strong></td>
 <td>9222</td>
 <td>✅</td>
 <td>Lightweight headless browser for JS rendering</td>
 </tr>
 <tr>
+<td><strong>camofox</strong></td>
+<td>9377</td>
+<td>✅</td>
+<td><a href="https://github.com/redf0x1/camofox-browser">Camofox</a> (Camoufox/Firefox) — heavy/stealth JS tier + <code>/v1/search</code> backend</td>
+</tr>
+<tr>
 <td><strong>chrome</strong></td>
 <td>9222</td>
 <td><code>--profile heavy</code></td>
-<td>Full Chromium fallback for complex SPAs</td>
+<td>Full Chromium fallback for complex SPAs (CDP)</td>
 </tr>
 <tr>
 <td><strong>chrome-stealth</strong></td>
@@ -343,18 +343,34 @@ is small.</p>
 <td><code>--profile stealth</code></td>
 <td>Anti-fingerprint Chromium (browserless, SSPL-licensed)</td>
 </tr>
+<tr>
+<td><strong>searxng</strong></td>
+<td>8080</td>
+<td><code>--profile searxng</code></td>
+<td>SearXNG meta-search backend for <code>/v1/search</code> (opt-in alternative to Camofox)</td>
+</tr>
 </tbody></table>
 <p>The <code>crw</code> service reads its configuration from the mounted <code>config.docker.toml</code> (via
-<code>CRW_CONFIG=config.docker</code>), which already points each renderer and the search backend at the matching
-service name on Compose&#39;s default bridge network (<code>lightpanda:9222</code>, <code>chrome:9222</code>, <code>searxng:8080</code>). You
+<code>CRW_CONFIG=config.docker</code>), which already points each renderer at the matching
+service name on Compose&#39;s default bridge network (<code>lightpanda:9222</code>, <code>camofox:9377</code>). You
 don&#39;t need to wire renderer URLs through environment variables — they&#39;re in the config file.</p>
-<p>The optional <code>chrome</code> / <code>chrome-stealth</code> tiers are opt-in so small hosts skip the ~500 MB Chromium image:</p>
-<pre><code class="language-bash">docker compose --profile heavy up -d      # add the vanilla Chromium fallback
+<p>The renderer ladder is <code>HTTP → LightPanda → Camofox</code>. The optional <code>chrome</code> / <code>chrome-stealth</code>
+tiers are opt-in so small hosts skip the ~500 MB Chromium image:</p>
+<pre><code class="language-bash">docker compose --profile heavy up -d      # add the vanilla Chromium fallback (CDP)
 docker compose --profile stealth up -d    # add the anti-fingerprint tier (review the SSPL license first)
 </code></pre>
-<h2 id="search-searxng">Search (SearXNG)</h2>
-<p><code>/v1/search</code> (and the <code>crw_search</code> MCP tool) is backed by the bundled <strong>searxng</strong> service, reachable inside
-the Compose network as <code>searxng:8080</code>. This is configured by default in <code>config.docker.toml</code>:</p>
+<h2 id="search">Search</h2>
+<p><code>/v1/search</code> (and the <code>crw_search</code> MCP tool) is backed by the bundled <strong>camofox</strong> service by default —
+it drives Google through the Camoufox (Firefox) anti-detect browser, reachable inside the Compose network
+as <code>camofox:9377</code>. This is configured in <code>config.docker.toml</code>:</p>
+<pre><code class="language-toml">[renderer.camofox]
+base_url = &quot;http://camofox:9377&quot;
+</code></pre>
+<h3 id="using-searxng-instead-opt-in">Using SearXNG instead (opt-in)</h3>
+<p>Start the SearXNG profile and set <code>searxng_url</code>. Camofox takes precedence when both are configured, so
+also clear <code>[renderer.camofox]</code> if you want SearXNG to serve search:</p>
+<pre><code class="language-bash">docker compose --profile searxng up -d
+</code></pre>
 <pre><code class="language-toml">[search]
 searxng_url = &quot;http://searxng:8080&quot;
 </code></pre>
