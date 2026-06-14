@@ -991,10 +991,12 @@ impl SearchSource {
 /// rejected at deserialize. The SearXNG backend ignores this enum (it has its
 /// own engine routing).
 ///
-/// The set is deliberately small: these four are the engines verified to return
-/// clean, structured results through `camofox-browser` (Google via its search
-/// macro; Bing/DuckDuckGo/GitHub by navigating their search URL directly). How
-/// each is driven and scraped lives in `crw-search`'s camofox client, not here.
+/// The set is deliberately small: these are the engines verified to return
+/// clean, structured results through `camofox-browser` — general web
+/// (Google via its search macro; Bing/DuckDuckGo by navigating their search URL
+/// directly), GitHub (via its REST Search API), and the Wikipedia/YouTube
+/// verticals (by search URL). How each is driven and scraped lives in
+/// `crw-search`'s camofox client, not here.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum SearchEngine {
@@ -1004,6 +1006,8 @@ pub enum SearchEngine {
     #[serde(rename = "duckduckgo")]
     DuckDuckGo,
     Github,
+    Wikipedia,
+    Youtube,
 }
 
 impl SearchEngine {
@@ -1015,6 +1019,8 @@ impl SearchEngine {
             SearchEngine::Bing => "bing",
             SearchEngine::DuckDuckGo => "duckduckgo",
             SearchEngine::Github => "github",
+            SearchEngine::Wikipedia => "wikipedia",
+            SearchEngine::Youtube => "youtube",
         }
     }
 }

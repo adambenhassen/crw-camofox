@@ -68,6 +68,15 @@ const BING_SCRAPE_JS: &str = r#"JSON.stringify((function(){function unwrap(u){tr
 /// `div.result` / `a.result__a` fallbacks cover the lite/html layout.
 const DDG_SCRAPE_JS: &str = r#"JSON.stringify(Array.from(document.querySelectorAll('article[data-testid="result"], div.result')).map(function(el){var a=el.querySelector('h2 a[href], a.result__a[href]');var s=el.querySelector('[data-result="snippet"], .result__snippet');return a?{url:a.href,title:a.innerText,content:s?s.innerText:''}:null;}).filter(Boolean))"#;
 
+/// Wikipedia full-text search extractor. The `Special:Search` SERP lists hits
+/// as `.mw-search-result-heading a` (absolute article hrefs, no inline snippet).
+const WIKIPEDIA_SCRAPE_JS: &str = r#"JSON.stringify(Array.from(document.querySelectorAll('.mw-search-result-heading a')).map(function(a){var t=(a.innerText||'').trim();return (a.href&&t)?{url:a.href,title:t,content:''}:null;}).filter(Boolean))"#;
+
+/// YouTube search extractor. Each video result is a `ytd-video-renderer` whose
+/// `a#video-title` carries the watch URL and the full title in its `title`
+/// attribute (the inner text is lazy/empty until hover).
+const YOUTUBE_SCRAPE_JS: &str = r#"JSON.stringify(Array.from(document.querySelectorAll('ytd-video-renderer a#video-title')).map(function(a){var t=(a.getAttribute('title')||a.innerText||'').trim();return (a.href&&t)?{url:a.href,title:t,content:''}:null;}).filter(Boolean))"#;
+
 /// The extractor JS for a browser-driven engine. Each has dedicated selectors
 /// tuned against its live SERP — this is the single place to fix when a DOM
 /// drifts. GitHub is *not* browser-driven (it uses the REST Search API), so it
@@ -77,6 +86,8 @@ fn scrape_js(engine: SearchEngine) -> &'static str {
         SearchEngine::Google => GOOGLE_SCRAPE_JS,
         SearchEngine::Bing => BING_SCRAPE_JS,
         SearchEngine::DuckDuckGo => DDG_SCRAPE_JS,
+        SearchEngine::Wikipedia => WIKIPEDIA_SCRAPE_JS,
+        SearchEngine::Youtube => YOUTUBE_SCRAPE_JS,
         SearchEngine::Github => unreachable!("github uses the REST Search API, not the browser"),
     }
 }
@@ -98,6 +109,14 @@ fn navigate_body(engine: SearchEngine, query: &str) -> serde_json::Value {
         }
         SearchEngine::DuckDuckGo => {
             json!({ "userId": USER_ID, "url": format!("https://duckduckgo.com/?q={q}") })
+        }
+        SearchEngine::Wikipedia => {
+            // `fulltext=1` forces the search-results page; without it Wikipedia
+            // redirects an exact title match straight to the article.
+            json!({ "userId": USER_ID, "url": format!("https://en.wikipedia.org/wiki/Special:Search?search={q}&fulltext=1") })
+        }
+        SearchEngine::Youtube => {
+            json!({ "userId": USER_ID, "url": format!("https://www.youtube.com/results?search_query={q}") })
         }
         SearchEngine::Github => {
             unreachable!("github uses the REST Search API, not the browser")
@@ -493,6 +512,8 @@ mod extractor_tests {
         assert!(scrape_js(SearchEngine::Google).contains("div.g"));
         assert!(scrape_js(SearchEngine::Bing).contains("li.b_algo"));
         assert!(scrape_js(SearchEngine::DuckDuckGo).contains("article"));
+        assert!(scrape_js(SearchEngine::Wikipedia).contains("mw-search-result-heading"));
+        assert!(scrape_js(SearchEngine::Youtube).contains("ytd-video-renderer"));
     }
 
     #[test]
@@ -506,5 +527,12 @@ mod extractor_tests {
         assert_eq!(b["url"], "https://www.bing.com/search?q=rust+lang");
         let d = navigate_body(SearchEngine::DuckDuckGo, "rust lang");
         assert_eq!(d["url"], "https://duckduckgo.com/?q=rust+lang");
+        let w = navigate_body(SearchEngine::Wikipedia, "rust lang");
+        assert_eq!(
+            w["url"],
+            "https://en.wikipedia.org/wiki/Special:Search?search=rust+lang&fulltext=1"
+        );
+        let y = navigate_body(SearchEngine::Youtube, "rust lang");
+        assert_eq!(y["url"], "https://www.youtube.com/results?search_query=rust+lang");
     }
 }
