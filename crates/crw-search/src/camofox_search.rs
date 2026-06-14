@@ -26,6 +26,8 @@ use std::time::Duration;
 use serde::Deserialize;
 use serde_json::json;
 
+use crw_core::types::SearchEngine;
+
 use crate::client::{SearchError, SearxngResponse, SearxngResult};
 use crate::params::SearxngParams;
 
@@ -163,39 +165,62 @@ impl CamofoxSearchClient {
             })
     }
 
-    /// Run a Google search via Camofox and map the rows into a
+    /// Run the requested engines via Camofox and map the merged rows into a
     /// [`SearxngResponse`]. Typed [`SearchError`]s match the SearXNG client so
     /// the route layer's existing error mapping applies unchanged.
     ///
     /// Serializes on the warm-tab mutex (see [`Self::tab`]) so only one search
-    /// touches the browser at a time, reusing the one long-lived tab. If that
-    /// tab has gone stale, recreates it and retries the search exactly once.
+    /// touches the browser at a time, reusing the one long-lived tab. The
+    /// engines in `params.camofox_engines` are run sequentially on that tab
+    /// (the single-tab design dodges camofox's teardown race, so fan-out is
+    /// serial — N engines ≈ N× latency). A stale tab is recreated and the
+    /// engine retried once. An engine that still fails is skipped; results from
+    /// the engines that succeeded are merged and returned. Only when *every*
+    /// engine fails is the last error surfaced.
     pub async fn fetch(&self, params: &SearxngParams) -> Result<SearxngResponse, SearchError> {
         let mut tab = self.tab.lock().await;
+        let mut all: Vec<SearxngResult> = Vec::new();
+        let mut last_err: Option<SearchError> = None;
+        let mut any_ok = false;
 
-        match self.attempt(&mut tab, params).await {
-            Ok(resp) => Ok(resp),
-            Err(e) if is_stale_tab(&e) => {
-                // Warm tab/context died (idle eviction or camofox restart). Drop
-                // the dead id, let any in-flight relaunch settle, then recreate
-                // and retry once. A second failure is reported honestly.
-                *tab = None;
-                tokio::time::sleep(RETRY_BACKOFF).await;
-                self.attempt(&mut tab, params).await
+        for &engine in &params.camofox_engines {
+            let outcome = match self.attempt(&mut tab, engine, params).await {
+                Ok(rows) => Ok(rows),
+                Err(e) if is_stale_tab(&e) => {
+                    // Warm tab/context died (idle eviction or camofox restart).
+                    // Drop the dead id, let any in-flight relaunch settle, then
+                    // recreate and retry this engine once.
+                    *tab = None;
+                    tokio::time::sleep(RETRY_BACKOFF).await;
+                    self.attempt(&mut tab, engine, params).await
+                }
+                Err(e) => Err(e),
+            };
+            match outcome {
+                Ok(rows) => {
+                    any_ok = true;
+                    all.extend(rows);
+                }
+                Err(e) => last_err = Some(e),
             }
-            Err(e) => Err(e),
         }
+
+        if !any_ok {
+            return Err(last_err.unwrap_or(SearchError::Timeout));
+        }
+        Ok(merge_results(params.q.clone(), all))
     }
 
-    /// Ensure a warm tab exists, then run the search against it. Caller holds
-    /// the tab mutex, so this is the single in-flight search.
+    /// Ensure a warm tab exists, then run one engine's search against it. Caller
+    /// holds the tab mutex, so this is the single in-flight search.
     async fn attempt(
         &self,
         tab: &mut Option<String>,
+        engine: SearchEngine,
         params: &SearxngParams,
-    ) -> Result<SearxngResponse, SearchError> {
+    ) -> Result<Vec<SearxngResult>, SearchError> {
         let tab_id = self.ensure_tab(tab).await?;
-        self.run_search(&tab_id, params).await
+        self.run_search(&tab_id, engine, params).await
     }
 
     /// Return the warm tab id, creating one if we don't have it cached. The id
@@ -225,12 +250,13 @@ impl CamofoxSearchClient {
     async fn run_search(
         &self,
         tab_id: &str,
+        engine: SearchEngine,
         params: &SearxngParams,
-    ) -> Result<SearxngResponse, SearchError> {
+    ) -> Result<Vec<SearxngResult>, SearchError> {
         let nav = self
             .post(
                 &format!("/tabs/{tab_id}/navigate"),
-                json!({ "userId": USER_ID, "macro": "@google_search", "query": params.q }),
+                json!({ "userId": USER_ID, "macro": engine.macro_name(), "query": params.q }),
             )
             .await?;
         if !nav.status().is_success() {
@@ -250,7 +276,7 @@ impl CamofoxSearchClient {
         let eval = self
             .post(
                 &format!("/tabs/{tab_id}/evaluate"),
-                json!({ "userId": USER_ID, "expression": GOOGLE_SCRAPE_JS }),
+                json!({ "userId": USER_ID, "expression": scrape_js(engine) }),
             )
             .await?;
         let raw = eval
@@ -268,18 +294,19 @@ impl CamofoxSearchClient {
         };
 
         let n = rows.len();
+        let label = engine.label();
         let results = rows
             .into_iter()
             .enumerate()
             .map(|(i, r)| SearxngResult {
                 url: Some(r.url),
                 title: Some(r.title),
-                engine: Some("google".to_string()),
+                engine: Some(label.to_string()),
                 content: (!r.content.is_empty()).then_some(r.content),
                 // Synthesize a descending score from SERP position so the
-                // existing score-sort in transform.rs preserves Google's order.
+                // existing score-sort in transform.rs preserves engine order.
                 score: Some((n - i) as f64),
-                engines: vec!["google".to_string()],
+                engines: vec![label.to_string()],
                 positions: vec![(i + 1) as u32],
                 category: Some("general".to_string()),
                 template: None,
@@ -291,12 +318,38 @@ impl CamofoxSearchClient {
             })
             .collect();
 
-        Ok(SearxngResponse {
-            query: params.q.clone(),
-            number_of_results: n as u64,
-            results,
-            ..Default::default()
-        })
+        Ok(results)
+    }
+}
+
+/// Merge per-engine result rows into one response, deduped by URL. A URL seen
+/// by multiple engines accumulates their `engines`/`positions` and sums their
+/// position-scores, so cross-engine agreement ranks higher. First-appearance
+/// order is preserved; downstream `rerank` does the final ordering.
+fn merge_results(query: String, rows: Vec<SearxngResult>) -> SearxngResponse {
+    use std::collections::HashMap;
+    let mut order: Vec<String> = Vec::new();
+    let mut by_url: HashMap<String, SearxngResult> = HashMap::new();
+    for r in rows {
+        let key = r.url.clone().unwrap_or_default();
+        if let Some(existing) = by_url.get_mut(&key) {
+            existing.engines.extend(r.engines);
+            existing.positions.extend(r.positions);
+            existing.score = Some(existing.score.unwrap_or(0.0) + r.score.unwrap_or(0.0));
+        } else {
+            order.push(key.clone());
+            by_url.insert(key, r);
+        }
+    }
+    let results: Vec<SearxngResult> = order
+        .into_iter()
+        .filter_map(|k| by_url.remove(&k))
+        .collect();
+    SearxngResponse {
+        query,
+        number_of_results: results.len() as u64,
+        results,
+        ..Default::default()
     }
 }
 

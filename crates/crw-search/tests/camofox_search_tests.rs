@@ -99,6 +99,36 @@ async fn fetch_maps_scraped_rows_to_searxng_response() {
     assert!(s0 > s1, "expected descending scores by position, got {s0} !> {s1}");
 }
 
+/// Two engines run over the one warm tab; identical URLs returned by both must
+/// dedupe to a single row that accumulates BOTH engine labels and positions and
+/// sums their scores (cross-engine agreement ranks higher).
+#[tokio::test]
+async fn two_engines_merge_and_dedupe_by_url() {
+    let server = mock_with_rows(json!([
+        { "url": "https://a.example", "title": "Result A", "content": "snippet a" },
+        { "url": "https://b.example", "title": "Result B", "content": "snippet b" },
+    ]))
+    .await;
+
+    let client = CamofoxSearchClient::new(server.uri(), None, Duration::from_secs(10));
+    let resp = client
+        .fetch(&params_with_engines(
+            "rust async",
+            vec![SearchEngine::Google, SearchEngine::Bing],
+        ))
+        .await
+        .expect("multi-engine camofox search should succeed");
+
+    // Same two URLs from both engines → 2 unique rows after dedupe.
+    assert_eq!(resp.results.len(), 2);
+    let first = &resp.results[0];
+    assert_eq!(first.url.as_deref(), Some("https://a.example"));
+    // Both engines recorded, positions accumulated, scores summed.
+    assert_eq!(first.engines, vec!["google".to_string(), "bing".to_string()]);
+    assert_eq!(first.positions.len(), 2);
+    assert_eq!(first.score, Some(4.0)); // (2 from google) + (2 from bing)
+}
+
 #[tokio::test]
 async fn fetch_tolerates_empty_results() {
     let server = mock_with_rows(json!([])).await;
