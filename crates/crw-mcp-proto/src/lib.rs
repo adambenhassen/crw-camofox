@@ -292,7 +292,7 @@ pub fn tool_definitions(proxy_mode: bool) -> Value {
                         "enum": ["google", "bing", "duckduckgo", "wikipedia", "youtube", "reddit", "amazon", "github"]
                     },
                     "maxItems": 4,
-                    "description": "Camofox backend only: engine(s) to query (omit for Google). Multiple are merged/deduped. Max 4. Ignored by SearXNG."
+                    "description": "Engine(s) to query (omit for Google). Multiple are merged/deduped. Max 4."
                 },
                 "scrapeOptions": {
                     "type": "object",

@@ -79,7 +79,7 @@ Returns: `{ "status": "pending|running|completed|failed", "data": [...] }`
 
 ### crw_search
 
-Search the web and return relevant results with titles, URLs, and descriptions. Backed by Camofox-driven Google by default — no SearXNG required. A SearXNG backend can be configured (`[search].searxng_url`) as an opt-in alternative.
+Search the web and return relevant results with titles, URLs, and descriptions. Backed by Camofox-driven Google; query other engines with the `engines` parameter.
 
 Parameters:
 - `query` (required) — The search query
@@ -88,7 +88,8 @@ Parameters:
 - `country` — Country code for results (e.g. `"us"`, `"tr"`)
 - `tbs` — Time filter: `qdr:h|qdr:d|qdr:w|qdr:m|qdr:y` (past hour/day/week/month/year)
 - `sources` — If set, group results by source: `web`, `news`, `images`
-- `categories` — Bias toward a category (e.g. `"pdf"`, `"github"`, `"research"`, or a native SearXNG category)
+- `engines` — Engine(s) to query (omit for Google): `google`, `bing`, `duckduckgo`, `wikipedia`, `youtube`, `reddit`, `amazon`, `github`. Up to 4; results are merged and deduped.
+- `categories` — Bias toward a category (e.g. `"pdf"`, `"github"`, `"research"`)
 - `scrapeOptions` — Options for scraping each result page (e.g. `{"formats": ["markdown"]}`)
 
 ### crw_map
