@@ -43,7 +43,7 @@ ws_url = "ws://127.0.0.1:9222/"
 # Camofox (camofox-browser REST) — the Firefox/Camoufox anti-detect tier. Not a
 # CDP endpoint: `base_url` is the camofox-browser HTTP server. In `auto` mode it
 # is tried after LightPanda. When set, it also backs `/v1/search`
-# (browser-driven Google) in preference to SearXNG.
+# (browser-driven Google).
 # [renderer.camofox]
 # base_url = "http://127.0.0.1:9377"
 # api_key = "..."                 # only if the camofox server runs with auth
@@ -145,18 +145,15 @@ always_run = false
 #   azure_api_version = "2024-05-01-preview"
 #   max_tokens = 4096
 
-# /v1/search endpoint. Two backends:
-#   - Camofox (default when [renderer.camofox] is set): browser-driven Google.
-#   - SearXNG (opt-in): set `searxng_url` below. Camofox takes precedence when
-#     both are configured.
-# When neither is configured the endpoint returns a clear 400 (`search_disabled`).
+# /v1/search endpoint — browser-driven Google via Camofox (requires
+# [renderer.camofox]). When unconfigured the endpoint returns a clear 400
+# (`search_disabled`).
 [search]
 enabled = true
-# searxng_url = "http://localhost:8080"
 timeout_ms = 15000
 default_limit = 5
 max_limit = 20
-# W0 (gated, default false): pin SearXNG infoboxes[]/answers[] (Wikidata/Wikipedia
+# W0 (gated, default false): pin search infoboxes[]/answers[] (Wikidata/Wikipedia
 # structured facts the results[] path discards) at the front of the answer pool.
 # Still UNTRUSTED-wrapped. Flip with CRW_SEARCH__USE_STRUCTURED_SOURCES=true after
 # the diag500 re-baseline. See crates/crw-search/src/structured.rs.

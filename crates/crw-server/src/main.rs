@@ -86,7 +86,7 @@ async fn run_server() {
     // Issue #90: make the search subsystem's configured state visible at boot.
     // Three states (disabled / enabled-but-unconfigured / enabled) otherwise
     // collapse to a single request-time error. The host is origin-sanitized so
-    // a credentialed `searxng_url` never reaches the logs.
+    // a credentialed camofox endpoint never reaches the logs.
     let (search_level, search_msg) = crw_server::diagnostics::search_startup_status(
         &config.search,
         config
@@ -134,50 +134,6 @@ async fn run_server() {
     );
     if state.renderer.js_renderer_names().is_empty() {
         tracing::warn!("No CDP renderer active — JS rendering disabled");
-    }
-
-    // Issue #90: one-shot, non-fatal reachability probe so a misconfigured or
-    // down SearXNG is *spoken* at boot instead of failing silently on the first
-    // search. Bundled-compose users are already gated by `depends_on:
-    // searxng condition: service_healthy`, so this mainly helps operators who
-    // point `CRW_SEARCH__SEARXNG_URL` at an external host. The origin is
-    // sanitized; the probe hits the origin's `/healthz` (the same path the
-    // compose healthcheck uses) and is bounded by its own short timeout —
-    // never `connect_timeout`, which wouldn't bound a stalled response.
-    if state.config.search.enabled
-        && let Some(raw_url) = state.config.search.searxng_url.clone()
-    {
-        let origin = crw_server::diagnostics::sanitize_url_origin(&raw_url);
-        tokio::spawn(async move {
-            let probe = reqwest::Client::builder()
-                .timeout(std::time::Duration::from_secs(3))
-                .build();
-            match probe {
-                Ok(client) => {
-                    let healthz = format!("{origin}/healthz");
-                    match client.get(&healthz).send().await {
-                        Ok(resp) if resp.status().is_success() => {
-                            tracing::info!("search: SearXNG reachable at {origin}");
-                        }
-                        Ok(resp) => {
-                            tracing::warn!(
-                                "search: SearXNG at {origin} answered /healthz with {} — \
-                                 search calls may fail until it is healthy",
-                                resp.status()
-                            );
-                        }
-                        Err(e) => {
-                            tracing::warn!(
-                                "search: configured host {origin} UNREACHABLE at startup \
-                                 ({}) — search calls will fail until it resolves",
-                                e.without_url()
-                            );
-                        }
-                    }
-                }
-                Err(e) => tracing::warn!("search: could not build startup probe client: {e}"),
-            }
-        });
     }
 
     // Issue #35 transparency: when auto-extension widens the implicit deadline

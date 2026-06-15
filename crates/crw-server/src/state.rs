@@ -8,7 +8,7 @@ use crw_core::types::{
 use crw_crawl::crawl::{CrawlOptions, run_crawl};
 use crw_crawl::single::scrape_url;
 use crw_renderer::FallbackRenderer;
-use crw_search::{CamofoxSearchClient, SearchError, SearxngClient, SearxngParams, SearxngResponse};
+use crw_search::{CamofoxSearchClient, SearchError, SearxngParams, SearxngResponse};
 use futures::stream::StreamExt;
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -16,29 +16,24 @@ use std::time::{Duration, Instant};
 use tokio::sync::{RwLock, watch};
 use uuid::Uuid;
 
-/// The active `/v1/search` upstream. Either the SearXNG client (opt-in, when
-/// `[search].searxng_url` is set) or the Camofox-direct Google client (default,
-/// when `[renderer.camofox]` is configured). Both expose the same
+/// The active `/v1/search` upstream: the Camofox-direct Google client, used
+/// when `[renderer.camofox]` is configured. Exposes
 /// `fetch(&SearxngParams) -> Result<SearxngResponse, SearchError>` and
-/// `base_url()`, so the search route is agnostic to which is in use. Neither
-/// upstream code path is removed — this only selects between them.
+/// `base_url()`, so the search route is agnostic to the backend.
 #[derive(Clone)]
 pub enum SearchBackend {
-    Searxng(Arc<SearxngClient>),
     Camofox(Arc<CamofoxSearchClient>),
 }
 
 impl SearchBackend {
     pub async fn fetch(&self, params: &SearxngParams) -> Result<SearxngResponse, SearchError> {
         match self {
-            SearchBackend::Searxng(c) => c.fetch(params).await,
             SearchBackend::Camofox(c) => c.fetch(params).await,
         }
     }
 
     pub fn base_url(&self) -> &str {
         match self {
-            SearchBackend::Searxng(c) => c.base_url(),
             SearchBackend::Camofox(c) => c.base_url(),
         }
     }
@@ -175,47 +170,21 @@ impl AppState {
             config.crawler.per_host_max_concurrent,
         );
 
-        let searxng = if config.search.enabled
-            && let Some(url) = config.search.searxng_url.as_ref()
-        {
-            // Dedicated reqwest client for SearXNG so its connection pool is
-            // hot and isolated from the renderer / scrape paths. SearXNG runs
-            // on the same docker network in the bundled compose so a 5s
-            // connect_timeout is generous.
-            let http = reqwest::Client::builder()
-                .connect_timeout(Duration::from_secs(5))
-                .build()
-                .map_err(|e| {
-                    CrwError::Internal(format!("failed to build SearXNG http client: {e}"))
-                })?;
-            let timeout = Duration::from_millis(config.search.timeout_ms);
-            Some(Arc::new(SearxngClient::new(Arc::new(http), url, timeout)))
-        } else {
-            None
-        };
-
         // Camofox-direct search. When `[renderer.camofox]` is set, `/v1/search`
         // drives Google through the camofox-browser tier (SERPs trip anti-bot
         // walls, so search bypasses the renderer ladder). Independent of the
         // renderer's `camofox` cargo feature — it only needs the REST endpoint.
-        let camofox_search = if config.search.enabled
+        let search = if config.search.enabled
             && let Some(cf) = config.renderer.camofox.as_ref()
         {
-            Some(Arc::new(CamofoxSearchClient::new(
+            Some(SearchBackend::Camofox(Arc::new(CamofoxSearchClient::new(
                 cf.base_url.clone(),
                 cf.api_key.clone(),
                 config.search.github_token.clone(),
                 Duration::from_millis(config.search.timeout_ms),
-            )))
+            ))))
         } else {
             None
-        };
-
-        // Prefer Camofox when configured; otherwise fall back to SearXNG.
-        let search = match (camofox_search, searxng) {
-            (Some(cf), _) => Some(SearchBackend::Camofox(cf)),
-            (None, Some(sx)) => Some(SearchBackend::Searxng(sx)),
-            (None, None) => None,
         };
 
         let url_filter_cfg =

@@ -11,12 +11,6 @@ services:
       # render/search after `compose up` doesn't race the browser cold start.
       camofox:
         condition: service_healthy
-      # SearXNG is now opt-in (`--profile searxng`); it no longer gates startup.
-      # When the profile is off the service isn't created, so this required:false
-      # entry is satisfied immediately. Bring it back with `--profile searxng`.
-      searxng:
-        condition: service_healthy
-        required: false
     environment:
       - RUST_LOG=info
       - CRW_CONFIG=config.docker
@@ -39,68 +33,6 @@ services:
     security_opt:
       - no-new-privileges:true # a child can never gain privileges via setuid
 
-  # Meta-search backend for `/v1/search`. Pinned to a dated tag (never `:latest`)
-  # so upgrades are deliberate.
-  #
-  # AGPL / SearXNG attribution: SearXNG is a separate AGPL-3.0 work
-  # (https://github.com/searxng/searxng). We ship the upstream image unmodified
-  # and mount our own config read-only — we do NOT build a derived image.
-  # This is the lowest-risk packaging for §6/§13 obligations: each container
-  # runs its own program from its own publisher, with no rebundling. Operators
-  # who deploy this stack to third parties are still responsible for SearXNG's
-  # corresponding-source obligations on their own (the upstream image satisfies
-  # this for unmodified deployments). If you fork SearXNG or `settings.yml`,
-  # publish your changes alongside the deployment per AGPL §13.
-  #
-  # No Valkey/Redis: `server.limiter` and engine cache are off in settings.yml,
-  # so the in-memory fallback is sufficient. Rate limiting is handled by
-  # crw-server's own middleware.
-  #
-  # The container is reachable to other services as `searxng:8080`. We do NOT
-  # publish the port to the host by default — search should only flow through
-  # /v1/search. To debug directly, add `ports: ["127.0.0.1:8888:8080"]` in
-  # docker-compose.override.yml.
-  searxng:
-    image: searxng/searxng:2026.5.9-0cba32c15
-    # Opt-in: search now flows through Camofox by default, so SearXNG is gated
-    # behind its own profile and does not start with a plain `compose up`.
-    # Re-enable with `docker compose --profile searxng up`.
-    profiles: ["searxng"]
-    restart: unless-stopped
-    # Hardening: SearXNG handles arbitrary user queries and proxies third-party
-    # engines, so it has the largest abuse surface in this stack. We strip
-    # everything it doesn't need and bound resource use so a runaway worker
-    # can't take the host with it.
-    read_only: true
-    cap_drop:
-      - ALL
-    security_opt:
-      - no-new-privileges:true
-    mem_limit: 512m
-    memswap_limit: 512m
-    pids_limit: 256
-    environment:
-      - SEARXNG_BASE_URL=http://searxng:8080/
-      # Generate with `openssl rand -hex 32` and put in `.env` for production.
-      # The default below is acceptable for local/internal-only deployments
-      # because the limiter is off and the port isn't published.
-      - SEARXNG_SECRET_KEY=${SEARXNG_SECRET_KEY:-change-me-with-openssl-rand-hex-32-please}
-    volumes:
-      - ./config/searxng/settings.yml:/etc/searxng/settings.yml:ro
-    # SearXNG writes runtime cache + uwsgi state under /var/cache + /tmp; with
-    # `read_only: true` we route those to tmpfs so the container itself stays
-    # immutable while the writable scratch space stays in RAM (and gets freed
-    # on restart).
-    tmpfs:
-      - /tmp:size=64m
-      - /var/cache/searxng:size=128m
-    healthcheck:
-      test: ["CMD", "wget", "-q", "--spider", "http://localhost:8080/healthz"]
-      interval: 10s
-      timeout: 5s
-      retries: 5
-      start_period: 15s
-
   # Heavy/stealth JS renderer + `/v1/search` backend. Camofox wraps the
   # Camoufox (Firefox) anti-detect browser behind a REST API on :9377. It is
   # the heavy tier in the default ladder — LightPanda handles the light cases,
@@ -115,8 +47,8 @@ services:
   # expose camofox beyond the bridge, set CAMOFOX_API_KEY + CAMOFOX_AUTH_MODE=
   # required in `.env` AND set `[renderer.camofox] api_key` in your CRW config.
   camofox:
-    # Pinned (never `:latest`) so upgrades are deliberate — matches the searxng
-    # pinning rationale above. Base image is node:22-slim (ships curl, not wget).
+    # Pinned (never `:latest`) so upgrades are deliberate. Base image is
+    # node:22-slim (ships curl, not wget).
     image: ghcr.io/redf0x1/camofox-browser:2.4.5
     restart: unless-stopped
     environment:
@@ -139,7 +71,7 @@ services:
   # to camofox-browser — we run it unmodified rather than maintaining our own
   # bridge. Reachable on the compose network as `camofox-mcp:8080`; agents
   # connect to http://camofox-mcp:8080/mcp. Pinned (never `:latest`) to match
-  # the camofox/searxng pinning rationale above.
+  # the camofox pinning rationale above.
   #
   # The port is NOT published to the host by default — like camofox, it should
   # only be reached from sibling services. To expose it (and run an external

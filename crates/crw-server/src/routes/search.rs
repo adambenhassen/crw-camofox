@@ -162,9 +162,7 @@ pub async fn search_inner(
         .as_ref()
         .ok_or_else(|| {
             CrwError::SearchDisabled(
-                "Search is disabled. Set [renderer.camofox] to search via Camofox (Google), \
-                 or set [search].searxng_url / CRW_SEARCH__SEARXNG_URL for a SearXNG instance."
-                    .into(),
+                "Search is disabled. Set [renderer.camofox] to search via Camofox (Google).".into(),
             )
         })?
         .clone();

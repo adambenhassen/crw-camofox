@@ -16,13 +16,13 @@ fn test_app() -> TestServer {
     TestServer::new(app)
 }
 
-/// Like `test_app` but with a SearXNG backend configured, so `crw_search` is
-/// advertised in `tools/list` (the URL need not be reachable — advertisement only
-/// checks that a backend is configured). The bare `test_app` has no backend, so it
-/// correctly suppresses `crw_search` from `tools/list`.
+/// Like `test_app` but with a Camofox search backend configured, so `crw_search`
+/// is advertised in `tools/list` (the URL need not be reachable — advertisement
+/// only checks that a backend is configured). The bare `test_app` has no backend,
+/// so it correctly suppresses `crw_search` from `tools/list`.
 fn test_app_with_search() -> TestServer {
     let config: AppConfig =
-        toml::from_str("[search]\nsearxng_url = \"http://localhost:8888\"").unwrap();
+        toml::from_str("[renderer.camofox]\nbase_url = \"http://localhost:8888\"").unwrap();
     let state = AppState::new(config).expect("AppState::new failed");
     let app = create_app(state);
     TestServer::new(app)
