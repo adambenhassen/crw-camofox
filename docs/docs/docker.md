@@ -35,8 +35,6 @@ The bundled `docker-compose.yml` starts these services:
 | **crw** | 3000 | ✅ | API server (loads `config.docker.toml`) |
 | **lightpanda** | 9222 | ✅ | Lightweight headless browser for JS rendering |
 | **camofox** | 9377 | ✅ | [Camofox](https://github.com/redf0x1/camofox-browser) (Camoufox/Firefox) — heavy/stealth JS tier + `/v1/search` backend |
-| **chrome** | 9222 | `--profile heavy` | Full Chromium fallback for complex SPAs (CDP) |
-| **chrome-stealth** | 3000 | `--profile stealth` | Anti-fingerprint Chromium (browserless, SSPL-licensed) |
 | **searxng** | 8080 | `--profile searxng` | SearXNG meta-search backend for `/v1/search` (opt-in alternative to Camofox) |
 
 The `crw` service reads its configuration from the mounted `config.docker.toml` (via
@@ -44,13 +42,7 @@ The `crw` service reads its configuration from the mounted `config.docker.toml` 
 service name on Compose's default bridge network (`lightpanda:9222`, `camofox:9377`). You
 don't need to wire renderer URLs through environment variables — they're in the config file.
 
-The renderer ladder is `HTTP → LightPanda → Camofox`. The optional `chrome` / `chrome-stealth`
-tiers are opt-in so small hosts skip the ~500 MB Chromium image:
-
-```bash
-docker compose --profile heavy up -d      # add the vanilla Chromium fallback (CDP)
-docker compose --profile stealth up -d    # add the anti-fingerprint tier (review the SSPL license first)
-```
+The renderer ladder is `HTTP → LightPanda → Camofox`.
 
 ## Search
 

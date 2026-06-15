@@ -18,7 +18,7 @@ mkdir -p "$OUT"
 URLS="${BENCH_MAX_URLS:-1000}"
 CONC="${BENCH_CONCURRENCY:-10}"
 PORT="${CRW_PORT:-3030}"
-COMPOSE_FILES=(-f docker-compose.yml -f docker-compose.override.yml -f docker-compose.stealth.yml)
+COMPOSE_FILES=(-f docker-compose.yml -f docker-compose.override.yml)
 
 run_pass() {
   local mode="$1"
@@ -29,7 +29,7 @@ run_pass() {
   echo "============================================================"
 
   CRW_RENDERER__MODE="$mode" docker compose "${COMPOSE_FILES[@]}" \
-    --profile stealth up -d --force-recreate crw
+    up -d --force-recreate crw
 
   for i in {1..60}; do
     if curl -sf "http://localhost:$PORT/health" >/dev/null 2>&1; then

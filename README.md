@@ -139,32 +139,22 @@ curl http://localhost:3000/v1/crawl \
   -d '{"url":"https://docs.example.com","maxDepth":2,"maxPages":50}'
 ```
 
-Other install paths (each documented under [`Install`](#install) further down).
-**Heads-up:** only the `ghcr.io/adambenhassen/crw-camofox` Docker image ships this
-fork's Camofox defaults — the `npm`/`pip`/`brew`/`apt` packages below install
-**upstream `crw`**, which defaults to Chrome + SearXNG:
-
-```bash
-npx crw-mcp                           # zero install — embedded engine (upstream)
-pip install crw                        # Python SDK (auto-downloads binary, upstream)
-brew install us/crw/crw                # Homebrew (upstream)
-curl -fsSL https://raw.githubusercontent.com/us/crw/main/install.sh | sh
-```
+See [Install](#install) below for the MCP server, the Docker Compose stack, and
+building from source. This fork is distributed only as the
+`ghcr.io/adambenhassen/crw-camofox` Docker image.
 
 ---
 
-## MCP + SDK quickstart
+## MCP quickstart
 
-fastCRW ships a built-in MCP server so any MCP-compatible agent (Claude
-Code, Cursor, Windsurf, Cline, Continue.dev, Codex, Gemini CLI) can call
-scraping tools without bespoke glue. Embedded mode runs the engine
-in-process — no server, no API key, no setup. The `crw` Python SDK and
-the `crw-mcp` Node binary both shell to the same Rust core.
+The Docker image ships a built-in MCP server so any MCP-compatible agent
+(Claude Code, Cursor, Windsurf, Cline, Continue.dev, Codex, Gemini CLI) can
+call scraping tools without bespoke glue. The embedded engine runs inside the
+container — no API key, no setup.
 
 ```bash
-npm install -g crw-mcp          # MCP server (Node wrapper)
-pip install crw                 # Python SDK (auto-downloads binary)
-claude mcp add crw -- npx crw-mcp                                          # Claude Code, embedded
+# wire the stdio MCP server into Claude Code
+claude mcp add crw -- docker run -i --rm ghcr.io/adambenhassen/crw-camofox crw-mcp
 ```
 
 Per-client config recipes (Claude Desktop, Cursor, Windsurf, Cline,
@@ -186,65 +176,41 @@ See the upstream [camofox-mcp docs](https://github.com/redf0x1/camofox-mcp).
 
 ## Install
 
-> **This fork ships as a Docker image** — `ghcr.io/adambenhassen/crw-camofox`. The
-> `npm`/`pip`/`brew`/`apt` commands below install the **upstream** `crw` packages, which
-> default to Chrome + SearXNG rather than Camofox. Use the Docker image (or build this repo
-> with the `camofox` feature) to get the fork's defaults.
+This fork is distributed as a multi-arch Docker image —
+**`ghcr.io/adambenhassen/crw-camofox`** (`linux/amd64` + `linux/arm64`). Upstream's
+`npm`/`pip`/`brew`/`cargo`/`apt` packages are **not** this fork (they default to
+Chrome + SearXNG), so run crw-camofox from the image or build it from source.
 
-### MCP server (`crw-mcp`) — recommended for AI agents
-
-```bash
-npx crw-mcp                              # zero install (npm)
-pip install crw                          # Python SDK (auto-downloads binary)
-brew install us/crw/crw-mcp              # Homebrew
-docker run -i ghcr.io/adambenhassen/crw-camofox crw-mcp     # Docker
-```
-
-### CLI (`crw`) — scrape URLs from your terminal
+### API server (Firecrawl-compatible REST API)
 
 ```bash
-brew install us/crw/crw
-
-# One-line install (auto-detects OS & arch):
-curl -fsSL https://raw.githubusercontent.com/us/crw/main/install.sh | CRW_BINARY=crw sh
-
-# APT (Debian/Ubuntu):
-curl -fsSL https://apt.fastcrw.com/gpg.key | sudo gpg --dearmor -o /usr/share/keyrings/crw.gpg
-echo "deb [signed-by=/usr/share/keyrings/crw.gpg] https://apt.fastcrw.com stable main" \
-  | sudo tee /etc/apt/sources.list.d/crw.list
-sudo apt update && sudo apt install crw
-```
-
-### API server (`crw-server`) — Firecrawl-compatible REST API
-
-For serving multiple apps, other languages (Node.js, Go, Java), or as a
-shared microservice.
-
-```bash
-brew install us/crw/crw-server
-
-# One-line install:
-curl -fsSL https://raw.githubusercontent.com/us/crw/main/install.sh | CRW_BINARY=crw-server sh
-
-# Docker:
 docker run -p 3000:3000 ghcr.io/adambenhassen/crw-camofox
 ```
 
-Docker Compose ships with `lightpanda` + `camofox` by default (ladder:
-HTTP → LightPanda → Camofox). `chrome` and SearXNG are opt-in:
+### MCP server (for AI agents)
 
 ```bash
-docker compose up -d                                         # http + lightpanda + camofox
-docker compose --profile heavy up -d                         # + chrome failover (CDP)
-docker compose --profile searxng up -d                       # + SearXNG search backend
-docker compose -f docker-compose.yml \
-  -f docker-compose.stealth.yml --profile stealth up -d      # browserless stealth tier
+docker run -i --rm ghcr.io/adambenhassen/crw-camofox crw-mcp
+```
+
+### Build from source
+
+```bash
+git clone https://github.com/adambenhassen/crw-camofox
+cd crw-camofox
+cargo build --release -p crw-server --features cdp,camofox -p crw-mcp -p crw-cli
+```
+
+Docker Compose runs the default render ladder (HTTP → LightPanda → Camofox):
+
+```bash
+docker compose up -d                       # http + lightpanda + camofox
+docker compose --profile searxng up -d     # + SearXNG search backend (opt-in)
 ```
 
 [Camofox](https://github.com/redf0x1/camofox-browser) wraps the Camoufox
 (Firefox) anti-detect browser; it is the default heavy/stealth JS tier and backs
-`/v1/search`. To swap it back for Chrome, set `[renderer.chrome]` and clear
-`[renderer.camofox]` in your config.
+`/v1/search`.
 
 See the [self-hosting guide](https://docs.fastcrw.com/#self-hosting) for
 production hardening, auth, reverse proxy, and resource tuning.
@@ -276,43 +242,11 @@ The Firecrawl compatibility matrix (field-by-field diff) lives in
 
 ## SDKs and integrations
 
-### Python
-
-```bash
-pip install crw
-```
-
-```python
-from crw import CrwClient
-
-# Local (embedded, no server needed):
-client = CrwClient()
-# Self-hosted server:
-# client = CrwClient(api_url="http://localhost:3000")
-
-result = client.scrape("https://example.com", formats=["markdown", "links"])
-pages = client.crawl("https://docs.example.com", max_depth=2, max_pages=50)
-urls = client.map("https://example.com")
-results = client.search("AI news", limit=10, sources=["web", "news"])
-```
-
-Requires Python 3.9+. Local mode auto-downloads `crw-mcp` on first use.
-
-### Community SDKs
-
-- [`crewai-crw`](https://pypi.org/project/crewai-crw/) — CRW scraping tools for CrewAI agents
-- [`langchain-crw`](https://pypi.org/project/langchain-crw/) — CRW document loader for LangChain
-
-**Node.js:** no official SDK yet — use the REST API directly or `npx crw-mcp`
-for MCP. [SDK examples →](https://docs.fastcrw.com/sdk-examples/)
-
-### Frameworks & platforms
-
-[CrewAI](https://pypi.org/project/crewai-crw/) · [LangChain](https://pypi.org/project/langchain-crw/)
-· [Agno](https://github.com/agno-agi/agno/pull/7183) · [Dify](https://github.com/langgenius/dify)
-· [n8n](https://fastcrw.com/blog/n8n-web-scraping-crw) · [Flowise](https://github.com/FlowiseAI/Flowise/pull/6066)
-
-[All integrations →](https://docs.fastcrw.com/integrations/)
+This fork publishes no language SDKs of its own. The REST API is
+Firecrawl-compatible (`/v1/*` and `/v2/*`), so point any Firecrawl client —
+including the official `firecrawl-py` — at your self-hosted endpoint:
+`FirecrawlApp(api_url="http://localhost:3000")`. See
+[`COMPATIBILITY-firecrawl.md`](COMPATIBILITY-firecrawl.md) for the field-by-field matrix.
 
 ---
 

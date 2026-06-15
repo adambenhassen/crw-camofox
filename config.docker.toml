@@ -74,11 +74,11 @@ ws_url = "ws://lightpanda:9222/"
 [renderer.camofox]
 base_url = "http://camofox:9377"
 
-# Chrome (CDP) is now opt-in — Camofox replaces it in the default ladder. To
-# swap back to Chrome, uncomment this and bring up the heavy profile
-# (`docker compose --profile heavy up`), optionally removing [renderer.camofox].
+# Chrome (CDP) is no longer bundled in the Compose stack — Camofox is the
+# default heavy/stealth tier. The chrome renderer code remains; to use it,
+# point this at your own CDP endpoint and optionally remove [renderer.camofox].
 # [renderer.chrome]
-# ws_url = "ws://chrome:9222/"
+# ws_url = "ws://your-chrome-host:9222/"
 
 [renderer.chrome_pool]
 size = 4

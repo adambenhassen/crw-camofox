@@ -7,7 +7,7 @@
 # plan can be evaluated by `compare_pool_bench.py`.
 #
 # Pre-reqs:
-#   - docker compose stack ready (crw + chrome heavy profile)
+#   - docker compose stack ready (crw + camofox default profile)
 #   - bench/.venv populated (`uv venv bench/.venv && uv pip install -r bench/requirements.txt`)
 #   - HF_TOKEN exported (HuggingFace dataset access)
 #
@@ -41,7 +41,7 @@ run_pass() {
   CRW_RENDERER__MODE=chrome \
   CRW_RENDERER__CHROME_BACKEND=vanilla \
   CRW_RENDERER__CHROME_CONTEXT_POOL_ENABLED="$pool_enabled" \
-    docker compose "${COMPOSE_FILES[@]}" --profile heavy up -d --force-recreate crw
+    docker compose "${COMPOSE_FILES[@]}" up -d --force-recreate crw
 
   for i in {1..60}; do
     if curl -sf "http://localhost:$PORT/health" >/dev/null 2>&1; then
