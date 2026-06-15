@@ -18,11 +18,9 @@ Firecrawl SDKs — plus first-class MCP. Self-host free under AGPL-3.0.
 Upstream offers a managed API at `api.fastcrw.com`; this fork is self-host only.
 
 <p align="center">
-  <a href="https://crates.io/crates/crw-server"><img src="https://img.shields.io/crates/v/crw-server.svg" alt="crates.io"></a>
-  <a href="https://github.com/us/crw/actions/workflows/ci.yml"><img src="https://github.com/us/crw/actions/workflows/ci.yml/badge.svg?branch=main&event=push" alt="CI"></a>
+  <a href="https://github.com/adambenhassen/crw-camofox/actions/workflows/ci.yml"><img src="https://github.com/adambenhassen/crw-camofox/actions/workflows/ci.yml/badge.svg?branch=main&event=push" alt="CI"></a>
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-AGPL--3.0-blue.svg" alt="License"></a>
-  <a href="https://github.com/us/crw/stargazers"><img src="https://img.shields.io/github/stars/us/crw?style=social" alt="GitHub Stars"></a>
-  <a href="https://fastcrw.com"><img src="https://img.shields.io/badge/Managed%20Cloud-fastcrw.com-blueviolet" alt="fastcrw.com"></a>
+  <a href="https://github.com/adambenhassen/crw-camofox/stargazers"><img src="https://img.shields.io/github/stars/adambenhassen/crw-camofox?style=social" alt="GitHub Stars"></a>
 </p>
 
 Works with: [Claude Code](https://docs.fastcrw.com/mcp-clients/#claude-code) · [Cursor](https://docs.fastcrw.com/mcp-clients/#cursor) · [Windsurf](https://docs.fastcrw.com/mcp-clients/#windsurf) · [Cline](https://docs.fastcrw.com/mcp-clients/#cline) · [Copilot](https://docs.fastcrw.com/mcp-clients/#any-mcp-client) · [Continue.dev](https://docs.fastcrw.com/mcp-clients/#continue) · [Codex](https://docs.fastcrw.com/mcp-clients/#openai-codex-cli) · [Gemini CLI](https://docs.fastcrw.com/mcp-clients/#gemini-cli)
@@ -47,6 +45,24 @@ and the fork stays easy to sync:
 CDP/Chrome/SearXNG code all remain in the tree, just off by default — flip a config
 flag or a compose profile to get upstream behavior back.
 
+**What sets this fork apart:**
+
+- **One less moving part.** Upstream's `/v1/search` needs a SearXNG sidecar; this fork
+  searches Google through the **same Camofox browser it already runs to render pages**.
+  `docker compose up` gives you working search with no extra container to deploy,
+  version, or keep healthy.
+- **Search that actually returns results.** In the production setup below, the SearXNG
+  backend came back **empty for every query**; the Camofox-driven backend (Google by
+  default) reliably returns real results.
+- **Anti-detection at the engine level.** Camofox is Camoufox (Firefox) with fingerprint
+  evasion **built into the browser**, not a CDP-driven Chrome hardened after the fact —
+  and one browser covers both rendering *and* search, so there's no Chromium heap plus a
+  search sidecar to run side by side.
+- **Many engines, one ranked list.** Search defaults to Google but can query up to four of
+  Google, Bing, DuckDuckGo, Wikipedia, YouTube, Reddit, Amazon, and GitHub in a single call,
+  deduping by URL and agreement-ranking the merged results — where upstream is tied to one
+  SearXNG instance.
+
 **Field notes — used in production by Hermes.** This fork backs the **Hermes**
 agent over MCP, with Hermes' built-in `web` and `browser` tools **disabled** so
 every fetch/search routes through this fork instead of its flaky native tools.
@@ -60,31 +76,33 @@ bot checks** that the previous stack couldn't get past.
 
 ---
 
-## Why fastCRW?
+## Why crw-camofox?
 
-- **Rust-native, single static binary** — no Redis, no Node.js, no Python venv, no headless-browser sidecar in the request path. One binary, one config file, one process.
-- **~50 MB RAM idle** — leaves headroom on a $5 VPS. Browser-render-first stacks (Firecrawl, Crawl4AI) carry a Chromium heap baseline measured in hundreds of MB before a single request lands.
-- **Firecrawl-compatible drop-in** — both the `/v1/*` and `/v2/*` surfaces (scrape, crawl, map, search, extract; plus v2-only batch & parse) with compatible request/response shapes. The v2 API is a drop-in for the official `firecrawl-py` v4 SDK (`FirecrawlApp(api_url="https://api.fastcrw.com")`) — swap the base URL and keep your code.
-- **Change tracking & monitoring** — diff a page against a prior snapshot (markdown git-diff, per-field JSON, or both) with an optional LLM "meaningful-change" judge. Stateless `changeTracking` primitive in the engine; scheduled monitors + signed-webhook/email alerts on the managed platform. See the [Monitoring docs](https://us.github.io/crw/monitoring).
-- **AGPL-3.0 open core + managed option** — self-host free, or point at `api.fastcrw.com` for managed proxy network, dashboard, and SLA without the AGPL obligations on your application code.
+- **Rust-native engine** — the core is one static Rust binary (no Redis, Node.js, or Python). The Camofox (Firefox) browser runs as a separate container, pulled in only for JS rendering, stealth, and search — plain HTTP fetches never touch it.
+- **Light idle footprint** — the engine idles around ~50 MB; the Camofox browser only spins up for heavy renders. Browser-render-first stacks (Firecrawl, Crawl4AI) carry a Chromium heap baseline measured in hundreds of MB before a single request lands.
+- **Anti-detect by default** — the stealth tier is Camofox (Camoufox/Firefox with engine-level fingerprint evasion), and search runs through the same browser, so bot-walled pages and web search both work without bolting on a separate Chromium or SearXNG sidecar.
+- **Firecrawl-compatible drop-in** — both the `/v1/*` and `/v2/*` surfaces (scrape, crawl, map, search, extract; plus v2-only batch & parse) with compatible request/response shapes. The v2 API is a drop-in for the official `firecrawl-py` v4 SDK (`FirecrawlApp(api_url="http://localhost:3000")`) — swap the base URL and keep your code.
+- **Change tracking** — diff a page against a prior snapshot (markdown git-diff, per-field JSON, or both) with an optional LLM "meaningful-change" judge. A stateless `changeTracking` primitive in the engine — wire it into your own scheduler. See the [Monitoring docs](https://us.github.io/crw/monitoring).
+- **AGPL-3.0, self-host only** — run the whole stack yourself under AGPL-3.0. This fork operates no managed tier: no account, no usage metering, no API keys.
 
 ---
 
 ## Comparison Table
 
-Qualitative positioning vs. the three most-cited alternatives. Numerical
-claims trace to the inline sources noted; everything else is descriptive.
+Qualitative positioning of this fork vs. upstream `crw` and the three
+most-cited alternatives. Descriptive shape, not a benchmark.
 
-| | **fastCRW** | Firecrawl | Crawl4AI | Spider |
-|---|---|---|---|---|
-| Language | Rust | Node.js + Playwright | Python + Playwright | Rust |
-| License | AGPL-3.0 (commercial avail.) | AGPL-3.0 (commercial avail.) | Apache-2.0 | Source-available / commercial ([spider.cloud](https://spider.cloud)) |
-| Self-host install size | Single static binary (~8 MB) | Multi-container (~500 MB+ image) | ~2 GB image (browser bundled) | Managed-first; self-host via crate |
-| Memory baseline (idle) | ~50 MB | Large (Chromium heap) | Large (Chromium heap) | Light (Rust) |
-| Firecrawl-compat API | Yes — **v1 + v2** (`/v1/*` and `/v2/*`) | Native | No | No |
-| MCP server | Built-in (`crw-mcp`) | Separate package | Community add-on | No first-party |
-| Hosted option | `api.fastcrw.com` (BYOK or managed) | firecrawl.dev | None official | spider.cloud (primary product) |
-| Reproducible public benchmark | Yes — 63.74% truth-recall on 1,000-URL dataset (`diagnose_3way.py`, 2026-05-08) | Vendor-published only | Vendor-published only | Vendor-published only |
+| | **crw-camofox** | fastCRW (upstream) | Firecrawl | Crawl4AI | Spider |
+|---|---|---|---|---|---|
+| Language | Rust | Rust | Node.js + Playwright | Python + Playwright | Rust |
+| License | AGPL-3.0 | AGPL-3.0 (commercial avail.) | AGPL-3.0 (commercial avail.) | Apache-2.0 | Source-available / commercial ([spider.cloud](https://spider.cloud)) |
+| Self-host footprint | Docker image (engine + Camofox/Firefox) | Single static binary (~8 MB) | Multi-container (~500 MB+ image) | ~2 GB image (browser bundled) | Managed-first; self-host via crate |
+| Memory baseline (idle) | ~50 MB engine; Camofox on heavy renders | ~50 MB | Large (Chromium heap) | Large (Chromium heap) | Light (Rust) |
+| Stealth tier | Camofox (Firefox anti-detect) | browserless Chromium (opt-in) | Playwright Chromium | Playwright Chromium | — |
+| Search backend | Camofox-driven Google, multi-engine | SearXNG sidecar | Built-in | Built-in | Built-in |
+| Firecrawl-compat API | Yes — **v1 + v2** | Yes — **v1 + v2** | Native | No | No |
+| MCP server | `crw-mcp` + `camofox-mcp` (47 tools) | Built-in (`crw-mcp`) | Separate package | Community add-on | No first-party |
+| Hosted option | Self-host only | `api.fastcrw.com` | firecrawl.dev | None official | spider.cloud (primary product) |
 
 Pricing/spec cells where claimed link to the vendor page; everything else
 is the qualitative architectural shape, not a comparison number.
@@ -121,14 +139,15 @@ curl http://localhost:3000/v1/crawl \
   -d '{"url":"https://docs.example.com","maxDepth":2,"maxPages":50}'
 ```
 
-Other install paths (each documented under
-[`Install`](#install) further down):
+Other install paths (each documented under [`Install`](#install) further down).
+**Heads-up:** only the `ghcr.io/adambenhassen/crw-camofox` Docker image ships this
+fork's Camofox defaults — the `npm`/`pip`/`brew`/`apt` packages below install
+**upstream `crw`**, which defaults to Chrome + SearXNG:
 
 ```bash
-npx crw-mcp                           # zero install — runs the embedded engine
-pip install crw                        # Python SDK (auto-downloads binary)
-brew install us/crw/crw                # Homebrew
-cargo install crw-cli                  # Cargo
+npx crw-mcp                           # zero install — embedded engine (upstream)
+pip install crw                        # Python SDK (auto-downloads binary, upstream)
+brew install us/crw/crw                # Homebrew (upstream)
 curl -fsSL https://raw.githubusercontent.com/us/crw/main/install.sh | sh
 ```
 
@@ -146,8 +165,6 @@ the `crw-mcp` Node binary both shell to the same Rust core.
 npm install -g crw-mcp          # MCP server (Node wrapper)
 pip install crw                 # Python SDK (auto-downloads binary)
 claude mcp add crw -- npx crw-mcp                                          # Claude Code, embedded
-claude mcp add -e CRW_API_URL=https://api.fastcrw.com -e CRW_API_KEY=… \
-  crw -- npx crw-mcp                                                       # Claude Code, managed
 ```
 
 Per-client config recipes (Claude Desktop, Cursor, Windsurf, Cline,
@@ -167,23 +184,12 @@ See the upstream [camofox-mcp docs](https://github.com/redf0x1/camofox-mcp).
 
 ---
 
-## Self-host vs Managed
-
-| | **Self-host (free)** | **Managed — `api.fastcrw.com`** |
-|---|---|---|
-| Best when | You want full data residency, AGPL is fine, you can run your own proxy strategy, latency to your infra matters more than ours. | You want zero infra, a global proxy network, a dashboard, usage metering, and AGPL carve-out for closed-source product code. |
-| Install | `docker run -p 3000:3000 ghcr.io/adambenhassen/crw-camofox` or `cargo install crw-server`. | Sign up at [fastcrw.com](https://fastcrw.com) — 500 free credits, no card. |
-| Search | Camofox-driven Google by default (`docker compose up`); SearXNG opt-in (`--profile searxng`). | Managed search backend. |
-| Proxy rotation | Bring your own pool via env vars. | Built-in. |
-| Cost | $0 + your hosting bill. | From $13/mo; pricing on [fastcrw.com/pricing](https://fastcrw.com/pricing). |
-| License obligations | AGPL-3.0 applies if you expose the API to third parties. | AGPL carve-out included. |
-
-The binary is the same in both modes — you can develop against your
-self-hosted instance and ship to managed without code changes.
-
----
-
 ## Install
+
+> **This fork ships as a Docker image** — `ghcr.io/adambenhassen/crw-camofox`. The
+> `npm`/`pip`/`brew`/`apt` commands below install the **upstream** `crw` packages, which
+> default to Chrome + SearXNG rather than Camofox. Use the Docker image (or build this repo
+> with the `camofox` feature) to get the fork's defaults.
 
 ### MCP server (`crw-mcp`) — recommended for AI agents
 
@@ -191,7 +197,6 @@ self-hosted instance and ship to managed without code changes.
 npx crw-mcp                              # zero install (npm)
 pip install crw                          # Python SDK (auto-downloads binary)
 brew install us/crw/crw-mcp              # Homebrew
-cargo install crw-mcp                    # Cargo
 docker run -i ghcr.io/adambenhassen/crw-camofox crw-mcp     # Docker
 ```
 
@@ -208,8 +213,6 @@ curl -fsSL https://apt.fastcrw.com/gpg.key | sudo gpg --dearmor -o /usr/share/ke
 echo "deb [signed-by=/usr/share/keyrings/crw.gpg] https://apt.fastcrw.com stable main" \
   | sudo tee /etc/apt/sources.list.d/crw.list
 sudo apt update && sudo apt install crw
-
-cargo install crw-cli
 ```
 
 ### API server (`crw-server`) — Firecrawl-compatible REST API
@@ -263,51 +266,11 @@ production hardening, auth, reverse proxy, and resource tuning.
 | `GET` | `/health` | Health check (no auth required) |
 | `POST` | `/mcp` | Streamable HTTP MCP transport |
 
-**Firecrawl v2 surface** — `scrape`, `crawl`, `map`, `search` are also served under `/v2/*` with Firecrawl v2 request/response shapes, plus v2-only `POST /v2/batch/scrape`, `POST /v2/parse` (PDF/doc → markdown), and `GET /v2/crawl/active`. This makes the official `firecrawl-py` v4 SDK a drop-in: `FirecrawlApp(api_url="https://api.fastcrw.com")`.
+**Firecrawl v2 surface** — `scrape`, `crawl`, `map`, `search` are also served under `/v2/*` with Firecrawl v2 request/response shapes, plus v2-only `POST /v2/batch/scrape`, `POST /v2/parse` (PDF/doc → markdown), and `GET /v2/crawl/active`. This makes the official `firecrawl-py` v4 SDK a drop-in: `FirecrawlApp(api_url="http://localhost:3000")`.
 
 Full reference at [docs.fastcrw.com/#rest-api](https://docs.fastcrw.com/#rest-api).
 The Firecrawl compatibility matrix (field-by-field diff) lives in
 [`COMPATIBILITY-firecrawl.md`](COMPATIBILITY-firecrawl.md).
-
----
-
-## Benchmark
-
-3-way scrape benchmark on the full 1,000-URL
-[Firecrawl `scrape-content-dataset-v1`](https://huggingface.co/datasets/firecrawl/scrape-content-dataset-v1)
-(`diagnose_3way.py`, 2026-05-08, concurrency 5, timeout 120s):
-
-| Metric | fastCRW | crawl4ai | Firecrawl |
-|---|---|---|---|
-| **Truth-recall (522/819 labeled URLs)** | **63.74%** | 59.95% | 56.04% |
-| Scrape-success (of 1,000) | 877 (87.7%) | 835 (83.5%) | 897 (89.7%) |
-| Thrown errors (3,000 requests) | 0 | 0 | 0 |
-| p50 latency | **1914 ms** | 1916 ms | 2305 ms |
-| p90 latency | 14157 ms | **4754 ms** | 6937 ms |
-
-Recall is measured against the 819 labeled/matchable URLs. p50 ties Firecrawl;
-p90 is the worst of the three — the stealth fallback that recovers the URLs the
-others miss is also what lengthens the tail.
-
-Reproduce it yourself — the canonical harness is `diagnose_3way.py` (matches
-truth text identically across all three tools):
-
-```bash
-cd ~/coding/crw/crw-opencore
-docker compose -f docker-compose.yml -f docker-compose.override.yml \
-               -f docker-compose.stealth.yml --profile stealth up -d
-docker start crawl4ai-bench
-cd ~/coding/crw/competitors/firecrawl && docker compose up -d
-
-cd ~/coding/crw/crw-opencore
-uv run python bench/diagnose_3way.py \
-  --max-urls 1000 --tools crw,crawl4ai,firecrawl \
-  --concurrency 5 --timeout 120 \
-  --out bench/server-runs/diag3w-1000-full.jsonl
-```
-
-Full result of record:
-[`bench/server-runs/RESULT_3WAY_1000_FULL.md`](bench/server-runs/RESULT_3WAY_1000_FULL.md).
 
 ---
 
@@ -322,10 +285,10 @@ pip install crw
 ```python
 from crw import CrwClient
 
-# Managed (includes web search):
-client = CrwClient(api_url="https://api.fastcrw.com", api_key="YOUR_API_KEY")
 # Local (embedded, no server needed):
-# client = CrwClient()
+client = CrwClient()
+# Self-hosted server:
+# client = CrwClient(api_url="http://localhost:3000")
 
 result = client.scrape("https://example.com", formats=["markdown", "links"])
 pages = client.crawl("https://docs.example.com", max_depth=2, max_pages=50)
@@ -361,8 +324,8 @@ for MCP. [SDK examples →](https://docs.fastcrw.com/sdk-examples/)
 │         Axum HTTP API + Auth + MCP          │
 ├──────────┬──────────┬───────────────────────┤
 │ crw-crawl│crw-extract│    crw-renderer      │
-│ BFS crawl│ HTML→MD   │  HTTP + CDP(WS)      │
-│ robots   │ LLM/JSON  │  LightPanda/Chrome   │
+│ BFS crawl│ HTML→MD   │  HTTP + Camofox/CDP  │
+│ robots   │ LLM/JSON  │  LightPanda/Camofox  │
 │ sitemap  │ clean/read│  auto-detect SPA     │
 ├──────────┴──────────┴───────────────────────┤
 │                 crw-core                    │
@@ -373,7 +336,7 @@ for MCP. [SDK examples →](https://docs.fastcrw.com/sdk-examples/)
 | Crate | Description |
 |-------|-------------|
 | [`crw-core`](crates/crw-core) | Core types, config, and error handling |
-| [`crw-renderer`](crates/crw-renderer) | HTTP + CDP browser rendering engine |
+| [`crw-renderer`](crates/crw-renderer) | HTTP + Camofox (Firefox) / CDP rendering engine |
 | [`crw-extract`](crates/crw-extract) | HTML → markdown/plaintext extraction |
 | [`crw-crawl`](crates/crw-crawl) | Async BFS crawler with robots.txt & sitemap |
 | [`crw-server`](crates/crw-server) | Axum API server (Firecrawl-compatible) |
@@ -418,28 +381,11 @@ The pre-commit hook runs the same checks as CI (`cargo fmt`, `cargo clippy`,
 
 ## License
 
-fastCRW is open source under [AGPL-3.0](LICENSE). If you embed fastCRW in
-a closed-source product or expose it as a hosted service to third parties
-and you can't comply with AGPL's source-availability requirements, the
-managed offering at [fastcrw.com](https://fastcrw.com) includes a
-commercial carve-out, and standalone commercial licenses are available
-on request — write to **hello@fastcrw.com**.
-
----
-
-## Links
-
-- **Documentation:** [docs.fastcrw.com](https://docs.fastcrw.com)
-- **API reference:** [docs.fastcrw.com/#rest-api](https://docs.fastcrw.com/#rest-api)
-- **MCP setup guide:** [docs.fastcrw.com/#mcp](https://docs.fastcrw.com/#mcp)
-- **Playground:** [docs.fastcrw.com/playground/](https://docs.fastcrw.com/playground/)
-- **Benchmarks:** [fastcrw.com/benchmarks](https://fastcrw.com/benchmarks)
-- **Marketing site:** [fastcrw.com](https://fastcrw.com)
-- **Changelog:** [`CHANGELOG.md`](CHANGELOG.md)
-- **X / Twitter:** [@fastcrw](https://twitter.com/fastcrw)
-- **LinkedIn:** [fastcrw](https://www.linkedin.com/company/fastcrw)
-- **Discord:** [discord.gg/kkFh2SC8](https://discord.gg/kkFh2SC8)
-- **MCP Registry:** [registry.modelcontextprotocol.io](https://registry.modelcontextprotocol.io/?q=crw)
+crw-camofox is open source under [AGPL-3.0](LICENSE). If you embed it in a
+closed-source product or expose it as a hosted service to third parties,
+AGPL's source-availability requirements apply to your deployment. This fork
+is community-maintained and self-host only — it offers no managed tier or
+commercial carve-out; for commercial licensing, see [upstream `crw`](https://github.com/us/crw).
 
 ---
 
