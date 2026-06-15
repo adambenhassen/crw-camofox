@@ -31,7 +31,7 @@
   "tags": [
     {
       "name": "search",
-      "description": "Web search via SearXNG (self-hosted) or managed (hosted)"
+      "description": "Web search via Camofox-driven Google"
     },
     {
       "name": "scrape",
@@ -400,7 +400,7 @@
                 "github"
               ]
             },
-            "description": "Camofox backend only: engine(s) to query (omit for Google). Multiple are merged/deduped by URL. Max 4. Ignored by SearXNG."
+            "description": "Engine(s) to query (omit for Google). Multiple are merged/deduped by URL. Max 4."
           },
           "scrapeOptions": {
             "$ref": "#/components/schemas/ScrapeOptions"
@@ -437,7 +437,7 @@
           },
           "category": {
             "type": "string",
-            "description": "SearXNG result category (e.g. 'general')"
+            "description": "Result category (e.g. 'general')"
           },
           "markdown": {
             "type": "string",

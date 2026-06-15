@@ -63,7 +63,7 @@ export interface SearchOptions {
   tbs?: string;
   sources?: string[];
   categories?: string[];
-  /** Camofox backend only: engine(s) to query (omit for Google). Merged/deduped by URL, max 4. Ignored by SearXNG. */
+  /** Engine(s) to query (omit for Google). Merged/deduped by URL, max 4. */
   engines?: SearchEngine[];
   scrapeOptions?: Json;
   [key: string]: unknown;

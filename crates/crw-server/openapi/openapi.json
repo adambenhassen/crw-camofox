@@ -27,7 +27,7 @@
     {}
   ],
   "tags": [
-    { "name": "search", "description": "Web search via SearXNG (self-hosted) or managed (hosted)" },
+    { "name": "search", "description": "Web search via Camofox-driven Google" },
     { "name": "scrape",  "description": "Single-URL content extraction" },
     { "name": "crawl",   "description": "Async multi-page crawl jobs" },
     { "name": "map",     "description": "URL discovery without full scraping" },
@@ -287,7 +287,7 @@
           "tbs":   { "type": "string", "enum": ["qdr:h", "qdr:d", "qdr:w", "qdr:m", "qdr:y"] },
           "sources":    { "type": "array", "items": { "type": "string", "enum": ["web", "news", "images"] } },
           "categories": { "type": "array", "items": { "type": "string" } },
-          "engines":    { "type": "array", "maxItems": 4, "items": { "type": "string", "enum": ["google", "bing", "duckduckgo", "wikipedia", "youtube", "reddit", "amazon", "github"] }, "description": "Camofox backend only: engine(s) to query (omit for Google). Multiple are merged/deduped by URL. Max 4. Ignored by SearXNG." },
+          "engines":    { "type": "array", "maxItems": 4, "items": { "type": "string", "enum": ["google", "bing", "duckduckgo", "wikipedia", "youtube", "reddit", "amazon", "github"] }, "description": "Engine(s) to query (omit for Google). Multiple are merged/deduped by URL. Max 4." },
           "scrapeOptions": { "$ref": "#/components/schemas/ScrapeOptions" }
         }
       },
@@ -301,7 +301,7 @@
           "description": { "type": "string", "description": "Alias of snippet (same value, kept for Firecrawl response-shape parity)" },
           "position":    { "type": "integer" },
           "score":       { "type": "number" },
-          "category":    { "type": "string", "description": "SearXNG result category (e.g. 'general')" },
+          "category":    { "type": "string", "description": "Result category (e.g. 'general')" },
           "markdown":    { "type": "string", "description": "Present when scrapeOptions.formats includes 'markdown'" }
         }
       },
