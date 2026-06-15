@@ -39,7 +39,7 @@ and the fork stays easy to sync:
 |------|----------------|-----------|
 | Default JS render ladder | `HTTP → LightPanda → Chrome` (CDP) | `HTTP → LightPanda → Camofox` (Firefox) |
 | Stealth tier | browserless Chromium (SSPL) | Camofox — engine-level fingerprint evasion |
-| `/v1/search` backend | SearXNG sidecar | **Camofox-driven Google** |
+| `/v1/search` backend | SearXNG sidecar | **8 engines built in** — Google, Bing, DuckDuckGo, Wikipedia, YouTube, Reddit, Amazon, GitHub (no sidecar) |
 | Interactive MCP | `crw-browse` (CDP, 2 tools) | Upstream **[`camofox-mcp`](https://github.com/redf0x1/camofox-mcp)** wired into the Docker stack — 47 tools over Camofox REST |
 
 **What sets this fork apart:**
@@ -93,13 +93,13 @@ most-cited alternatives. Descriptive shape, not a benchmark.
 |---|---|---|---|---|---|
 | Language | Rust | Rust | Node.js + Playwright | Python + Playwright | Rust |
 | License | AGPL-3.0 | AGPL-3.0 (commercial avail.) | AGPL-3.0 (commercial avail.) | Apache-2.0 | Source-available / commercial ([spider.cloud](https://spider.cloud)) |
-| Self-host footprint | Docker image (engine + Camofox/Firefox) | Single static binary (~8 MB) | Multi-container (~500 MB+ image) | ~2 GB image (browser bundled) | Managed-first; self-host via crate |
-| Memory baseline (idle) | ~50 MB engine; Camofox on heavy renders | ~50 MB | Large (Chromium heap) | Large (Chromium heap) | Light (Rust) |
-| Stealth tier | Camofox (Firefox anti-detect) | browserless Chromium (opt-in) | Playwright Chromium | Playwright Chromium | — |
-| Search backend | Camofox-driven Google, multi-engine | SearXNG sidecar | Built-in | Built-in | Built-in |
+| Self-host footprint | Static binary (~8 MB) + one browser container | Static binary (~8 MB) + browser + SearXNG sidecar | Multi-container (~500 MB+ image) | ~2 GB image (browser bundled) | Managed-first; self-host via crate |
+| Memory baseline (idle) | ~50 MB | ~50 MB | Large (Chromium heap) | Large (Chromium heap) | Light (Rust) |
+| Stealth tier | **Anti-detect by default** (Camofox/Firefox) | browserless Chromium (SSPL), opt-in | Playwright Chromium | Playwright Chromium | — |
+| Search backend | **8 engines** (Google, Bing, DuckDuckGo, Wikipedia, YouTube, Reddit, Amazon, GitHub) | SearXNG sidecar | Built-in | Built-in | Built-in |
 | Firecrawl-compat API | Yes — **v1 + v2** | Yes — **v1 + v2** | Native | No | No |
-| MCP server | `crw-mcp` + `camofox-mcp` (47 tools) | Built-in (`crw-mcp`) | Separate package | Community add-on | No first-party |
-| Hosted option | Self-host only | `api.fastcrw.com` | firecrawl.dev | None official | spider.cloud (primary product) |
+| MCP server | `crw-mcp` **+ 47** interactive-browser tools | `crw-mcp` only | Separate package | Community add-on | No first-party |
+| Hosted option | Self-host | `api.fastcrw.com` | firecrawl.dev | None official | spider.cloud (primary product) |
 
 Pricing/spec cells where claimed link to the vendor page; everything else
 is the qualitative architectural shape, not a comparison number.
