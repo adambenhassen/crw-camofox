@@ -1,5 +1,5 @@
 # Docker-specific overrides (layered on top of config.default.toml).
-# Renderer failover order: HTTP → LightPanda → Camofox (Chrome is opt-in).
+# Renderer failover order: HTTP → LightPanda → Camofox.
 
 [request]
 # Bench analysis (May 2026): 12 of 14 zero-byte misses on the 150-URL diagnose
@@ -25,63 +25,31 @@ rate_limit_rps = 0
 
 
 [renderer]
-# Per-tier nav timeouts. Bench analysis (April 2026): the flat 30s budget
-# pushed slow gov/legal SPAs to client_timeout in chrome (~6 URLs) while
-# letting the http tier monopolize 30s of budget on stalled origins. Splitting
-# 15/20/45 lets HTTP fail fast into the JS escalation while giving Chrome
-# enough headroom for `networkidle` on heavy pages.
-# Tightened tier timeouts to fit the 8s end-to-end deadline (the SLO target).
-# Was 15/20/45 — the old long-tail allowance worked when deadline wasn't
-# enforced; once T15-T18 enforced it server-side, lightpanda's 20s budget
-# consumed the entire 8s deadline before chrome could escalate. The new
-# 4/4 split lets HTTP fail fast (~200ms) into lightpanda (≤4s budget,
-# bounded by deadline.remaining), then chrome with the residual budget.
-# chrome_timeout_ms is the absolute ceiling — chrome_nav_budget_ms drives
-# the actual partial-snapshot race inside.
+# Per-tier nav timeouts, tuned to fit the 8s end-to-end deadline (the SLO
+# target). HTTP fails fast (~200ms) into LightPanda (≤4s budget, bounded by
+# deadline.remaining), then escalates to the Camofox heavy tier with the
+# residual budget. chrome_timeout_ms is the absolute ceiling for that heavy
+# tier (see below).
 http_timeout_ms = 4000
-# LightPanda bounded tight so chrome always has ≥3s residual under the 8s
-# deadline. LP is flaky on heavy SPAs (segfaults, CDP closes mid-eval); the
-# escalation loss from skipping marginal LP renders is dominated by chrome
+# LightPanda bounded tight so the Camofox tier always has residual budget under
+# the 8s deadline. LP is flaky on heavy SPAs (segfaults, CDP closes mid-eval);
+# the escalation loss from skipping marginal LP renders is dominated by Camofox
 # winning more often inside its budget. Bench analysis (May 2026):
 # 12/30 failures were `Timeout after Xms` where LP burned the whole deadline.
 lightpanda_timeout_ms = 2500
+# Absolute ceiling for the heavy JS tier (Camofox). Named chrome_timeout_ms
+# for backward compatibility; it governs the Camofox tier's nav budget.
 chrome_timeout_ms = 30000
-
-# Phase 2: chrome request interception. Pump blocks images/media/fonts/
-# manifests/websockets + analytics/ads/session-replay hosts via
-# Fetch.requestPaused. Cuts subresource volume by ~50% on commercial
-# pages, dropping per-render latency. See blocklist.rs for entries.
-chrome_intercept_resources = true
-# Hard ceiling for chrome post-navigate phase. Inner race; on hit a
-# partial-DOM snapshot is returned with truncated=true.
-chrome_nav_budget_ms = 12000
-
-# Phase 4 §B5: bounded browser-context pool. Validated 2026-05-11
-# (PROGRESS.md gap-closure): cookie/storage isolation T1 PASS, B2 sanity
-# ratio < 2× (T2), RSS soak chrome 1.08× over 500 reqs (T3), TOML flip
-# 75/75 across 3 cycles (T5). Backend explicitly vanilla — pool is gated
-# off on browserless via lib.rs.
-chrome_backend = "vanilla"
-chrome_context_pool_enabled = true
 
 [renderer.lightpanda]
 ws_url = "ws://lightpanda:9222/"
 
-# Camofox (camofox-browser REST) — the heavy/stealth JS tier. Takes Chrome's
-# ladder slot by default (tried after LightPanda). Reachable on the compose
-# bridge as `camofox:9377`. When the camofox server runs with auth, set the key
-# here or via `CRW_RENDERER__CAMOFOX__API_KEY`.
+# Camofox (camofox-browser REST) — the heavy/stealth JS tier, tried after
+# LightPanda. Reachable on the compose bridge as `camofox:9377`. When the
+# camofox server runs with auth, set the key here or via
+# `CRW_RENDERER__CAMOFOX__API_KEY`.
 [renderer.camofox]
 base_url = "http://camofox:9377"
-
-# Chrome (CDP) is no longer bundled in the Compose stack — Camofox is the
-# default heavy/stealth tier. The chrome renderer code remains; to use it,
-# point this at your own CDP endpoint and optionally remove [renderer.camofox].
-# [renderer.chrome]
-# ws_url = "ws://your-chrome-host:9222/"
-
-[renderer.chrome_pool]
-size = 4
 
 # /v1/search now flows through Camofox (Firefox) by default — it drives Google
 # directly via the camofox-browser tier configured above. SearXNG is opt-in: to

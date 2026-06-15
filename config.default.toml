@@ -19,20 +19,20 @@ rate_limit_rps = 10              # Max requests/second (global). 0 = unlimited.
 #   is small. Set to false to enforce a strict SLO regardless of tier sizing.
 
 [renderer]
-mode = "auto"                     # auto | lightpanda | playwright | chrome | camofox | none
+mode = "auto"                     # auto | lightpanda | camofox | none
 page_timeout_ms = 30000
 pool_size = 4
 # render_js_default = true        # alias: force_js = true
                                   # Forces JS rendering when a request omits `renderJs`.
                                   # Per-request `renderJs` always wins over this default.
 
-# Failover order: LightPanda → Chrome. Configure one or both.
+# Failover order: LightPanda → Camofox. Configure one or both.
 # In auto mode, CRW tries each renderer in order. LightPanda is fast and
 # light, but its JS engine can crash on complex SPAs (Next.js App Router
 # hydration, modern React 18+, etc.). When that happens — or when the
 # rendered output contains framework error boundaries — the chain falls
-# through to Chrome. Chrome also handles Cloudflare challenges via
-# built-in stealth injection + challenge retry.
+# through to Camofox (Firefox/Camoufox), the anti-detect heavy tier that
+# also handles bot challenges.
 #
 # Strongly recommended for production: configure both. LightPanda alone
 # will return broken HTML for sites that crash during hydration.
@@ -40,16 +40,10 @@ pool_size = 4
 [renderer.lightpanda]
 ws_url = "ws://127.0.0.1:9222/"
 
-# [renderer.chrome]
-# ws_url = "ws://127.0.0.1:9223/"
-
-# [renderer.playwright]
-# ws_url = "ws://playwright:9222"
-
 # Camofox (camofox-browser REST) — the Firefox/Camoufox anti-detect tier. Not a
 # CDP endpoint: `base_url` is the camofox-browser HTTP server. In `auto` mode it
-# takes Chrome's ladder slot (tried after LightPanda). When set, it also backs
-# `/v1/search` (browser-driven Google) in preference to SearXNG.
+# is tried after LightPanda. When set, it also backs `/v1/search`
+# (browser-driven Google) in preference to SearXNG.
 # [renderer.camofox]
 # base_url = "http://127.0.0.1:9377"
 # api_key = "..."                 # only if the camofox server runs with auth

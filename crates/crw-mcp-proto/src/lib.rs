@@ -10,10 +10,6 @@ use serde_json::{Value, json};
 /// and result `structuredContent`, both introduced in the 2025-06-18 revision.
 /// There is no per-feature capability flag for structured output, so advertising
 /// the revision that defines it is the only spec-legal way to emit it.
-///
-/// NOTE: `crw-browse` is a separate rmcp-based MCP server that pins its own
-/// `ProtocolVersion::V_2024_11_05` (crw-browse/src/server.rs) and does NOT consume
-/// this constant — it intentionally stays on 2024-11-05.
 pub const PROTOCOL_VERSION: &str = "2025-06-18";
 
 // --- JSON-RPC types ---
@@ -118,7 +114,7 @@ pub fn tool_definitions(proxy_mode: bool) -> Value {
                     },
                     "renderer": {
                         "type": "string",
-                        "enum": ["auto", "lightpanda", "chrome", "playwright"],
+                        "enum": ["auto", "lightpanda", "camofox"],
                         "description": "Pin renderer; non-auto hard-pins and implies renderJs:true (default auto)"
                     }
                 },
@@ -166,7 +162,7 @@ pub fn tool_definitions(proxy_mode: bool) -> Value {
                     },
                     "renderer": {
                         "type": "string",
-                        "enum": ["auto", "lightpanda", "chrome", "playwright"],
+                        "enum": ["auto", "lightpanda", "camofox"],
                         "description": "Pin renderer; non-auto hard-pins and implies renderJs:true (default auto)"
                     }
                 },
@@ -828,12 +824,7 @@ mod tests {
             .expect("renderer.enum must be an array");
         assert_eq!(
             enum_vals,
-            &vec![
-                json!("auto"),
-                json!("lightpanda"),
-                json!("chrome"),
-                json!("playwright"),
-            ]
+            &vec![json!("auto"), json!("lightpanda"), json!("camofox")]
         );
     }
 
@@ -856,11 +847,10 @@ mod tests {
         let enum_vals = props["renderer"]["enum"]
             .as_array()
             .expect("renderer.enum must be an array");
-        assert_eq!(enum_vals.len(), 4);
-        assert!(enum_vals.iter().any(|v| v == "chrome"));
-        assert!(enum_vals.iter().any(|v| v == "lightpanda"));
+        assert_eq!(enum_vals.len(), 3);
         assert!(enum_vals.iter().any(|v| v == "auto"));
-        assert!(enum_vals.iter().any(|v| v == "playwright"));
+        assert!(enum_vals.iter().any(|v| v == "lightpanda"));
+        assert!(enum_vals.iter().any(|v| v == "camofox"));
     }
 
     #[test]

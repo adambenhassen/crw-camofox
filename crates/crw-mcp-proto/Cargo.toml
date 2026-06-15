@@ -7,7 +7,7 @@ repository.workspace = true
 homepage.workspace = true
 keywords.workspace = true
 categories.workspace = true
-description = "MCP JSON-RPC 2.0 protocol types (shared by crw-server, crw-mcp, crw-browse)"
+description = "MCP JSON-RPC 2.0 protocol types (shared by crw-server, crw-mcp)"
 
 [dependencies]
 serde = { workspace = true }

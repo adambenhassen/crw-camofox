@@ -67,11 +67,6 @@
           "jsonpath": "$.workspace.dependencies.crw-server.version"
         },
         {
-          "type": "toml",
-          "path": "Cargo.toml",
-          "jsonpath": "$.workspace.dependencies.crw-browse.version"
-        },
-        {
           "type": "json",
           "path": "server.json",
           "jsonpath": "$.version"

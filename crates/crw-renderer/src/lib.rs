@@ -299,7 +299,7 @@ impl FallbackRenderer {
         }
 
         #[cfg(feature = "cdp")]
-        let mut chrome_pool: Option<
+        let chrome_pool: Option<
             Arc<browser_pool::BrowserContextPool<cdp_conn::CdpConnection>>,
         > = None;
 
@@ -338,138 +338,6 @@ impl FallbackRenderer {
                     cf.api_key.clone(),
                     Duration::from_millis(config.chrome_timeout()),
                 )));
-            }
-            if want(RendererMode::Playwright) {
-                if let Some(pw) = &config.playwright {
-                    // Playwright is treated as a "chrome-equivalent" tier —
-                    // same timeout budget, same kind of work.
-                    js_renderers.push(Arc::new(cdp::CdpRenderer::new(
-                        "playwright",
-                        &pw.ws_url,
-                        config.chrome_timeout(),
-                        config.pool_size,
-                    )));
-                } else if matches!(config.mode, RendererMode::Playwright) {
-                    return Err(CrwError::ConfigError(
-                        "renderer.mode = \"playwright\" but [renderer.playwright] ws_url is not \
-                         configured"
-                            .into(),
-                    ));
-                }
-            }
-            if want(RendererMode::Chrome) {
-                if let Some(ch) = &config.chrome {
-                    let blocklist = blocklist::Blocklist::defaults()
-                        .with_stylesheets(config.chrome_intercept_stylesheets);
-                    let mut renderer = cdp::CdpRenderer::new(
-                        "chrome",
-                        &ch.ws_url,
-                        config.chrome_timeout(),
-                        config.pool_size,
-                    )
-                    .with_nav_budget(config.chrome_nav_budget_ms)
-                    .with_interception(
-                        config.chrome_intercept_resources,
-                        blocklist,
-                        config.chrome_host_intercept_disable.clone(),
-                    );
-
-                    // Browser-context pool: gated off on browserless v2 in v1
-                    // per plan §"Out of scope". The backend is set explicitly
-                    // in config; never URL-sniffed.
-                    if config.chrome_context_pool_enabled {
-                        match config.chrome_backend {
-                            crw_core::config::ChromeBackend::Vanilla => {
-                                let pcfg = &config.chrome_pool;
-                                let size = pcfg.size.unwrap_or_else(|| {
-                                    let n = std::thread::available_parallelism()
-                                        .map(|p| p.get())
-                                        .unwrap_or(2);
-                                    std::cmp::max(2, n / 2)
-                                });
-                                renderer = renderer.with_pool(browser_pool::PoolCfg {
-                                    size,
-                                    recycle_after_navs: pcfg.recycle_after_navs,
-                                    idle_timeout: std::time::Duration::from_secs(
-                                        pcfg.idle_timeout_secs,
-                                    ),
-                                    health_check_after: std::time::Duration::from_secs(
-                                        pcfg.health_check_secs,
-                                    ),
-                                    shutdown_drain: std::time::Duration::from_secs(
-                                        pcfg.shutdown_drain_secs,
-                                    ),
-                                    close_target_timeout: std::time::Duration::from_secs(2),
-                                    dispose_ctx_timeout: std::time::Duration::from_secs(1),
-                                    create_ctx_timeout: std::time::Duration::from_secs(1),
-                                });
-                                tracing::info!(
-                                    pool_size = size,
-                                    "chrome browser-context pool enabled"
-                                );
-                            }
-                            crw_core::config::ChromeBackend::Browserless => {
-                                tracing::warn!(
-                                    "chrome_context_pool_enabled = true but \
-                                     chrome_backend = browserless — pool unsupported on \
-                                     this backend in v1, falling back to legacy path"
-                                );
-                            }
-                        }
-                    }
-                    chrome_pool = renderer.pool();
-                    js_renderers.push(Arc::new(renderer));
-                } else if matches!(config.mode, RendererMode::Chrome) {
-                    return Err(CrwError::ConfigError(
-                        "renderer.mode = \"chrome\" but [renderer.chrome] ws_url is not configured"
-                            .into(),
-                    ));
-                }
-                // Residential-proxy Chrome tier: opt-in 4th renderer. Pushed
-                // after `chrome` so the existing in-request fallback loop
-                // (`for renderer in renderers` in fetch_with_js) tries Chrome
-                // direct first and falls through to chrome_proxy on failure.
-                // Skipped when [renderer.chrome_proxy] is unset OR when
-                // `ws_url` is empty (docker-compose passes empty env vars
-                // even when --profile proxy is inactive).
-                if let Some(cp) = config
-                    .chrome_proxy
-                    .as_ref()
-                    .filter(|c| !c.ws_url.trim().is_empty())
-                {
-                    let blocklist = blocklist::Blocklist::defaults()
-                        .with_stylesheets(config.chrome_intercept_stylesheets);
-                    let mut renderer = cdp::CdpRenderer::new(
-                        "chrome_proxy",
-                        &cp.ws_url,
-                        config.chrome_proxy_timeout(),
-                        config.pool_size,
-                    )
-                    .with_nav_budget(config.chrome_nav_budget_ms)
-                    .with_interception(
-                        config.chrome_intercept_resources,
-                        blocklist,
-                        config.chrome_host_intercept_disable.clone(),
-                    );
-                    // Wire DataImpulse base creds when configured. The renderer
-                    // composes `{base_user}__cr.{country}` per request and replies
-                    // to Chrome's `Fetch.authRequired` via CDP — replacing the
-                    // removed gost forwarder.
-                    if let (Some(u), Some(p)) = (&config.proxy_base_user, &config.proxy_base_pass) {
-                        renderer = renderer.with_proxy_auth_base(
-                            u.clone(),
-                            p.clone(),
-                            config.proxy_default_country.clone(),
-                        );
-                    }
-                    tracing::info!(
-                        ws_url = %cp.ws_url,
-                        proxy_auth = config.proxy_base_user.is_some(),
-                        default_country = ?config.proxy_default_country,
-                        "chrome_proxy tier enabled"
-                    );
-                    js_renderers.push(Arc::new(renderer));
-                }
             }
         }
 
@@ -1444,37 +1312,6 @@ mod tests {
 
     #[cfg(feature = "cdp")]
     #[test]
-    fn new_mode_chrome_without_endpoint_errors() {
-        let cfg = base_cfg(RendererMode::Chrome);
-        let err =
-            FallbackRenderer::new(&cfg, "crw-test", None, &StealthConfig::default()).unwrap_err();
-        let msg = err.to_string().to_lowercase();
-        assert!(msg.contains("chrome"), "expected chrome in error: {msg}");
-        assert!(
-            msg.contains("ws_url") || msg.contains("not configured"),
-            "expected ws_url hint in error: {msg}"
-        );
-    }
-
-    #[cfg(feature = "cdp")]
-    #[test]
-    fn new_mode_chrome_with_endpoint_ok_only_chrome() {
-        let cfg = RendererConfig {
-            mode: RendererMode::Chrome,
-            chrome: Some(CdpEndpoint {
-                ws_url: "ws://127.0.0.1:9222/".into(),
-            }),
-            lightpanda: Some(CdpEndpoint {
-                ws_url: "ws://127.0.0.1:9223/".into(),
-            }),
-            ..Default::default()
-        };
-        let r = FallbackRenderer::new(&cfg, "crw-test", None, &StealthConfig::default()).unwrap();
-        assert_eq!(r.js_renderer_names(), vec!["chrome"]);
-    }
-
-    #[cfg(feature = "cdp")]
-    #[test]
     fn new_mode_lightpanda_without_endpoint_errors() {
         let cfg = base_cfg(RendererMode::Lightpanda);
         let err =
@@ -1484,59 +1321,16 @@ mod tests {
 
     #[cfg(feature = "cdp")]
     #[test]
-    fn new_mode_auto_with_both_endpoints_preserves_order() {
+    fn new_mode_auto_with_lightpanda_endpoint_builds_lightpanda() {
         let cfg = RendererConfig {
             mode: RendererMode::Auto,
             lightpanda: Some(CdpEndpoint {
                 ws_url: "ws://127.0.0.1:9222/".into(),
             }),
-            chrome: Some(CdpEndpoint {
-                ws_url: "ws://127.0.0.1:9223/".into(),
-            }),
             ..Default::default()
         };
         let r = FallbackRenderer::new(&cfg, "crw-test", None, &StealthConfig::default()).unwrap();
-        assert_eq!(r.js_renderer_names(), vec!["lightpanda", "chrome"]);
-    }
-
-    #[cfg(feature = "cdp")]
-    #[test]
-    fn ladder_includes_chrome_proxy_when_configured() {
-        let cfg = RendererConfig {
-            mode: RendererMode::Auto,
-            lightpanda: Some(CdpEndpoint {
-                ws_url: "ws://127.0.0.1:9222/".into(),
-            }),
-            chrome: Some(CdpEndpoint {
-                ws_url: "ws://127.0.0.1:9223/".into(),
-            }),
-            chrome_proxy: Some(CdpEndpoint {
-                ws_url: "ws://127.0.0.1:9224/".into(),
-            }),
-            ..Default::default()
-        };
-        let r = FallbackRenderer::new(&cfg, "crw-test", None, &StealthConfig::default()).unwrap();
-        // chrome_proxy must be the LAST tier — fallback chain tries Chrome
-        // direct first and only falls through to the proxy on Chrome failure.
-        assert_eq!(
-            r.js_renderer_names(),
-            vec!["lightpanda", "chrome", "chrome_proxy"]
-        );
-    }
-
-    #[cfg(feature = "cdp")]
-    #[test]
-    fn ladder_omits_chrome_proxy_when_not_configured() {
-        let cfg = RendererConfig {
-            mode: RendererMode::Auto,
-            chrome: Some(CdpEndpoint {
-                ws_url: "ws://127.0.0.1:9223/".into(),
-            }),
-            chrome_proxy: None,
-            ..Default::default()
-        };
-        let r = FallbackRenderer::new(&cfg, "crw-test", None, &StealthConfig::default()).unwrap();
-        assert!(!r.js_renderer_names().contains(&"chrome_proxy"));
+        assert_eq!(r.js_renderer_names(), vec!["lightpanda"]);
     }
 
     #[cfg(not(feature = "cdp"))]

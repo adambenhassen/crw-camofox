@@ -49,7 +49,7 @@ Parameters:
 - `excludeTags` — Exclude content matching these CSS selectors (e.g. `["nav", "footer"]`)
 - `renderJs` — Force JavaScript rendering. Default: auto-detect (null)
 - `waitFor` — Milliseconds to wait after page load before capturing
-- `renderer` — Renderer override (e.g. `"playwright"`)
+- `renderer` — Renderer override (`"auto"`, `"lightpanda"`, or `"camofox"`)
 - `maxLength` — Truncate output to this many chars. `0` = unbounded. Default: ~15 000
 
 ### crw_crawl

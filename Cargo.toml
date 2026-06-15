@@ -9,7 +9,6 @@ members = [
     "crates/crw-server",
     "crates/crw-mcp",
     "crates/crw-mcp-proto",
-    "crates/crw-browse",
     "crates/crw-cli",
     "crates/crw-monitor",
 ]
@@ -69,7 +68,7 @@ rand = "0.9"
 futures = "0.3"
 dashmap = "6"
 
-# WebSocket client (shared by crw-renderer and crw-browse)
+# WebSocket client (used by the crw-renderer CDP tier)
 tokio-tungstenite = { version = "0.28", features = ["rustls-tls-native-roots"] }
 
 # JSON schema generation (used by rmcp #[tool] macro)
@@ -142,7 +141,6 @@ crw-diff = { path = "crates/crw-diff", version = "0.15.2" }
 crw-crawl = { path = "crates/crw-crawl", version = "0.15.2" }
 crw-monitor = { path = "crates/crw-monitor", version = "0.15.2" }
 crw-server = { path = "crates/crw-server", version = "0.15.2" }
-crw-browse = { path = "crates/crw-browse", version = "0.15.2" }
 
 [profile.release]
 lto = true

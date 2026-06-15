@@ -1,12 +1,12 @@
 #!/usr/bin/env bash
-# Sequential 4-way renderer comparison: none / lightpanda / browserless / auto.
+# Sequential 4-way renderer comparison: none / lightpanda / camofox / auto.
 # Each pass: restart crw with a different CRW_RENDERER__MODE, run 1000-URL bench,
 # capture JSON + log.
 set -euo pipefail
 
 cd "$(dirname "$0")/.."
 
-# Load .env (HF_TOKEN, BROWSERLESS_TOKEN) so HuggingFace stops nagging.
+# Load .env (HF_TOKEN) so HuggingFace stops nagging.
 if [ -f .env ]; then
   set -a; . ./.env; set +a
 fi
@@ -53,7 +53,7 @@ run_pass() {
 
 run_pass none       none
 run_pass lightpanda lightpanda
-run_pass chrome     browserless
+run_pass camofox    camofox
 run_pass auto       auto
 
 echo

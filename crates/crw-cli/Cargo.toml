@@ -14,16 +14,13 @@ name = "crw"
 path = "src/main.rs"
 
 [features]
-default = ["serve", "mcp-embedded", "browse"]
+default = ["serve", "mcp-embedded"]
 
 # Enable serve subcommand (REST API server)
 serve = ["dep:axum", "dep:tower", "dep:tower-http"]
 
 # Enable embedded MCP mode (self-contained, no server needed)
 mcp-embedded = ["dep:crw-server"]
-
-# Enable browse subcommand (browser automation MCP)
-browse = ["dep:crw-browse", "dep:rmcp", "dep:anyhow"]
 
 [dependencies]
 # Core crates
@@ -36,16 +33,10 @@ crw-search = { workspace = true }
 # Server (for serve + mcp-embedded + setup commands)
 crw-server = { workspace = true, optional = true, features = ["cdp"] }
 
-# Browse (for browse command)
-crw-browse = { workspace = true, optional = true }
-
 # Web framework (for serve command)
 axum = { workspace = true, optional = true }
 tower = { workspace = true, optional = true }
 tower-http = { workspace = true, optional = true }
-
-# MCP (for browse command)
-rmcp = { version = "1.5", features = ["server", "macros", "transport-io"], optional = true }
 
 # Async runtime
 tokio = { workspace = true }
@@ -66,9 +57,6 @@ base64 = { workspace = true }
 # Logging
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
-
-# Error handling
-anyhow = { version = "1", optional = true }
 
 # UUID (for crawl job IDs)
 uuid = { workspace = true }

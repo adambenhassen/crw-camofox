@@ -14,7 +14,6 @@
 //! crw map example.com
 //! crw serve --port 3000
 //! crw mcp
-//! crw browse
 //! crw setup
 //! ```
 
@@ -40,7 +39,6 @@ use teardown::{CmdError, finish, install_signal_teardown};
         crw map example.com                                             # Discover URLs\n  \
         crw serve --port 3000                                           # Start REST API server\n  \
         crw mcp                                                         # Start MCP server\n  \
-        crw browse                                                      # Start browser automation MCP\n  \
         crw setup                                                       # Interactive setup wizard",
     after_help = "INSTALL:\n  \
         brew install us/crw/crw                                         # macOS / Linux\n  \
@@ -150,9 +148,6 @@ enum Commands {
     /// Start the MCP (Model Context Protocol) server
     Mcp(commands::mcp::McpArgs),
 
-    /// Start the browser automation MCP server
-    Browse(commands::browse::BrowseArgs),
-
     /// Interactive setup wizard (Cloud or Local)
     Setup(commands::setup::SetupArgs),
 }
@@ -205,15 +200,6 @@ async fn main() {
         Some(Commands::Mcp(args)) => {
             install_signal_teardown();
             commands::mcp::run(args).await
-        }
-        Some(Commands::Browse(args)) => {
-            if let Err(e) = commands::browse::run(args).await {
-                eprintln!("error: {e}");
-                // browse connects to an external ws_url and owns no
-                // ManagedBrowser, so there is no registry teardown to run.
-                std::process::exit(1); // teardown-exit-ok
-            }
-            Ok(())
         }
         Some(Commands::Setup(args)) => {
             commands::setup::run(args).await;
