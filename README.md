@@ -37,14 +37,10 @@ and the fork stays easy to sync:
 
 | Area | Upstream `crw` | This fork |
 |------|----------------|-----------|
-| Default JS render ladder | `HTTP → LightPanda → Chrome` (CDP) | `HTTP → LightPanda → Camofox` (Firefox). Chrome/Playwright tiers removed. |
-| Stealth tier | browserless Chromium (SSPL) | Camofox (engine-level fingerprint evasion). Browserless removed. |
-| `/v1/search` backend | SearXNG sidecar | **Camofox-driven Google** by default. SearXNG kept, opt-in (`--profile searxng`). |
-| Interactive MCP | `crw-browse` (CDP, 2 tools) | Upstream **[`camofox-mcp`](https://github.com/redf0x1/camofox-mcp)** wired into the Docker stack — 47 tools over Camofox REST. `crw-browse` removed. |
-
-LightPanda (CDP) and SearXNG remain in the tree; SearXNG is opt-in via a compose
-profile. The Chrome/Playwright/browserless tiers and the `crw-browse` MCP have
-been removed from this fork.
+| Default JS render ladder | `HTTP → LightPanda → Chrome` (CDP) | `HTTP → LightPanda → Camofox` (Firefox) |
+| Stealth tier | browserless Chromium (SSPL) | Camofox — engine-level fingerprint evasion |
+| `/v1/search` backend | SearXNG sidecar | **Camofox-driven Google** |
+| Interactive MCP | `crw-browse` (CDP, 2 tools) | Upstream **[`camofox-mcp`](https://github.com/redf0x1/camofox-mcp)** wired into the Docker stack — 47 tools over Camofox REST |
 
 **What sets this fork apart:**
 
