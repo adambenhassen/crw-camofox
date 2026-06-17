@@ -134,3 +134,34 @@ jobs:
           labels: ${{ steps.meta.outputs.labels }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
+
+  publish-release:
+    needs: [release-context, publish-docker]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ needs.release-context.outputs.source_ref }}
+          fetch-depth: 0
+
+      - name: Create GitHub Release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ needs.release-context.outputs.release_tag }}
+          VERSION: ${{ needs.release-context.outputs.version }}
+        run: |
+          set -euo pipefail
+          notes=$(printf '%s\n' \
+            "Multi-arch Docker image (\`linux/amd64\` + \`linux/arm64\`):" \
+            "" \
+            "    docker pull ghcr.io/${{ github.repository }}:${VERSION}" \
+            "" \
+            "Also tagged \`${VERSION%.*}\` and \`latest\`.")
+          # Idempotent: create on first run, update notes on a re-run.
+          if gh release view "$TAG" --repo "${{ github.repository }}" >/dev/null 2>&1; then
+            gh release edit "$TAG" --repo "${{ github.repository }}" --notes "$notes"
+          else
+            gh release create "$TAG" --repo "${{ github.repository }}" --title "$TAG" --notes "$notes"
+          fi
