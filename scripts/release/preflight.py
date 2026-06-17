@@ -18,15 +18,7 @@ cut. Combines several guards that historically failed silently:
   4. Every published crate's path/git deps have an explicit version field
      (Cargo refuses to publish otherwise, but the failure mode is opaque).
 
-  5. Workspace version is consistent across all version surfaces:
-     - Cargo.toml workspace.package.version
-     - pyproject.toml project.version
-     - mcp/crw-mcp/package.json version + every optionalDependencies pin
-     - mcp/crw-mcp-*/package.json version (per platform)
-     - server.json (if present) version
-     (codex review v4 S3.)
-
-  6. release-please-config.json extra-files entries are valid (delegated to
+  5. release-please-config.json extra-files entries are valid (delegated to
      audit_release_please_config.py).
 
 Exits non-zero on any failure with `::error::` annotations for GitHub Actions.
@@ -131,84 +123,6 @@ def transitive_default_chain(
 def workspace_version() -> str:
     data = tomllib.loads(Path("Cargo.toml").read_text())
     return data["workspace"]["package"]["version"]
-
-
-def collect_version_surfaces(ws_version: str) -> list[tuple[str, str, str]]:
-    """Return [(surface_label, expected, actual)] for every version pin.
-
-    Every version surface is required; a missing surface is reported as a
-    failing row (not skipped) so a stale path after a move fails preflight.
-    """
-    rows: list[tuple[str, str, str]] = []
-
-    # pyproject.toml
-    py = Path("sdks/python/pyproject.toml")
-    if py.exists():
-        d = tomllib.loads(py.read_text())
-        rows.append((str(py), ws_version, d.get("project", {}).get("version", "MISSING")))
-    else:
-        rows.append((str(py), ws_version, "MISSING FILE"))
-
-    # npm platform packages, discovered by globbing `mcp/crw-mcp-*/package.json`
-    # (the main package `mcp/crw-mcp` has no trailing `-` so it is excluded).
-    # Self-deriving: adding a platform needs NO edit here — the old hardcoded
-    # 6-tuples meant a 7th platform was silently unchecked.
-    platform_pkgs = sorted(Path("mcp").glob("crw-mcp-*/package.json"))
-    if not platform_pkgs:
-        rows.append(("mcp/crw-mcp-*/package.json", ws_version, "MISSING (glob matched nothing)"))
-    disk_platforms = {p.parent.name for p in platform_pkgs}
-
-    # npm main package: version + every internal optionalDependencies pin, with
-    # the platform key set read from the manifest itself.
-    npm_main = Path("mcp/crw-mcp/package.json")
-    if not npm_main.exists():
-        rows.append((str(npm_main) + ":version", ws_version, "MISSING FILE"))
-    opt_platforms: set[str] = set()
-    if npm_main.exists():
-        d = json.loads(npm_main.read_text())
-        rows.append((str(npm_main) + ":version", ws_version, d.get("version", "MISSING")))
-        for dep, actual in sorted(d.get("optionalDependencies", {}).items()):
-            if not dep.startswith("crw-mcp-"):
-                continue
-            opt_platforms.add(dep)
-            # Accept exact, ^v, ~v.
-            if actual in (ws_version, f"^{ws_version}", f"~{ws_version}"):
-                continue
-            rows.append((f"{npm_main}:optionalDependencies.{dep}", ws_version, actual))
-
-        # Cross-check: every platform package on disk must be listed in
-        # optionalDependencies (and vice-versa), so a new platform can't be
-        # half-wired and silently skipped.
-        for missing in sorted(disk_platforms - opt_platforms):
-            rows.append((
-                f"{npm_main}:optionalDependencies.{missing}", ws_version,
-                "MISSING (platform package exists on disk but not in optionalDependencies)",
-            ))
-        for extra in sorted(opt_platforms - disk_platforms):
-            rows.append((
-                f"{npm_main}:optionalDependencies.{extra}", "a platform package dir",
-                "MISSING (listed in optionalDependencies but no mcp/<plat>/package.json)",
-            ))
-
-    for pkg_json in platform_pkgs:
-        d = json.loads(pkg_json.read_text())
-        rows.append((str(pkg_json) + ":version", ws_version, d.get("version", "MISSING")))
-
-    # server.json (MCP registry)
-    sj = Path("server.json")
-    if sj.exists():
-        d = json.loads(sj.read_text())
-        rows.append((str(sj) + ":version", ws_version, d.get("version", "MISSING")))
-
-    # TypeScript SDK
-    ts = Path("sdks/typescript/package.json")
-    if ts.exists():
-        d = json.loads(ts.read_text())
-        rows.append((str(ts) + ":version", ws_version, d.get("version", "MISSING")))
-    else:
-        rows.append((str(ts) + ":version", ws_version, "MISSING FILE"))
-
-    return rows
 
 
 # ---------- main ----------
@@ -341,11 +255,7 @@ def main() -> int:
                         f"path/git dep without version field (cargo will refuse to publish)."
                     )
 
-    # 5. Version surface consistency
     ws_v = workspace_version()
-    for label, expected, actual in collect_version_surfaces(ws_v):
-        if actual != expected:
-            errors.append(f"{label}: expected {expected}, found {actual}")
 
     if errors:
         print("::error::preflight failed", file=sys.stderr)

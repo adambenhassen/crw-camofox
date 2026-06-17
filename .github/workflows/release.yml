@@ -1,5 +1,10 @@
 name: Release
 
+# This fork distributes only as a multi-arch Docker image on GHCR. On a version
+# tag (or manual recovery via workflow_dispatch) it runs the pre-publish checks
+# and builds + pushes ghcr.io/<owner>/<repo>. Upstream's crates.io / npm / PyPI /
+# APT / Homebrew publishing is intentionally not part of this fork.
+
 on:
   push:
     tags: ["v*"]
@@ -10,9 +15,8 @@ on:
         required: true
 
 permissions:
-  contents: write
+  contents: read
   packages: write
-  id-token: write
 
 concurrency:
   group: release-${{ github.event.inputs.tag || github.ref_name }}
@@ -25,7 +29,6 @@ jobs:
       release_tag: ${{ steps.ctx.outputs.release_tag }}
       version: ${{ steps.ctx.outputs.version }}
       source_ref: ${{ steps.ctx.outputs.source_ref }}
-      correlation_id: ${{ steps.ctx.outputs.correlation_id }}
     steps:
       - id: ctx
         shell: bash
@@ -43,14 +46,12 @@ jobs:
           echo "$tag" | grep -qE '^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?(\+[0-9A-Za-z.-]+)?$' \
             || { echo "::error::tag '$tag' is not semver"; exit 1; }
           version="${tag#v}"
-          corr="${GITHUB_RUN_ID}-${version}"
           {
             echo "release_tag=$tag"
             echo "version=$version"
             echo "source_ref=$tag"
-            echo "correlation_id=$corr"
           } >> "$GITHUB_OUTPUT"
-          echo "::notice::release context: tag=$tag version=$version corr=$corr"
+          echo "::notice::release context: tag=$tag version=$version"
 
   check:
     needs: release-context
@@ -77,16 +78,6 @@ jobs:
           key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
           restore-keys: ${{ runner.os }}-cargo-
 
-      - name: Install uv (for preflight scripts)
-        uses: astral-sh/setup-uv@v3
-
-      - name: Preflight — workspace publishability
-        shell: bash
-        run: |
-          set -euo pipefail
-          uv run python scripts/release/preflight.py
-          uv run python scripts/release/audit_release_please_config.py
-
       - name: Check formatting
         run: cargo fmt --all -- --check
 
@@ -98,296 +89,6 @@ jobs:
 
       - name: Test
         run: cargo test --workspace
-
-  publish-crates:
-    needs: [release-context, check]
-    runs-on: ubuntu-latest
-    permissions:
-      contents: read
-    steps:
-      - uses: actions/checkout@v6
-        with:
-          ref: ${{ needs.release-context.outputs.source_ref }}
-
-      - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
-
-      - name: Publish all tiers
-        shell: bash
-        env:
-          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
-        run: |
-          set -euo pipefail
-          bash scripts/release/publish_all.sh \
-            --version "${{ needs.release-context.outputs.version }}"
-
-  publish-binaries:
-    needs: [release-context, check]
-    permissions:
-      contents: write
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - target: x86_64-apple-darwin
-            os: macos-latest
-            platform: darwin
-            arch_label: x64
-          - target: aarch64-apple-darwin
-            os: macos-latest
-            platform: darwin
-            arch_label: arm64
-          - target: x86_64-unknown-linux-gnu
-            os: ubuntu-latest
-            platform: linux
-            arch_label: x64
-          - target: aarch64-unknown-linux-gnu
-            os: ubuntu-latest
-            platform: linux
-            arch_label: arm64
-            cross: true
-          - target: x86_64-pc-windows-msvc
-            os: windows-latest
-            platform: win32
-            arch_label: x64
-          - target: aarch64-pc-windows-msvc
-            os: windows-latest
-            platform: win32
-            arch_label: arm64
-    runs-on: ${{ matrix.os }}
-    steps:
-      - uses: actions/checkout@v6
-        with:
-          ref: ${{ needs.release-context.outputs.source_ref }}
-
-      - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
-        with:
-          targets: ${{ matrix.target }}
-
-      - name: Install cross (Linux ARM only)
-        if: matrix.cross
-        # Retry: `cargo install cross` builds from source and pulls crates from
-        # the network; a single transient curl/HTTP2 hiccup (e.g. "Error in the
-        # HTTP2 framing layer") otherwise fails the whole arm64 binary and
-        # cascades to skip asset-gate -> pypi/npm/apt/homebrew. 3 attempts with
-        # backoff turn a flaky download into a non-event.
-        run: |
-          set -euo pipefail
-          for attempt in 1 2 3; do
-            if cargo install cross --git https://github.com/cross-rs/cross; then
-              exit 0
-            fi
-            echo "::warning::cross install attempt ${attempt}/3 failed (transient network); retrying in $((attempt * 20))s"
-            sleep "$((attempt * 20))"
-          done
-          echo "::error::cross install failed after 3 attempts"
-          exit 1
-
-      - name: Build
-        shell: bash
-        run: |
-          set -euo pipefail
-          if [ "${{ matrix.cross }}" = "true" ]; then
-            cross build --release -p crw-mcp -p crw-cli -p crw-server --target ${{ matrix.target }}
-          else
-            cargo build --release -p crw-mcp -p crw-cli -p crw-server --target ${{ matrix.target }}
-          fi
-
-      - name: Package (unix)
-        if: runner.os != 'Windows'
-        shell: bash
-        run: |
-          set -euo pipefail
-          for bin in crw crw-server crw-mcp; do
-            tar czf "${bin}-${{ matrix.platform }}-${{ matrix.arch_label }}.tar.gz" \
-              -C target/${{ matrix.target }}/release "$bin"
-          done
-
-      - name: Package (windows)
-        if: runner.os == 'Windows'
-        run: |
-          foreach ($bin in @("crw", "crw-server", "crw-mcp")) {
-            Compress-Archive -Path "target/${{ matrix.target }}/release/${bin}.exe" `
-              -DestinationPath "${bin}-${{ matrix.platform }}-${{ matrix.arch_label }}.zip"
-          }
-
-      - name: Upload to release
-        shell: bash
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          RELEASE_TAG: ${{ needs.release-context.outputs.release_tag }}
-        run: |
-          set -euo pipefail
-          if [ "${{ runner.os }}" = "Windows" ]; then ext="zip"; else ext="tar.gz"; fi
-          for bin in crw crw-server crw-mcp; do
-            gh release upload "$RELEASE_TAG" \
-              "${bin}-${{ matrix.platform }}-${{ matrix.arch_label }}.${ext}" --clobber
-          done
-
-  asset-gate:
-    needs: [release-context, publish-binaries]
-    runs-on: ubuntu-latest
-    permissions:
-      contents: read
-    steps:
-      - uses: actions/checkout@v6
-        with:
-          ref: ${{ needs.release-context.outputs.source_ref }}
-
-      - name: Verify all 18 binary assets attached
-        shell: bash
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          set -euo pipefail
-          bash scripts/release/asset_gate.sh "${{ needs.release-context.outputs.release_tag }}"
-
-  publish-pypi:
-    needs: [release-context, asset-gate]
-    runs-on: ubuntu-latest
-    permissions:
-      contents: read
-    steps:
-      - uses: actions/checkout@v6
-        with:
-          ref: ${{ needs.release-context.outputs.source_ref }}
-
-      - uses: actions/setup-python@v5
-        with:
-          python-version: "3.12"
-
-      - name: Build and publish (idempotent)
-        shell: bash
-        env:
-          TWINE_USERNAME: __token__
-          TWINE_PASSWORD: ${{ secrets.PYPI_TOKEN }}
-        run: |
-          set -euo pipefail
-          pip install build twine
-          (cd sdks/python && python -m build)
-          twine upload --skip-existing sdks/python/dist/*
-
-      - name: Verify
-        shell: bash
-        run: bash scripts/release/verify_pypi.sh "${{ needs.release-context.outputs.version }}"
-
-  publish-npm:
-    needs: [release-context, asset-gate]
-    # Temporarily disable npm publishing by setting repo variable SKIP_NPM=true
-    # (e.g. while the npm token can't publish — 2FA-bypass granular token not yet
-    # configured). The job is cleanly SKIPPED (gray), not failed/masked. Clear
-    # the SKIP_NPM repo variable to re-enable. See RELEASE.md.
-    if: ${{ vars.SKIP_NPM != 'true' }}
-    runs-on: ubuntu-latest
-    permissions:
-      contents: read
-    steps:
-      - uses: actions/checkout@v6
-        with:
-          ref: ${{ needs.release-context.outputs.source_ref }}
-
-      - uses: actions/setup-node@v4
-        with:
-          node-version: 20
-          registry-url: https://registry.npmjs.org
-
-      - name: Download platform release assets
-        shell: bash
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          RELEASE_TAG: ${{ needs.release-context.outputs.release_tag }}
-        run: |
-          set -euo pipefail
-          mkdir -p /tmp/assets
-          gh release download "$RELEASE_TAG" -D /tmp/assets -p "crw-mcp-*"
-
-      - name: Idempotent publish (platform packages)
-        shell: bash
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
-          VERSION: ${{ needs.release-context.outputs.version }}
-        run: |
-          set -euo pipefail
-          # npm trips a rate-based spam detector when many similarly-named
-          # platform packages are published back-to-back (E403 "Package name
-          # triggered spam detection"). Throttle between publishes and retry
-          # with exponential backoff so the rate window can reset.
-          npm_publish_retry() {
-            local dir="$1" attempt=1 max=5 delay=20
-            while true; do
-              if ( cd "$dir" && npm publish --access public ); then
-                return 0
-              fi
-              if (( attempt >= max )); then
-                echo "::error::npm publish failed for $dir after $max attempts"
-                return 1
-              fi
-              echo "::warning::npm publish failed for $dir (attempt $attempt/$max); retrying in ${delay}s (spam-detection backoff)"
-              sleep "$delay"
-              attempt=$((attempt + 1))
-              delay=$((delay * 2))
-            done
-          }
-          # win32 has no platform package: the names crw-mcp-win32-x64/arm64 are
-          # npm-security-held (0.0.1-security, owned by npm-support), so Windows
-          # is served by the launcher's GitHub-download fallback instead.
-          for dir in mcp/crw-mcp-*/; do
-            pkg=$(basename "$dir")
-            case "$pkg" in
-              crw-mcp-darwin-x64)   asset="crw-mcp-darwin-x64.tar.gz" ;;
-              crw-mcp-darwin-arm64) asset="crw-mcp-darwin-arm64.tar.gz" ;;
-              crw-mcp-linux-x64)    asset="crw-mcp-linux-x64.tar.gz" ;;
-              crw-mcp-linux-arm64)  asset="crw-mcp-linux-arm64.tar.gz" ;;
-              *) continue ;;
-            esac
-            tar xzf "/tmp/assets/$asset" -C "$dir"
-            current=$(npm view "${pkg}@${VERSION}" version 2>/dev/null || true)
-            if [ "$current" = "$VERSION" ]; then
-              echo "::notice::${pkg}@${VERSION} already on npm"
-            else
-              # Non-fatal: a single unpublishable platform package must never
-              # abort the run before the main launcher publishes. The launcher's
-              # download fallback covers any platform whose package is missing.
-              npm_publish_retry "$dir" \
-                || echo "::warning::publish failed for ${pkg}; launcher download fallback covers this platform"
-              sleep 8
-            fi
-          done
-
-      - name: Idempotent publish (main package)
-        shell: bash
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
-          VERSION: ${{ needs.release-context.outputs.version }}
-        run: |
-          set -euo pipefail
-          npm_publish_retry() {
-            local dir="$1" attempt=1 max=5 delay=20
-            while true; do
-              if ( cd "$dir" && npm publish --access public ); then
-                return 0
-              fi
-              if (( attempt >= max )); then
-                echo "::error::npm publish failed for $dir after $max attempts"
-                return 1
-              fi
-              echo "::warning::npm publish failed for $dir (attempt $attempt/$max); retrying in ${delay}s (spam-detection backoff)"
-              sleep "$delay"
-              attempt=$((attempt + 1))
-              delay=$((delay * 2))
-            done
-          }
-          current=$(npm view "crw-mcp@${VERSION}" version 2>/dev/null || true)
-          if [ "$current" = "$VERSION" ]; then
-            echo "::notice::crw-mcp@${VERSION} already on npm"
-          else
-            npm_publish_retry mcp/crw-mcp
-          fi
-
-      - name: Verify (existence + optionalDeps pin + install smoke)
-        shell: bash
-        run: bash scripts/release/verify_npm.sh "${{ needs.release-context.outputs.version }}"
 
   publish-docker:
     needs: [release-context, check]
@@ -433,172 +134,3 @@ jobs:
           labels: ${{ steps.meta.outputs.labels }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
-
-  publish-mcp-registry:
-    needs: [release-context, publish-docker]
-    runs-on: ubuntu-latest
-    permissions:
-      contents: read
-      id-token: write
-    steps:
-      - uses: actions/checkout@v6
-        with:
-          ref: ${{ needs.release-context.outputs.source_ref }}
-
-      - name: Install mcp-publisher
-        shell: bash
-        run: |
-          set -euo pipefail
-          curl -fsSL -L "https://github.com/modelcontextprotocol/registry/releases/latest/download/mcp-publisher_linux_amd64.tar.gz" \
-            | tar xz mcp-publisher
-          sudo mv mcp-publisher /usr/local/bin/
-
-      - name: Authenticate with MCP Registry
-        run: mcp-publisher login github-oidc
-
-      - name: Publish to MCP Registry
-        # The registry intermittently returns 5xx (504 seen on v0.13.2). Retry
-        # so a transient gateway error doesn't fail an otherwise-green release.
-        run: |
-          set -euo pipefail
-          for attempt in 1 2 3 4; do
-            if mcp-publisher publish; then exit 0; fi
-            echo "::warning::mcp-publisher publish attempt ${attempt}/4 failed (transient registry error); retrying in $((attempt * 20))s"
-            sleep "$((attempt * 20))"
-          done
-          echo "::error::mcp-publisher publish failed after 4 attempts"
-          exit 1
-
-      - name: Verify
-        shell: bash
-        run: bash scripts/release/verify_mcp_registry.sh "${{ needs.release-context.outputs.version }}"
-
-  update-apt:
-    needs: [release-context, asset-gate]
-    runs-on: ubuntu-latest
-    permissions:
-      contents: read
-    steps:
-      - name: Trigger APT repo update
-        shell: bash
-        env:
-          GH_TOKEN: ${{ secrets.GH_DISPATCH_PAT }}
-        run: |
-          set -euo pipefail
-          gh api repos/us/apt-crw/dispatches \
-            -f event_type=crw-release \
-            -f "client_payload[version]=${{ needs.release-context.outputs.version }}" \
-            -f "client_payload[correlation_id]=${{ needs.release-context.outputs.correlation_id }}"
-
-  update-homebrew:
-    needs: [release-context, asset-gate]
-    runs-on: ubuntu-latest
-    permissions:
-      contents: read
-    steps:
-      - name: Trigger homebrew tap update
-        shell: bash
-        env:
-          GH_TOKEN: ${{ secrets.GH_DISPATCH_PAT }}
-        run: |
-          set -euo pipefail
-          gh api repos/us/homebrew-crw/dispatches \
-            -f event_type=crw-release \
-            -f "client_payload[version]=${{ needs.release-context.outputs.version }}" \
-            -f "client_payload[correlation_id]=${{ needs.release-context.outputs.correlation_id }}"
-
-  publish-npm-sdk:
-    needs: [release-context, asset-gate]
-    # Shares the SKIP_NPM gate with publish-npm (cleanly skipped, not failed).
-    if: ${{ vars.SKIP_NPM != 'true' }}
-    runs-on: ubuntu-latest
-    permissions:
-      contents: read
-    steps:
-      - uses: actions/checkout@v6
-        with:
-          ref: ${{ needs.release-context.outputs.source_ref }}
-
-      - uses: actions/setup-node@v4
-        with:
-          node-version: 20
-          registry-url: https://registry.npmjs.org
-
-      - name: Build + test
-        shell: bash
-        run: |
-          set -euo pipefail
-          cd sdks/typescript
-          npm ci
-          npm run build
-          npm test
-
-      - name: Idempotent publish
-        shell: bash
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
-          VERSION: ${{ needs.release-context.outputs.version }}
-        run: |
-          set -euo pipefail
-          pkg=$(node -p "require('./sdks/typescript/package.json').name")
-          current=$(npm view "${pkg}@${VERSION}" version 2>/dev/null || true)
-          if [ "$current" = "$VERSION" ]; then
-            echo "::notice::${pkg}@${VERSION} already on npm"
-          else
-            (cd sdks/typescript && npm publish --access public)
-          fi
-
-      - name: Verify
-        shell: bash
-        run: bash scripts/release/verify_npm_sdk.sh "${{ needs.release-context.outputs.version }}"
-
-  verify-publish:
-    needs:
-      - release-context
-      - publish-crates
-      - publish-pypi
-      - publish-npm
-      - publish-npm-sdk
-      - publish-docker
-      - publish-mcp-registry
-      - update-apt
-      - update-homebrew
-    # Run even when an optional publish job is skipped (e.g. publish-npm under
-    # SKIP_NPM) — `!cancelled()` lets verification report on whatever shipped
-    # instead of being skipped along with the gated job.
-    if: ${{ !cancelled() }}
-    runs-on: ubuntu-latest
-    permissions:
-      contents: write
-    steps:
-      - uses: actions/checkout@v6
-        with:
-          ref: ${{ needs.release-context.outputs.source_ref }}
-
-      - name: Run verification across every registry
-        shell: bash
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          SKIP_NPM: ${{ vars.SKIP_NPM }}
-        run: |
-          set -euo pipefail
-          bash scripts/release/verify_publish.sh \
-            "${{ needs.release-context.outputs.version }}" \
-            --correlation-id "${{ needs.release-context.outputs.correlation_id }}" \
-            --out "release-audit-${{ needs.release-context.outputs.version }}.md"
-
-      - name: Upload audit artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: release-audit-${{ needs.release-context.outputs.version }}
-          path: release-audit-${{ needs.release-context.outputs.version }}.md
-
-      - name: Attach audit to GitHub Release
-        shell: bash
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          RELEASE_TAG: ${{ needs.release-context.outputs.release_tag }}
-        run: |
-          set -euo pipefail
-          gh release upload "$RELEASE_TAG" \
-            "release-audit-${{ needs.release-context.outputs.version }}.md" --clobber

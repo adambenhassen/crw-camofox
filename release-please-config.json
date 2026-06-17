@@ -65,66 +65,6 @@
           "type": "toml",
           "path": "Cargo.toml",
           "jsonpath": "$.workspace.dependencies.crw-server.version"
-        },
-        {
-          "type": "json",
-          "path": "server.json",
-          "jsonpath": "$.version"
-        },
-        {
-          "type": "json",
-          "path": "mcp/crw-mcp/package.json",
-          "jsonpath": "$.version"
-        },
-        {
-          "type": "json",
-          "path": "mcp/crw-mcp-darwin-x64/package.json",
-          "jsonpath": "$.version"
-        },
-        {
-          "type": "json",
-          "path": "mcp/crw-mcp-darwin-arm64/package.json",
-          "jsonpath": "$.version"
-        },
-        {
-          "type": "json",
-          "path": "mcp/crw-mcp-linux-x64/package.json",
-          "jsonpath": "$.version"
-        },
-        {
-          "type": "json",
-          "path": "mcp/crw-mcp-linux-arm64/package.json",
-          "jsonpath": "$.version"
-        },
-        {
-          "type": "json",
-          "path": "mcp/crw-mcp/package.json",
-          "jsonpath": "$.optionalDependencies['crw-mcp-darwin-x64']"
-        },
-        {
-          "type": "json",
-          "path": "mcp/crw-mcp/package.json",
-          "jsonpath": "$.optionalDependencies['crw-mcp-darwin-arm64']"
-        },
-        {
-          "type": "json",
-          "path": "mcp/crw-mcp/package.json",
-          "jsonpath": "$.optionalDependencies['crw-mcp-linux-x64']"
-        },
-        {
-          "type": "json",
-          "path": "mcp/crw-mcp/package.json",
-          "jsonpath": "$.optionalDependencies['crw-mcp-linux-arm64']"
-        },
-        {
-          "type": "toml",
-          "path": "sdks/python/pyproject.toml",
-          "jsonpath": "$.project.version"
-        },
-        {
-          "type": "json",
-          "path": "sdks/typescript/package.json",
-          "jsonpath": "$.version"
         }
       ]
     }

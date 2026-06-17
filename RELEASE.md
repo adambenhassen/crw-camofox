@@ -1,97 +1,66 @@
 # Release Operations
 
-How crw-opencore ships, what to do when something breaks, and how to keep the pipeline honest.
+How crw-camofox ships, what to do when something breaks, and how to keep the pipeline honest.
+
+This fork distributes **only** as a multi-arch Docker image on GHCR
+(`ghcr.io/<owner>/<repo>`). Upstream's crates.io / npm / PyPI / APT / Homebrew
+publishing is intentionally not part of this fork.
 
 ## Topology
 
-`release-please` watches `main` for conventional commits and opens a Release PR. Merging it creates the `vX.Y.Z` tag, which fires `.github/workflows/release.yml`. That workflow fans out to:
+`release-please` watches `main` for conventional commits and opens a Release PR. Merging it creates the `vX.Y.Z` tag, which fires `.github/workflows/release.yml`:
 
-| Target           | Job                  | Verification                                           |
-| ---------------- | -------------------- | ------------------------------------------------------ |
-| crates.io        | `publish-crates`     | `verify_crates.sh` — exact-version GET on every crate  |
-| GitHub Release   | `publish-binaries`   | `asset-gate` (18 tar.gz/zip files attached)            |
-| PyPI             | `publish-pypi`       | `verify_pypi.sh`                                       |
-| npm              | `publish-npm`        | `verify_npm.sh` — existence + optionalDeps pin + smoke |
-| GHCR (Docker)    | `publish-docker`     | `verify_docker.sh` — version + latest + major.minor    |
-| MCP Registry     | `publish-mcp-registry` | `verify_mcp_registry.sh`                             |
-| APT repo (us/apt-crw) | `update-apt`    | `verify_apt_homebrew.sh` — commit-status correlation   |
-| Homebrew tap (us/homebrew-crw) | `update-homebrew` | same                                       |
+| Job               | Does                                                              |
+| ----------------- | ---------------------------------------------------------------- |
+| `release-context` | Derives + semver-validates the version from the tag.             |
+| `check`           | `cargo fmt --check`, `clippy -D warnings`, build, `cargo test`.  |
+| `publish-docker`  | Builds `linux/amd64,linux/arm64` and pushes to GHCR with `{{version}}`, `{{major}}.{{minor}}`, and `latest` tags. |
 
-Each tag also produces `release-audit-<version>.md` as a workflow artifact and attaches it to the GitHub Release.
+Two supporting Docker workflows:
+
+- `docker-build.yml` — validates the multi-arch build (incl. the aarch64 cross-compile) on `release` events / `workflow_dispatch`; does not push.
+- `docker-publish.yml` — manual `workflow_dispatch` to push an image to GHCR out-of-band, without cutting a release.
 
 ## Source of truth
 
-- **Tier order & publish flags:** `scripts/release/release_manifest.toml`
-- **Workspace publishability:** `scripts/release/preflight.py` (run on every PR via `preflight-publish.yml`)
-- **release-please extra-files validity + internal-pin completeness:** `scripts/release/audit_release_please_config.py`
+These guards keep the workspace version-coherent and run on every PR via `preflight-publish.yml` (and partly `ci.yml`):
+
+- **Tier order & publish flags:** `scripts/release/release_manifest.toml`, validated by `scripts/release/preflight.py`.
+- **release-please extra-files validity + internal-pin completeness:** `scripts/release/audit_release_please_config.py`.
 - **Internal crate-to-crate versions:** centralized in root `[workspace.dependencies]` (members inherit via `{ workspace = true }`); `scripts/check-internal-dep-versions.sh` enforces they equal the workspace version. Guarded against regression by `scripts/release/test_guards.py`.
-- **Tag → version derivation:** `release-context` job in `release.yml` (semver-validated)
+- **Tag → version derivation:** `release-context` job in `release.yml` (semver-validated).
 
 ### Version cohesion — why the bump PR can't ship a stale surface
 
-Every version surface (workspace version, the 10 internal `[workspace.dependencies]` pins, npm main + optionalDependencies + platform packages, `pyproject.toml`, `server.json`) must move in lockstep on a release. The historical break (v0.9.0, v0.12.0) was a stale surface slipping through because the **release-please bump PR is bot-authored and bot PRs cannot trigger workflows** — so the checks only ran post-tag.
+Every version surface (the workspace version and the 10 internal `[workspace.dependencies]` pins) must move in lockstep on a release. The historical break (v0.9.0, v0.12.0) was a stale surface slipping through because the **release-please bump PR is bot-authored and bot PRs cannot trigger workflows** — so the checks only ran post-tag.
 
 Fixed by authoring the bump PR with an elevated token (`release-please.yml` → `with.token`), so it triggers `preflight-publish.yml` + `ci.yml` on its own head SHA before merge. **Operational requirement: `preflight-publish` must be a _Required_ status check in branch protection for the `main` / release-please branch** — that is what makes a red preflight *block the merge* (and therefore the tag) rather than just annotate it. Detection without the Required check is not prevention.
 
 ## Recovery runbooks
 
-### A registry failed mid-release
+### The release failed mid-run
 
-The pipeline is idempotent — re-run is safe.
+The pipeline is idempotent — re-run is safe. GHCR is content-addressed, so rebuild + push produces the same digest. Re-trigger a specific tag manually:
 
-- **crates.io**: `publish_crate.sh` treats "already uploaded" as success only when the local `.crate` sha256 matches the registry cksum. Mismatch = hard fail. Workaround: bump patch version.
-- **PyPI**: `twine upload --skip-existing` ignores duplicates.
-- **npm**: idempotent publish — checks `npm view <pkg>@<v>` first.
-- **Docker**: GHCR is content-addressed; rebuild + push idempotent.
-- **MCP Registry**: re-run `mcp-publisher publish`.
-- **APT/Homebrew**: re-trigger via `gh workflow run release.yml --ref main -f tag=vX.Y.Z`.
+```bash
+gh workflow run release.yml --ref main -f tag=vX.Y.Z
+```
 
-### Temporarily disabling npm publishing
+### The image shipped with a problem
 
-If the npm token can't publish (npm now rejects classic automation tokens with
-`403 ... two-factor authentication ... required`), set the repo variable
-`SKIP_NPM=true` (`gh variable set SKIP_NPM --body true`). `publish-npm` is then
-cleanly **skipped** (gray, not failed) and `verify-publish` records npm as
-`skipped` — the release goes green on every other registry. **Re-enable** by
-clearing it (`gh variable delete SKIP_NPM`) once `NPM_TOKEN` is a *granular*
-access token with publish permission (these bypass 2FA), or after configuring
-npm OIDC trusted publishing for each package (the workflow already grants
-`id-token: write`).
-
-### A version was published with broken metadata (e.g. wrong npm optionalDeps)
-
-crates.io and npm versions are **immutable**. Do not try to overwrite. Instead:
-
-1. `cargo yank --version X.Y.Z <crate>` (per crate, if you must — yanked versions still work but stop new resolves).
-2. `bash scripts/release/deprecate_npm_versions.sh X.Y.Z "<reason>"` to mark all 7 npm packages deprecated.
-3. Land fixes on `main`. Conventional commits → release-please opens X.Y.Z+1 PR. Merge it.
-4. Verify the new pipeline run leaves green checkmarks across every registry in the audit log.
-
-### v0.4.0–v0.6.0 absence on crates.io
-
-These tags were cut while the release pipeline silently failed (cargo publish output piped to `tee` which always returned 0). They are **not on crates.io and never will be** — crates.io is immutable. v0.6.1 is the first canonical 0.6.x release on crates.io. Earlier versions remain available on GitHub releases / npm / Docker / PyPI under their published artifacts (npm 0.6.0 has the broken optionalDeps pin and is deprecated; install `crw-mcp@^0.6.1`).
+GHCR tags are mutable by re-push, but treat published versions as immutable in practice: land the fix on `main`, let release-please open the `X.Y.Z+1` PR, merge it, and the next tag rebuilds + pushes. `latest` always tracks the newest tagged build.
 
 ## Secret rotation
 
-| Secret               | Used by                          | Rotation                                     |
-| -------------------- | -------------------------------- | -------------------------------------------- |
-| `CARGO_REGISTRY_TOKEN` | `publish-crates`               | crates.io account → API tokens → revoke + create new with `publish-update` scope |
-| `PYPI_TOKEN`         | `publish-pypi`                   | pypi.org account → API tokens → scoped to project `crw` |
-| `NPM_TOKEN`          | `publish-npm`                    | npmjs.com → access tokens → automation token |
-| `GH_DISPATCH_PAT`    | `dispatch-release`, `update-apt`, `update-homebrew` | GitHub fine-grained PAT with `actions:write` on this repo + `us/apt-crw` + `us/homebrew-crw` |
+| Secret            | Used by                                   | Rotation                                                                 |
+| ----------------- | ----------------------------------------- | ------------------------------------------------------------------------ |
+| `GH_DISPATCH_PAT` | `release-please.yml` (bump-PR author + tag creation) | GitHub fine-grained PAT with `contents:write` + `pull-requests:write` on this repo. Prefer migrating to a GitHub App installation token. |
 
-`GITHUB_TOKEN` is auto-provisioned and does not need rotation.
+`GITHUB_TOKEN` is auto-provisioned (used by `publish-docker` to push to GHCR) and does not need rotation.
 
-## Adding a new publishable crate
+## Adding a new crate
 
-1. Add the crate to the workspace as usual (no `publish` field, or `publish = true`).
-2. Decide its tier: which tier-N crates does it depend on? Add it to the next tier in `scripts/release/release_manifest.toml`.
-3. If other crates depend on it, add **one** entry to the root `[workspace.dependencies]` table (`<crate> = { path = "crates/<crate>", version = "<workspace version>" }`) and have every consumer inherit it via `<crate> = { workspace = true }` (layer `features` / `optional` per-member; **never** inline `version =` in a member manifest). Add the matching `release-please-config.json` extra-file `$.workspace.dependencies.<crate>.version`. Run `bash scripts/check-internal-dep-versions.sh` and `uv run python scripts/release/audit_release_please_config.py` — both fail red if the pin drifts or its config entry is missing. (npm platform packages are discovered by glob, so adding one needs no guard edit.)
-4. **First-publish ownership:** the user behind `CARGO_REGISTRY_TOKEN` becomes the initial owner. Verify the crate name is unclaimed — `curl -s https://crates.io/api/v1/crates/<name>` should return `{"errors":[{"detail":"Not Found"}]}`. After the first publish, optionally `cargo owner --add github:us:release-bots <name>`.
-5. Open a PR. `preflight-publish.yml` runs the full workspace check — green means the crate is publishable.
-
-## Adding a new internal (non-published) crate
-
-1. `[package] publish = false` in its Cargo.toml.
-2. Add to `scripts/release/release_manifest.toml` under `[unpublished]`.
-3. Preflight enforces both must agree.
+1. Add the crate to the workspace as usual.
+2. Decide its tier in `scripts/release/release_manifest.toml` (published crates) or list it under `[unpublished]` with `[package] publish = false` in its Cargo.toml — preflight enforces the two agree.
+3. If other crates depend on it, add **one** entry to the root `[workspace.dependencies]` table (`<crate> = { path = "crates/<crate>", version = "<workspace version>" }`) and have every consumer inherit it via `<crate> = { workspace = true }` (layer `features` / `optional` per-member; **never** inline `version =` in a member manifest). Add the matching `release-please-config.json` extra-file `$.workspace.dependencies.<crate>.version`. Run `bash scripts/check-internal-dep-versions.sh` and `python3 scripts/release/audit_release_please_config.py` — both fail red if the pin drifts or its config entry is missing.
+4. Open a PR. `preflight-publish.yml` runs the full workspace check — green means the version surfaces are coherent.
