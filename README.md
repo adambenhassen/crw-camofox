@@ -172,6 +172,14 @@ These tools drive a real browser and run unauthenticated on loopback by default;
 before exposing them beyond localhost, set `CAMOFOX_HTTP_API_KEY` in `.env`. See
 the upstream [camofox-mcp docs](https://github.com/redf0x1/camofox-mcp).
 
+### Agent skills
+
+Drop-in [Agent Skills](https://docs.claude.com/en/docs/claude-code/skills) that teach an
+agent when to use each tool suite live in [`skills/`](skills/):
+
+- [**`crw-web`**](skills/crw-web/SKILL.md) — the crw tools (scrape / search / crawl / map / parse): when to use each, `crw_search` engine selection, and output limits.
+- [**`camofox-browser`**](skills/camofox-browser/SKILL.md) — the camofox-mcp interactive browser: the full tool reference and the "escalate only for real interactivity" rule. Requires the `camofox-mcp` server.
+
 ---
 
 ## Build from source
