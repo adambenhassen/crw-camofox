@@ -1,9 +1,0 @@
-# Coalesce author/committer identities for `git shortlog` and the GitHub
-# contributors graph onto the maintainer's canonical identity. This is applied
-# at display time only — no commit is rewritten and no history changes.
-#
-# Format: <canonical> <alias-to-fold-in>
-us <22618852+us@users.noreply.github.com> us <rahmetsaritekin@gmail.com>
-us <22618852+us@users.noreply.github.com> <noreply@anthropic.com>
-us <22618852+us@users.noreply.github.com> <github-actions[bot]@users.noreply.github.com>
-us <22618852+us@users.noreply.github.com> <41898282+github-actions[bot]@users.noreply.github.com>
