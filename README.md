@@ -55,7 +55,7 @@ and the fork stays easy to sync:
   evasion **built into the browser**, not a CDP-driven Chrome hardened after the fact —
   and one browser covers both rendering *and* search, so there's no Chromium heap plus a
   search sidecar to run side by side.
-- **Many engines, one ranked list.** Search defaults to Google but can query any combination of
+- **Many engines, one ranked list.** Search defaults to Google but can query up to four of
   Google, Bing, DuckDuckGo, Wikipedia, YouTube, Reddit, Amazon, and GitHub in a single call
   (run sequentially, so latency scales with engine count), deduping by URL and agreement-ranking
   the merged results — where upstream is tied to one SearXNG instance.
@@ -162,15 +162,19 @@ flows), the Docker stack runs the upstream
 a live [Camofox](https://github.com/redf0x1/camofox-browser) (Firefox) browser —
 47 tools (navigate, snapshot, click, type, press, scroll, evaluate, screenshot,
 cookies, …) over MCP. It runs as a **separate** MCP server (not routed through
-crw's `/mcp`), published on `localhost:9378` by the Compose stack:
+crw's `/mcp`), published on `localhost:9378` by the Compose stack. It requires a
+bearer token (camofox-mcp won't expose HTTP without one); the stack ships a
+loopback-only default dev key, so wire it up with that token:
 
 ```bash
-claude mcp add --transport http camofox http://localhost:9378/mcp
+claude mcp add --transport http camofox http://localhost:9378/mcp \
+  --header "Authorization: Bearer crw-local-dev-insecure-default-key"
 ```
 
-These tools drive a real browser and run unauthenticated on loopback by default;
-before exposing them beyond localhost, set `CAMOFOX_HTTP_API_KEY` in `.env`. See
-the upstream [camofox-mcp docs](https://github.com/redf0x1/camofox-mcp).
+These tools drive a real browser. Before exposing the port beyond localhost,
+override `CAMOFOX_HTTP_API_KEY` in `.env` (≥32 chars, e.g. `openssl rand -hex 24`)
+and use that token instead. See the upstream
+[camofox-mcp docs](https://github.com/redf0x1/camofox-mcp).
 
 ### Agent skills
 

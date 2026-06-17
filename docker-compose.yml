@@ -49,7 +49,7 @@ services:
   camofox:
     # Pinned (never `:latest`) so upgrades are deliberate. Base image is
     # node:22-slim (ships curl, not wget).
-    image: ghcr.io/redf0x1/camofox-browser:2.4.5
+    image: ghcr.io/redf0x1/camofox-browser:2.4.6
     restart: unless-stopped
     environment:
       - CAMOFOX_HOST=0.0.0.0
@@ -74,12 +74,15 @@ services:
   # the camofox pinning rationale above.
   #
   # Published on loopback (127.0.0.1:9378) so a host-based MCP agent can reach it
-  # at http://localhost:9378/mcp. It binds localhost only — never the network —
-  # and auth is disabled by default, matching the local stack. These tools drive
-  # a real browser: before exposing it beyond loopback, set CAMOFOX_HTTP_API_KEY
-  # in `.env` (`openssl rand -hex 24`).
+  # at http://localhost:9378/mcp. camofox-mcp REFUSES to start with HTTP transport
+  # on 0.0.0.0 (required so the published port reaches it) unless a bearer key is
+  # set (and ≥32 chars), so we ship a default dev key
+  # (`crw-local-dev-insecure-default-key`) for out-of-the-box local use — the
+  # port is loopback-only. These tools drive a real browser: override
+  # CAMOFOX_HTTP_API_KEY in `.env` (`openssl rand -hex 24`) before exposing it
+  # anywhere beyond your own machine.
   camofox-mcp:
-    image: ghcr.io/redf0x1/camofox-mcp:v1.14.4
+    image: ghcr.io/redf0x1/camofox-mcp:1.14.5
     restart: unless-stopped
     depends_on:
       camofox:
@@ -90,9 +93,10 @@ services:
       - CAMOFOX_HTTP_HOST=0.0.0.0
       # localhost won't resolve to the browser from here — use the service name.
       - CAMOFOX_URL=http://camofox:9377
-      # Bearer token for inbound MCP requests; empty disables auth (acceptable
-      # only while the port stays on the compose network, as below).
-      - CAMOFOX_HTTP_API_KEY=${CAMOFOX_HTTP_API_KEY:-}
+      # Bearer token for inbound MCP requests. Required when CAMOFOX_HTTP_HOST is
+      # 0.0.0.0 (above) — camofox-mcp won't start without it. Defaults to a known
+      # dev key for local use; override in `.env` before exposing the port.
+      - CAMOFOX_HTTP_API_KEY=${CAMOFOX_HTTP_API_KEY:-crw-local-dev-insecure-default-key}
     ports:
       - "127.0.0.1:9378:8080"
     mem_limit: 512m

@@ -59,9 +59,8 @@ which search engines to query.
 > restart/redeploy, not a client-side workaround.
 
 **Constraints & behavior:**
-- **Any of the eight engines** — no hard cap; list as many as you need.
+- **Max 4 engines** per request — more is rejected (`engines accepts at most 4 entries`).
 - **Sequential** — engines run one at a time on a single warm browser tab, so N engines ≈ N× latency.
-  Keep the list short when speed matters.
 - **Heavy engines** (`reddit`, `amazon`) have JS-heavy SERPs; give them a generous
   `[search].timeout_ms` (and camofox `HANDLER_TIMEOUT_MS`) or they may time out.
 - **Per-engine failure is non-fatal** — a failing engine is skipped and the others still return;
