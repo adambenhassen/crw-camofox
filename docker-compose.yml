@@ -73,10 +73,11 @@ services:
   # connect to http://camofox-mcp:8080/mcp. Pinned (never `:latest`) to match
   # the camofox pinning rationale above.
   #
-  # The port is NOT published to the host by default — like camofox, it should
-  # only be reached from sibling services. To expose it (and run an external
-  # agent against it), uncomment the host mapping AND set CAMOFOX_HTTP_API_KEY
-  # in `.env` (`openssl rand -hex 24`): these tools drive a real browser.
+  # Published on loopback (127.0.0.1:9378) so a host-based MCP agent can reach it
+  # at http://localhost:9378/mcp. It binds localhost only — never the network —
+  # and auth is disabled by default, matching the local stack. These tools drive
+  # a real browser: before exposing it beyond loopback, set CAMOFOX_HTTP_API_KEY
+  # in `.env` (`openssl rand -hex 24`).
   camofox-mcp:
     image: ghcr.io/redf0x1/camofox-mcp:v1.14.4
     restart: unless-stopped
@@ -92,8 +93,8 @@ services:
       # Bearer token for inbound MCP requests; empty disables auth (acceptable
       # only while the port stays on the compose network, as below).
       - CAMOFOX_HTTP_API_KEY=${CAMOFOX_HTTP_API_KEY:-}
-    # ports:
-    #   - "127.0.0.1:9378:8080"
+    ports:
+      - "127.0.0.1:9378:8080"
     mem_limit: 512m
     memswap_limit: 512m
     pids_limit: 256

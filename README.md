@@ -105,11 +105,22 @@ is the qualitative architectural shape, not a comparison number.
 
 ## Quickstart
 
-Self-host with one Docker command — no auth, listens on `localhost:3000`:
+Self-host the full stack with one command — no auth:
 
 ```bash
-docker run -p 3000:3000 ghcr.io/adambenhassen/crw-camofox
+docker compose up -d        # crw + lightpanda + camofox + camofox-mcp
+```
 
+This brings up the REST API on `localhost:3000` plus the real render ladder
+(HTTP → LightPanda → Camofox) and Camofox-driven search, so JS-heavy pages and
+web search work out of the box.
+
+### REST API
+
+Firecrawl-compatible (`/v1/*` + `/v2/*`) — point any Firecrawl client at
+`http://localhost:3000`, or call it directly:
+
+```bash
 # /v1/scrape — URL → markdown / HTML / JSON / links
 curl http://localhost:3000/v1/scrape \
   -H "Content-Type: application/json" \
@@ -133,77 +144,42 @@ curl http://localhost:3000/v1/crawl \
   -d '{"url":"https://docs.example.com","maxDepth":2,"maxPages":50}'
 ```
 
-See [Install](#install) below for the MCP server, the Docker Compose stack, and
-building from source. This fork is distributed only as the
-`ghcr.io/adambenhassen/crw-camofox` Docker image.
+### MCP
 
----
-
-## MCP quickstart
-
-Bring up the stack, then point your MCP agent at it. One HTTP endpoint exposes
-every scraping tool (`crw_scrape`, `crw_crawl`, `crw_map`, `crw_search`, …)
-backed by the real render ladder (HTTP → LightPanda → Camofox) and
-Camofox-driven search — so JS-heavy pages and web search actually work.
+Point any MCP-compatible agent (Claude Code, Cursor, Windsurf, Cline, Continue.dev,
+Codex, Gemini CLI) at the running server over the Streamable HTTP transport — it
+exposes 6 scraping tools (`crw_scrape`, `crw_crawl`, `crw_check_crawl_status`,
+`crw_map`, `crw_search`, `crw_parse_file`) with no bespoke glue:
 
 ```bash
-# 1. start the full stack: crw API + LightPanda + Camofox browser (+ camofox-mcp)
-docker compose up -d
-
-# 2. wire the running server into Claude Code over the Streamable HTTP MCP transport
 claude mcp add --transport http crw http://localhost:3000/mcp
 ```
 
-Any MCP-compatible agent (Claude Code, Cursor, Windsurf, Cline, Continue.dev,
-Codex, Gemini CLI) can now call the scraping tools without bespoke glue.
-Per-client config recipes (Claude Desktop, Cursor, Windsurf, Cline,
-Continue.dev) live under [docs.fastcrw.com/mcp-clients/](https://docs.fastcrw.com/mcp-clients/).
-
-> **Standalone embedded variant:** `docker run -i --rm ghcr.io/adambenhassen/crw-camofox crw-mcp`
-> runs a stdio MCP server with the engine embedded and nothing else. It can only
-> fetch **static HTML** — both JS rendering *and* `crw_search` route through the
-> Camofox browser, which this single container never starts. Use the Compose
-> stack + HTTP transport above for anything beyond static pages.
-
-**Interactive browser automation:** `crw-mcp` *fetches* pages; for agents that
-must *operate* a site across steps (log in, fill forms, click through flows),
-the Docker stack runs the upstream
+**Interactive browser automation:** the scraping tools above *fetch* pages; for
+agents that must *operate* a site across steps (log in, fill forms, click through
+flows), the Docker stack runs the upstream
 **[`camofox-mcp`](https://github.com/redf0x1/camofox-mcp)** server, which drives
 a live [Camofox](https://github.com/redf0x1/camofox-browser) (Firefox) browser —
 47 tools (navigate, snapshot, click, type, press, scroll, evaluate, screenshot,
-cookies, …) over MCP. `docker compose up` starts it as `camofox-mcp`, bridged to
-the `camofox` browser; agents reach it at `http://camofox-mcp:8080/mcp`.
+cookies, …) over MCP. It runs as a **separate** MCP server (not routed through
+crw's `/mcp`), published on `localhost:9378` by the Compose stack:
 
-See the upstream [camofox-mcp docs](https://github.com/redf0x1/camofox-mcp).
+```bash
+claude mcp add --transport http camofox http://localhost:9378/mcp
+```
+
+These tools drive a real browser and run unauthenticated on loopback by default;
+before exposing them beyond localhost, set `CAMOFOX_HTTP_API_KEY` in `.env`. See
+the upstream [camofox-mcp docs](https://github.com/redf0x1/camofox-mcp).
 
 ---
 
-## Install
+## Build from source
 
-This fork is distributed as a multi-arch Docker image —
-**`ghcr.io/adambenhassen/crw-camofox`** (`linux/amd64` + `linux/arm64`). Upstream's
-`npm`/`pip`/`brew`/`cargo`/`apt` packages are **not** this fork (they default to
-Chrome + SearXNG), so run crw-camofox from the image or build it from source.
-
-### Docker Compose (recommended)
-
-Brings up the full stack — the REST API plus the render ladder
-(HTTP → LightPanda → Camofox) and the interactive `camofox-mcp` — so JS rendering
-and `/v1/search` work out of the box:
-
-```bash
-docker compose up -d        # crw + lightpanda + camofox + camofox-mcp
-```
-
-- **REST API** — `http://localhost:3000` (Firecrawl-compatible `/v1/*` + `/v2/*`)
-- **MCP** — wire an agent over the Streamable HTTP transport:
-  `claude mcp add --transport http crw http://localhost:3000/mcp` (see [MCP quickstart](#mcp-quickstart))
-
-[Camofox](https://github.com/redf0x1/camofox-browser) wraps the Camoufox
-(Firefox) anti-detect browser; it is the default heavy/stealth JS tier and backs
-`/v1/search`.
-
-### Build from source
+This fork is distributed as the multi-arch Docker image
+**`ghcr.io/adambenhassen/crw-camofox`** (`linux/amd64` + `linux/arm64`) used by the
+Compose stack above; upstream's `npm`/`pip`/`brew`/`cargo`/`apt` packages are
+**not** this fork (they default to Chrome + SearXNG). To build the binaries yourself:
 
 ```bash
 git clone https://github.com/adambenhassen/crw-camofox
@@ -233,16 +209,6 @@ cargo build --release -p crw-server --features cdp,camofox -p crw-mcp -p crw-cli
 Full reference at [docs.fastcrw.com/#rest-api](https://docs.fastcrw.com/#rest-api).
 The Firecrawl compatibility matrix (field-by-field diff) lives in
 [`COMPATIBILITY-firecrawl.md`](COMPATIBILITY-firecrawl.md).
-
----
-
-## SDKs and integrations
-
-This fork publishes no language SDKs of its own. The REST API is
-Firecrawl-compatible (`/v1/*` and `/v2/*`), so point any Firecrawl client —
-including the official `firecrawl-py` — at your self-hosted endpoint:
-`FirecrawlApp(api_url="http://localhost:3000")`. See
-[`COMPATIBILITY-firecrawl.md`](COMPATIBILITY-firecrawl.md) for the field-by-field matrix.
 
 ---
 
