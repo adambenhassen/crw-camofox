@@ -220,37 +220,6 @@ The Firecrawl compatibility matrix (field-by-field diff) lives in
 
 ---
 
-## Architecture
-
-```
-┌─────────────────────────────────────────────┐
-│                 crw-server                  │
-│         Axum HTTP API + Auth + MCP          │
-├──────────┬──────────┬───────────────────────┤
-│ crw-crawl│crw-extract│    crw-renderer      │
-│ BFS crawl│ HTML→MD   │  HTTP + LightPanda   │
-│ robots   │ LLM/JSON  │  + Camofox (Firefox) │
-│ sitemap  │ clean/read│  auto-detect SPA     │
-├──────────┴──────────┴───────────────────────┤
-│                 crw-core                    │
-│        Types, Config, Errors                │
-└─────────────────────────────────────────────┘
-```
-
-| Crate | Description |
-|-------|-------------|
-| [`crw-core`](crates/crw-core) | Core types, config, and error handling |
-| [`crw-renderer`](crates/crw-renderer) | HTTP + LightPanda (CDP) + Camofox (Firefox) render ladder |
-| [`crw-extract`](crates/crw-extract) | HTML → markdown/plaintext extraction |
-| [`crw-crawl`](crates/crw-crawl) | Async BFS crawler with robots.txt & sitemap |
-| [`crw-server`](crates/crw-server) | Axum API server (Firecrawl-compatible) |
-| [`crw-mcp`](crates/crw-mcp) | MCP stdio server (embedded + proxy mode) |
-| [`crw-cli`](crates/crw-cli) | Standalone CLI (`crw` binary, no server) |
-
-[Full architecture docs →](https://docs.fastcrw.com/architecture/)
-
----
-
 ## Security
 
 - **SSRF protection** — blocks loopback, private IPs, cloud metadata (`169.254.x.x`), IPv6 mapped addresses, and non-HTTP schemes (`file://`, `data:`)
