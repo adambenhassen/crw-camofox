@@ -1,0 +1,69 @@
+name: MCP smoke
+
+# Brings up the full Compose stack on a runner and asserts the MCP contract the
+# README/skills document: crw /mcp (6 tools, scrape, 4-engine search cap) and
+# camofox-mcp (47 tools, bearer auth). The Camofox-backed search is best-effort
+# (real Firefox, heavy on small runners) — see scripts/mcp_smoke.py.
+#
+# The weekly run is deliberate: it catches upstream image drift (a moved tag, a
+# new auth requirement) that unit tests never see — exactly the class of break
+# that slipped in via the camofox-mcp image pin.
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "0 6 * * 1" # Mondays 06:00 UTC
+  push:
+    paths:
+      - "docker-compose.yml"
+      - "Dockerfile"
+      - "scripts/mcp_smoke.py"
+      - ".github/workflows/mcp-smoke.yml"
+      - "crates/crw-server/**"
+      - "crates/crw-mcp/**"
+      - "crates/crw-search/**"
+
+permissions:
+  contents: read
+
+jobs:
+  smoke:
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Bring up the stack
+        run: docker compose up -d --wait --wait-timeout 300
+
+      - name: Wait for crw /health
+        run: |
+          for i in $(seq 1 60); do
+            curl -sf http://localhost:3000/health && { echo; echo "crw ready"; exit 0; }
+            sleep 3
+          done
+          echo "::error::crw /health never came up"; exit 1
+
+      - name: Wait for camofox-mcp
+        run: |
+          for i in $(seq 1 40); do
+            code=$(curl -s -o /dev/null -w '%{http_code}' -m 5 \
+              -H "Authorization: Bearer crw-local-dev-insecure-default-key" \
+              -H 'Content-Type: application/json' -H 'Accept: application/json, text/event-stream' \
+              -X POST http://localhost:9378/mcp \
+              -d '{"jsonrpc":"2.0","id":0,"method":"tools/list","params":{}}')
+            [ "$code" = "200" ] && { echo "camofox-mcp ready"; exit 0; }
+            sleep 3
+          done
+          echo "::error::camofox-mcp never came up"; exit 1
+
+      - name: Run MCP smoke test
+        run: python3 scripts/mcp_smoke.py
+
+      - name: Dump stack logs on failure
+        if: failure()
+        run: docker compose logs --no-color --tail 200
+
+      - name: Tear down
+        if: always()
+        run: docker compose down -v
