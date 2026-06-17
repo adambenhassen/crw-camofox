@@ -55,10 +55,10 @@ and the fork stays easy to sync:
   evasion **built into the browser**, not a CDP-driven Chrome hardened after the fact —
   and one browser covers both rendering *and* search, so there's no Chromium heap plus a
   search sidecar to run side by side.
-- **Many engines, one ranked list.** Search defaults to Google but can query up to four of
-  Google, Bing, DuckDuckGo, Wikipedia, YouTube, Reddit, Amazon, and GitHub in a single call,
-  deduping by URL and agreement-ranking the merged results — where upstream is tied to one
-  SearXNG instance.
+- **Many engines, one ranked list.** Search defaults to Google but can query any combination of
+  Google, Bing, DuckDuckGo, Wikipedia, YouTube, Reddit, Amazon, and GitHub in a single call
+  (run sequentially, so latency scales with engine count), deduping by URL and agreement-ranking
+  the merged results — where upstream is tied to one SearXNG instance.
 
 **Field notes — used in production by Hermes.** This fork backs the **Hermes**
 agent over MCP, with Hermes' built-in `web` and `browser` tools **disabled** so
@@ -67,9 +67,6 @@ In that setup the upstream **SearXNG backend was returning nothing at all** —
 empty results for every query. The **Camofox-driven Google backend reliably
 finds results**, and the Camofox render tier even **loads pages sitting behind
 bot checks** that the previous stack couldn't get past.
-
-> The sections below are inherited from upstream and describe the engine, API, and
-> managed `api.fastcrw.com` offering (which this fork does not operate).
 
 ---
 
@@ -144,18 +141,29 @@ building from source. This fork is distributed only as the
 
 ## MCP quickstart
 
-The Docker image ships a built-in MCP server so any MCP-compatible agent
-(Claude Code, Cursor, Windsurf, Cline, Continue.dev, Codex, Gemini CLI) can
-call scraping tools without bespoke glue. The embedded engine runs inside the
-container — no API key, no setup.
+Bring up the stack, then point your MCP agent at it. One HTTP endpoint exposes
+every scraping tool (`crw_scrape`, `crw_crawl`, `crw_map`, `crw_search`, …)
+backed by the real render ladder (HTTP → LightPanda → Camofox) and
+Camofox-driven search — so JS-heavy pages and web search actually work.
 
 ```bash
-# wire the stdio MCP server into Claude Code
-claude mcp add crw -- docker run -i --rm ghcr.io/adambenhassen/crw-camofox crw-mcp
+# 1. start the full stack: crw API + LightPanda + Camofox browser (+ camofox-mcp)
+docker compose up -d
+
+# 2. wire the running server into Claude Code over the Streamable HTTP MCP transport
+claude mcp add --transport http crw http://localhost:3000/mcp
 ```
 
+Any MCP-compatible agent (Claude Code, Cursor, Windsurf, Cline, Continue.dev,
+Codex, Gemini CLI) can now call the scraping tools without bespoke glue.
 Per-client config recipes (Claude Desktop, Cursor, Windsurf, Cline,
 Continue.dev) live under [docs.fastcrw.com/mcp-clients/](https://docs.fastcrw.com/mcp-clients/).
+
+> **Standalone embedded variant:** `docker run -i --rm ghcr.io/adambenhassen/crw-camofox crw-mcp`
+> runs a stdio MCP server with the engine embedded and nothing else. It can only
+> fetch **static HTML** — both JS rendering *and* `crw_search` route through the
+> Camofox browser, which this single container never starts. Use the Compose
+> stack + HTTP transport above for anything beyond static pages.
 
 **Interactive browser automation:** `crw-mcp` *fetches* pages; for agents that
 must *operate* a site across steps (log in, fill forms, click through flows),
@@ -185,9 +193,15 @@ docker run -p 3000:3000 ghcr.io/adambenhassen/crw-camofox
 
 ### MCP server (for AI agents)
 
+Run the full stack and connect over the Streamable HTTP transport — this is the
+path where JS rendering and `crw_search` work (see [MCP quickstart](#mcp-quickstart)):
+
 ```bash
-docker run -i --rm ghcr.io/adambenhassen/crw-camofox crw-mcp
+docker compose up -d
+claude mcp add --transport http crw http://localhost:3000/mcp
 ```
+
+The standalone `docker run … crw-mcp` stdio server is static-HTML fetch only.
 
 ### Build from source
 
@@ -200,8 +214,7 @@ cargo build --release -p crw-server --features cdp,camofox -p crw-mcp -p crw-cli
 Docker Compose runs the default render ladder (HTTP → LightPanda → Camofox):
 
 ```bash
-docker compose up -d                       # http + lightpanda + camofox
-docker compose --profile searxng up -d     # + SearXNG search backend (opt-in)
+docker compose up -d                       # http + lightpanda + camofox + camofox-mcp
 ```
 
 [Camofox](https://github.com/redf0x1/camofox-browser) wraps the Camoufox
@@ -223,7 +236,7 @@ production hardening, auth, reverse proxy, and resource tuning.
 | `DELETE` | `/v1/crawl/:id` | Cancel a running crawl job |
 | `POST` | `/v1/map` | Discover all URLs on a site |
 | `POST` | `/v1/extract` | Structured JSON extraction from a URL via JSON Schema |
-| `POST` | `/v1/search` | Web search via Camofox-driven Google (or opt-in SearXNG), with optional content scraping |
+| `POST` | `/v1/search` | Web search via Camofox-driven engines (Google default; 8 selectable), with optional content scraping |
 | `POST` | `/v1/change-tracking/diff` | Diff a scrape against a supplied snapshot (the [monitoring](https://us.github.io/crw/monitoring) primitive) — single or batch |
 | `GET` | `/health` | Health check (no auth required) |
 | `POST` | `/mcp` | Streamable HTTP MCP transport |
@@ -254,8 +267,8 @@ including the official `firecrawl-py` — at your self-hosted endpoint:
 │         Axum HTTP API + Auth + MCP          │
 ├──────────┬──────────┬───────────────────────┤
 │ crw-crawl│crw-extract│    crw-renderer      │
-│ BFS crawl│ HTML→MD   │  HTTP + Camofox/CDP  │
-│ robots   │ LLM/JSON  │  LightPanda/Camofox  │
+│ BFS crawl│ HTML→MD   │  HTTP + LightPanda   │
+│ robots   │ LLM/JSON  │  + Camofox (Firefox) │
 │ sitemap  │ clean/read│  auto-detect SPA     │
 ├──────────┴──────────┴───────────────────────┤
 │                 crw-core                    │
@@ -266,7 +279,7 @@ including the official `firecrawl-py` — at your self-hosted endpoint:
 | Crate | Description |
 |-------|-------------|
 | [`crw-core`](crates/crw-core) | Core types, config, and error handling |
-| [`crw-renderer`](crates/crw-renderer) | HTTP + Camofox (Firefox) / CDP rendering engine |
+| [`crw-renderer`](crates/crw-renderer) | HTTP + LightPanda (CDP) + Camofox (Firefox) render ladder |
 | [`crw-extract`](crates/crw-extract) | HTML → markdown/plaintext extraction |
 | [`crw-crawl`](crates/crw-crawl) | Async BFS crawler with robots.txt & sitemap |
 | [`crw-server`](crates/crw-server) | Axum API server (Firecrawl-compatible) |
@@ -283,7 +296,7 @@ including the official `firecrawl-py` — at your self-hosted endpoint:
 - **Auth** — optional Bearer token with constant-time comparison
 - **robots.txt** — RFC 9309 compliant with wildcard patterns
 - **Rate limiting** — token-bucket algorithm, returns 429 with `error_code`
-- **Resource limits** — max body 1 MB, max crawl depth 10, max pages 1,000
+- **Resource limits** — max request body 1 MB; per-crawl depth and page count bounded (configurable; defaults: depth 2, 100 pages)
 
 [Full security docs →](https://docs.fastcrw.com/self-hosting-hardening/)
 
@@ -321,5 +334,5 @@ commercial carve-out; for commercial licensing, see [upstream `crw`](https://git
 
 **It is the sole responsibility of end users to respect websites' policies
 when scraping.** Users are advised to adhere to applicable privacy
-policies and terms of use. By default, fastCRW respects `robots.txt`
+policies and terms of use. By default, crw-camofox respects `robots.txt`
 directives.
