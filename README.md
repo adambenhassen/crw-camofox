@@ -185,23 +185,23 @@ This fork is distributed as a multi-arch Docker image —
 `npm`/`pip`/`brew`/`cargo`/`apt` packages are **not** this fork (they default to
 Chrome + SearXNG), so run crw-camofox from the image or build it from source.
 
-### API server (Firecrawl-compatible REST API)
+### Docker Compose (recommended)
+
+Brings up the full stack — the REST API plus the render ladder
+(HTTP → LightPanda → Camofox) and the interactive `camofox-mcp` — so JS rendering
+and `/v1/search` work out of the box:
 
 ```bash
-docker run -p 3000:3000 ghcr.io/adambenhassen/crw-camofox
+docker compose up -d        # crw + lightpanda + camofox + camofox-mcp
 ```
 
-### MCP server (for AI agents)
+- **REST API** — `http://localhost:3000` (Firecrawl-compatible `/v1/*` + `/v2/*`)
+- **MCP** — wire an agent over the Streamable HTTP transport:
+  `claude mcp add --transport http crw http://localhost:3000/mcp` (see [MCP quickstart](#mcp-quickstart))
 
-Run the full stack and connect over the Streamable HTTP transport — this is the
-path where JS rendering and `crw_search` work (see [MCP quickstart](#mcp-quickstart)):
-
-```bash
-docker compose up -d
-claude mcp add --transport http crw http://localhost:3000/mcp
-```
-
-The standalone `docker run … crw-mcp` stdio server is static-HTML fetch only.
+[Camofox](https://github.com/redf0x1/camofox-browser) wraps the Camoufox
+(Firefox) anti-detect browser; it is the default heavy/stealth JS tier and backs
+`/v1/search`.
 
 ### Build from source
 
@@ -210,19 +210,6 @@ git clone https://github.com/adambenhassen/crw-camofox
 cd crw-camofox
 cargo build --release -p crw-server --features cdp,camofox -p crw-mcp -p crw-cli
 ```
-
-Docker Compose runs the default render ladder (HTTP → LightPanda → Camofox):
-
-```bash
-docker compose up -d                       # http + lightpanda + camofox + camofox-mcp
-```
-
-[Camofox](https://github.com/redf0x1/camofox-browser) wraps the Camoufox
-(Firefox) anti-detect browser; it is the default heavy/stealth JS tier and backs
-`/v1/search`.
-
-See the [self-hosting guide](https://docs.fastcrw.com/#self-hosting) for
-production hardening, auth, reverse proxy, and resource tuning.
 
 ---
 
