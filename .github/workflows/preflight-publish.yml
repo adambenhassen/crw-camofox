@@ -29,7 +29,7 @@ jobs:
     steps:
       - uses: actions/checkout@v6
 
-      - uses: astral-sh/setup-uv@v3
+      - uses: astral-sh/setup-uv@v8
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable

@@ -37,7 +37,7 @@ jobs:
       # double-run the entire publish pipeline (two concurrent crates.io/npm
       # publishes racing). Manual recovery still uses release.yml's
       # workflow_dispatch input.
-      - uses: googleapis/release-please-action@v4
+      - uses: googleapis/release-please-action@v5
         id: release
         with:
           token: ${{ secrets.GH_DISPATCH_PAT }}
