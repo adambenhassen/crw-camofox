@@ -32,8 +32,7 @@ Works with: [Claude Code](https://docs.fastcrw.com/mcp-clients/#claude-code) · 
 This is a fork of [`crw`](https://github.com/us/crw) that swaps the browser layer
 to [**Camofox**](https://github.com/redf0x1/camofox-browser) (the Camoufox/Firefox
 anti-detect browser, driven over its REST API) and re-backs search on it. Changes
-vs. upstream — all **additive and config-toggled**, so nothing upstream is deleted
-and the fork stays easy to sync:
+vs. upstream — all **additive and config-toggled**:
 
 | Area | Upstream `crw` | This fork |
 |------|----------------|-----------|
