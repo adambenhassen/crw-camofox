@@ -37,7 +37,7 @@ vs. upstream — all **additive and config-toggled**:
 | Area | Upstream `crw` | This fork |
 |------|----------------|-----------|
 | Default JS render ladder | `HTTP → LightPanda → Chrome` (CDP) | `HTTP → LightPanda → Camofox` (Firefox) |
-| Stealth tier | browserless Chromium (SSPL) | Camofox — engine-level fingerprint evasion |
+| Stealth tier | browserless Chromium (SSPL); opt-in in-process Camoufox tier | **Camofox** ([camofox-browser](https://github.com/redf0x1/camofox-browser), REST-driven) — engine-level fingerprint evasion, the default tier, shared by render *and* search |
 | `/v1/search` backend | SearXNG sidecar | **8 engines built in** — Google, Bing, DuckDuckGo, Wikipedia, YouTube, Reddit, Amazon, GitHub (no sidecar) |
 | Interactive MCP | `crw-browse` (CDP, 2 tools) | Upstream **[`camofox-mcp`](https://github.com/redf0x1/camofox-mcp)** wired into the Docker stack — 47 tools over Camofox REST |
 
@@ -51,8 +51,9 @@ vs. upstream — all **additive and config-toggled**:
   backend came back **empty for every query**; the Camofox-driven backend (Google by
   default) reliably returns real results.
 - **Anti-detection at the engine level.** Camofox is Camoufox (Firefox) with fingerprint
-  evasion **built into the browser**, not a CDP-driven Chrome hardened after the fact —
-  and one browser covers both rendering *and* search, so there's no Chromium heap plus a
+  evasion **built into the browser**. Upstream now ships its own opt-in Camoufox tier too,
+  but it's an in-process *renderer* only — search still needs the SearXNG sidecar. Here one
+  browser covers both rendering *and* search by default, so there's no Chromium heap plus a
   search sidecar to run side by side.
 - **Many engines, one ranked list.** Search defaults to Google but can query up to four of
   Google, Bing, DuckDuckGo, Wikipedia, YouTube, Reddit, Amazon, and GitHub in a single call
