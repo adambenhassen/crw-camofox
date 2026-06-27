@@ -41,6 +41,108 @@ fn is_retriable_status(status: u16) -> bool {
     matches!(status, 502..=504)
 }
 
+/// Returns true if a response status means the origin is rate-limiting the
+/// host's egress IP — a signal that a *different* egress IP (proxy) may clear
+/// it. 429 = Too Many Requests (the explicit rate-limit signal). Retried ONCE
+/// through the configured proxy when armed; every other status is untouched.
+fn is_ratelimit_status(status: u16) -> bool {
+    matches!(status, 429)
+}
+
+/// Is `CRW_HTTP_TLS_RELAXED_FALLBACK` enabled? When on, a fetch that fails TLS
+/// certificate verification is retried ONCE with verification disabled (small
+/// orgs frequently misconfigure their chain — e.g. a CA cert served as the leaf,
+/// or an expired/self-signed cert — yet the content is perfectly fetchable).
+/// Cert-errors-only; every other failure mode keeps strict verification.
+fn tls_relaxed_fallback_enabled() -> bool {
+    std::env::var("CRW_HTTP_TLS_RELAXED_FALLBACK")
+        .map(|v| {
+            let v = v.trim().to_ascii_lowercase();
+            v == "true" || v == "1" || v == "yes"
+        })
+        .unwrap_or(false)
+}
+
+/// The proxy URL to retry through when an origin rate-limits the host's egress
+/// IP (`CRW_HTTP_RATELIMIT_PROXY_URL`, e.g. `http://user:pass@gateway:port`).
+/// When set, a fetch that returns 429 is retried ONCE through this proxy — a
+/// different egress IP usually clears the limit, so the engine no longer stalls
+/// behind a single shared IP when a huge proxy pool is available. Unset (or
+/// empty) = behavior identical to before (no proxy retry). SSRF protection is
+/// unaffected (it runs on the resolved target URL, not the proxy hop).
+fn ratelimit_proxy_url() -> Option<String> {
+    std::env::var("CRW_HTTP_RATELIMIT_PROXY_URL")
+        .ok()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+}
+
+/// Returns true if a `reqwest::Error` (or anything in its source chain) is a TLS
+/// certificate verification failure — the ONLY error class the relaxed-TLS
+/// fallback should react to. Detected by message (rustls/openssl surface these
+/// as opaque connect errors, so there is no typed predicate to match on).
+fn is_cert_error(e: &reqwest::Error) -> bool {
+    let mut src: Option<&(dyn std::error::Error + 'static)> = Some(e);
+    while let Some(s) = src {
+        let m = s.to_string().to_ascii_lowercase();
+        if m.contains("certificate")
+            || m.contains("peerfailedverification")
+            || m.contains("sslconnecterror")
+            || m.contains("invalid peer cert")
+            || m.contains("certusedasend")
+            || m.contains("cert verify")
+            || m.contains("tls handshake")
+            || (m.contains("ssl") && (m.contains("verif") || m.contains("cert")))
+        {
+            return true;
+        }
+        src = s.source();
+    }
+    false
+}
+
+/// Build a configured reqwest client, optionally routed through `proxy` and
+/// optionally with TLS verification disabled (`relaxed_tls`, used only as a
+/// cert-error fallback — see [`is_cert_error`]). An invalid proxy is logged and
+/// dropped (the client stays direct) rather than fatal, preserving the SSRF-safe
+/// redirect policy; a build failure falls back to a default client.
+fn build_client(
+    user_agent: &str,
+    proxy: Option<&str>,
+    request_timeout: std::time::Duration,
+    relaxed_tls: bool,
+) -> reqwest::Client {
+    let mut builder = reqwest::Client::builder()
+        .user_agent(user_agent)
+        .connect_timeout(HTTP_CONNECT_TIMEOUT)
+        .timeout(request_timeout)
+        .redirect(crw_core::url_safety::safe_redirect_policy());
+
+    // Disable cert + hostname verification so a broken chain / expired / self-
+    // signed cert no longer blocks an otherwise-fetchable page. SSRF protection
+    // is unaffected (it runs on the resolved URL, not the TLS layer).
+    if relaxed_tls {
+        builder = builder
+            .danger_accept_invalid_certs(true)
+            .danger_accept_invalid_hostnames(true);
+    }
+
+    if let Some(proxy_url) = proxy {
+        match reqwest::Proxy::all(proxy_url) {
+            Ok(p) => builder = builder.proxy(p),
+            Err(e) => tracing::warn!("Invalid proxy URL '{}': {}", proxy_url, e),
+        }
+    }
+
+    match builder.build() {
+        Ok(c) => c,
+        Err(e) => {
+            tracing::error!("Failed to build HTTP client: {e}, using default");
+            reqwest::Client::new()
+        }
+    }
+}
+
 /// Stealth headers injected when stealth mode is enabled.
 /// These mimic a real browser's default request headers.
 const STEALTH_ACCEPT: &str =
@@ -52,6 +154,16 @@ const STEALTH_SEC_CH_UA: &str =
 /// Simple HTTP fetcher using reqwest. No JS rendering.
 pub struct HttpFetcher {
     client: reqwest::Client,
+    /// Cert-verification-disabled client, built only when
+    /// `CRW_HTTP_TLS_RELAXED_FALLBACK` is on. Used solely to retry a fetch that
+    /// failed strict TLS verification (`is_cert_error`); `None` keeps behavior
+    /// identical to before.
+    relaxed_client: Option<reqwest::Client>,
+    /// Proxy-routed client, built only when `CRW_HTTP_RATELIMIT_PROXY_URL` is
+    /// set. Used solely to retry a fetch the origin rate-limited (429) through a
+    /// different egress IP (`is_ratelimit_status`); `None` keeps behavior
+    /// identical to before.
+    ratelimit_proxy_client: Option<reqwest::Client>,
     inject_stealth_headers: bool,
 }
 
@@ -73,28 +185,20 @@ impl HttpFetcher {
         inject_stealth_headers: bool,
         request_timeout: std::time::Duration,
     ) -> Self {
-        let mut builder = reqwest::Client::builder()
-            .user_agent(user_agent)
-            .connect_timeout(HTTP_CONNECT_TIMEOUT)
-            .timeout(request_timeout)
-            .redirect(crw_core::url_safety::safe_redirect_policy());
-
-        if let Some(proxy_url) = proxy {
-            match reqwest::Proxy::all(proxy_url) {
-                Ok(p) => builder = builder.proxy(p),
-                Err(e) => tracing::warn!("Invalid proxy URL '{}': {}", proxy_url, e),
-            }
-        }
-
-        let client = match builder.build() {
-            Ok(c) => c,
-            Err(e) => {
-                tracing::error!("Failed to build HTTP client: {e}, using default");
-                reqwest::Client::new()
-            }
+        let client = build_client(user_agent, proxy, request_timeout, false);
+        // Cert-error fallback client, armed only when the env flag is on.
+        let relaxed_client = if tls_relaxed_fallback_enabled() {
+            Some(build_client(user_agent, proxy, request_timeout, true))
+        } else {
+            None
         };
+        // 429 proxy-retry client, armed only when the env proxy URL is set.
+        let ratelimit_proxy_client = ratelimit_proxy_url()
+            .map(|purl| build_client(user_agent, Some(purl.as_str()), request_timeout, false));
         Self {
             client,
+            relaxed_client,
+            ratelimit_proxy_client,
             inject_stealth_headers,
         }
     }
@@ -119,8 +223,8 @@ impl PageFetcher for HttpFetcher {
         // Build a fresh, fully-decorated request for each attempt. Closure
         // captures `self`, `url`, and `headers`; called once per attempt so
         // every retry sends an independent (yet identical) request.
-        let build_request = || {
-            let mut req = self.client.get(url);
+        let build_request = |client: &reqwest::Client| {
+            let mut req = client.get(url);
             if self.inject_stealth_headers {
                 req = req
                     .header("Accept", STEALTH_ACCEPT)
@@ -145,6 +249,8 @@ impl PageFetcher for HttpFetcher {
         // idempotent so this is safe. Each attempt is bounded by the caller's
         // remaining deadline so the request cannot exceed the overall budget.
         let mut attempt: u32 = 0;
+        let mut use_relaxed = false;
+        let mut use_proxy = false;
         let resp = loop {
             let remaining = deadline.remaining();
             if remaining.is_zero() {
@@ -154,7 +260,16 @@ impl PageFetcher for HttpFetcher {
                     (start.elapsed().as_millis().max(1)) as u64,
                 ));
             }
-            let send_fut = build_request().send();
+            // On a fallback path use the matching client; otherwise the strict
+            // direct client. Proxy takes precedence (429 retry) over relaxed-TLS.
+            let active_client = if use_proxy {
+                self.ratelimit_proxy_client.as_ref().unwrap_or(&self.client)
+            } else if use_relaxed {
+                self.relaxed_client.as_ref().unwrap_or(&self.client)
+            } else {
+                &self.client
+            };
+            let send_fut = build_request(active_client).send();
             let send_result = tokio::time::timeout(remaining, send_fut).await;
             match send_result {
                 Err(_) => {
@@ -175,7 +290,38 @@ impl PageFetcher for HttpFetcher {
                         tokio::time::sleep(backoff).await;
                     }
                 }
+                // Origin rate-limited our egress IP (429) and a fallback proxy
+                // is armed: retry ONCE through the proxy (a different egress IP
+                // usually clears the limit). Not a transient retry — does not
+                // consume the retry budget. Placed before the success arm so the
+                // 429 is not returned before the proxy is tried.
+                Ok(Ok(r))
+                    if !use_proxy
+                        && self.ratelimit_proxy_client.is_some()
+                        && is_ratelimit_status(r.status().as_u16()) =>
+                {
+                    tracing::warn!(
+                        "HTTP {} from {url} (origin rate-limited); retrying once via proxy (ratelimit_bypassed)",
+                        r.status()
+                    );
+                    drop(r);
+                    use_proxy = true;
+                }
                 Ok(Ok(r)) => break r,
+                // TLS cert verification failed and relaxed-TLS fallback is armed:
+                // swap to the cert-disabled client and retry once. NOT a transient
+                // retry — does not consume the retry budget or back off. Placed
+                // before the generic retry arm because cert failures are
+                // `is_connect()` and would otherwise be retried on the strict
+                // client (pointless — the cert is still broken).
+                Ok(Err(e))
+                    if !use_relaxed && self.relaxed_client.is_some() && is_cert_error(&e) =>
+                {
+                    tracing::warn!(
+                        "TLS verification failed for {url} ({e}); retrying once with relaxed TLS (tls_unverified)"
+                    );
+                    use_relaxed = true;
+                }
                 Ok(Err(e)) if attempt < HTTP_MAX_RETRIES && is_retriable_error(&e) => {
                     tracing::debug!(
                         "transient HTTP error to {url} ({e}), retrying (attempt {})",
