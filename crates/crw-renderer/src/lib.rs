@@ -311,12 +311,15 @@ impl FallbackRenderer {
 
             if want(RendererMode::Lightpanda) {
                 if let Some(lp) = &config.lightpanda {
-                    js_renderers.push(Arc::new(cdp::CdpRenderer::new(
-                        "lightpanda",
-                        &lp.ws_url,
-                        config.lightpanda_timeout(),
-                        config.pool_size,
-                    )));
+                    js_renderers.push(Arc::new(
+                        cdp::CdpRenderer::new(
+                            "lightpanda",
+                            &lp.ws_url,
+                            config.lightpanda_timeout(),
+                            config.pool_size,
+                        )
+                        .with_user_agent(&effective_ua),
+                    ));
                 } else if matches!(config.mode, RendererMode::Lightpanda) {
                     return Err(CrwError::ConfigError(
                         "renderer.mode = \"lightpanda\" but [renderer.lightpanda] ws_url is not \

@@ -419,6 +419,8 @@ pub struct CdpRenderer {
     /// Country code used when a `ScrapeRequest.country` is not supplied.
     /// `None` means "no suffix" → DataImpulse global pool.
     default_country: Option<String>,
+    /// UA for `Network.setUserAgentOverride`; empty = no override (browser default).
+    user_agent: String,
 }
 
 impl CdpRenderer {
@@ -438,7 +440,17 @@ impl CdpRenderer {
             pool: None,
             proxy_auth_base: None,
             default_country: None,
+            user_agent: String::new(),
         }
+    }
+
+    /// Set the User-Agent the CDP renderer presents (via
+    /// `Network.setUserAgentOverride`). Pass the same `effective_ua` the HTTP
+    /// fetcher uses so a JS-rendered page sees a modern UA, not the browser's
+    /// default — and HTTP/CDP UAs match (a mismatch is itself a bot tell).
+    pub fn with_user_agent(mut self, ua: &str) -> Self {
+        self.user_agent = ua.to_string();
+        self
     }
 
     /// Configure DataImpulse base proxy credentials. The `Fetch.authRequired`
@@ -1847,6 +1859,23 @@ impl CdpRenderer {
         )
         .await?;
 
+        // Present a modern UA on the CDP path too (the HTTP fetcher already does,
+        // but renderers otherwise send the browser's own — often stale — UA, which
+        // trips "your browser is outdated" gates). Session-scoped (so pooled
+        // contexts don't leak it) and best-effort: lightpanda may not implement
+        // this method, and a failure must NOT abort an otherwise-fine render —
+        // hence `.ok()`, not `?`. Empty UA = skip (keep the browser default).
+        if !self.user_agent.is_empty() {
+            conn.send_recv(
+                "Network.setUserAgentOverride",
+                serde_json::json!({ "userAgent": self.user_agent }),
+                Some(&session_id),
+                self.page_timeout,
+            )
+            .await
+            .ok();
+        }
+
         // Subscribe to events BEFORE navigating so we don't miss loadEventFired.
         let events_rx = conn.subscribe();
 
@@ -2249,7 +2278,7 @@ fn is_spa_text_ready(text_len: i64) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::{build_auth_response, is_content_stable};
+    use super::{CdpRenderer, build_auth_response, is_content_stable};
 
     #[test]
     fn auth_response_provides_credentials_when_creds_set() {
@@ -2413,5 +2442,17 @@ mod tests {
         assert!(!is_capturable_mime("text/css"));
         assert!(!is_capturable_mime("application/javascript"));
         assert!(!is_capturable_mime(""));
+    }
+
+    #[test]
+    fn user_agent_default_empty_and_builder_sets_it() {
+        // Default = empty → fetch_inner skips the override (browser default).
+        let r = CdpRenderer::new("chrome", "ws://127.0.0.1:9222", 1000, 1);
+        assert_eq!(r.user_agent, "", "default UA must be empty (no override)");
+        // Builder threads the effective UA through so CDP matches the HTTP path.
+        let ua = "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 \
+                  (KHTML, like Gecko) Chrome/150.0.0.0 Safari/537.36";
+        let r = r.with_user_agent(ua);
+        assert_eq!(r.user_agent, ua);
     }
 }
