@@ -267,10 +267,6 @@ pub fn tool_definitions(proxy_mode: bool) -> Value {
                     "type": "string",
                     "description": "Language code, e.g. \"en\", \"tr\""
                 },
-                "country": {
-                    "type": "string",
-                    "description": "Country code hint, e.g. \"us\", \"tr\""
-                },
                 "tbs": {
                     "type": "string",
                     "enum": ["qdr:h", "qdr:d", "qdr:w", "qdr:m", "qdr:y"],
