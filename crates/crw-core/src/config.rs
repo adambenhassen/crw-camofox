@@ -1026,8 +1026,10 @@ pub struct CrawlerConfig {
     #[serde(default = "default_max_pages")]
     pub default_max_pages: u32,
     /// Proxy URL for crawler requests. Supports HTTP, HTTPS, and SOCKS5
-    /// (e.g. "http://proxy:8080" or "socks5://user:pass@proxy:1080").
-    #[serde(default)]
+    /// (e.g. "http://proxy:8080" or "socks5://user:pass@proxy:1080"). An empty
+    /// or whitespace-only value (e.g. a present-but-empty `CRW_CRAWLER__PROXY`)
+    /// is normalized to `None` — see [`deserialize_opt_nonempty_string`].
+    #[serde(default, deserialize_with = "deserialize_opt_nonempty_string")]
     pub proxy: Option<String>,
     /// TTL in seconds for completed crawl jobs before cleanup (default: 3600)
     #[serde(default = "default_job_ttl")]
@@ -1290,6 +1292,32 @@ where
             }
         }
     }
+}
+
+/// Deserializer for an optional string that normalizes an empty or
+/// whitespace-only value to `None`.
+///
+/// Env-based config (the `config` crate with `try_parsing`) surfaces a
+/// present-but-empty variable such as `CRW_CRAWLER__PROXY=""` as `Some("")`
+/// rather than `None`. Left as `Some("")`, that empty string flows into
+/// `reqwest::Proxy::all("")`, which rejects it with "builder error" and breaks
+/// the map/crawl discovery path (issue #154). This mirrors how
+/// [`deserialize_string_vec`] already drops empty entries for `proxy_list`.
+///
+/// Applied via `#[serde(default, deserialize_with = ...)]`, so a *missing* key
+/// is handled by `Default` (the helper never runs) and only a present value —
+/// from env or a TOML `proxy = ""` — reaches this function.
+fn deserialize_opt_nonempty_string<'de, D>(deserializer: D) -> Result<Option<String>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let s = String::deserialize(deserializer)?;
+    let trimmed = s.trim();
+    Ok(if trimmed.is_empty() {
+        None
+    } else {
+        Some(trimmed.to_string())
+    })
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]
@@ -1838,6 +1866,54 @@ mod tests {
             "ws://test:9999/",
             "env var should override renderer.lightpanda.ws_url"
         );
+    }
+
+    #[test]
+    fn crawler_proxy_empty_env_normalizes_to_none() {
+        let _g = ENV_LOCK.lock().unwrap();
+        clear_renderer_env();
+        // Isolate from any developer ~/.config/crw/config.toml and stray CRW_CONFIG.
+        let tmp = std::env::temp_dir().join(format!("crw-proxy-test-{}", std::process::id()));
+        std::fs::create_dir_all(&tmp).unwrap();
+        unsafe {
+            std::env::set_var("CRW_USER_CONFIG_DIR", &tmp);
+            std::env::remove_var("CRW_CONFIG");
+        }
+
+        let load = || {
+            // CRW_CONFIG and the user config dir are pinned for the whole test.
+            AppConfig::load().unwrap().crawler.proxy
+        };
+
+        // (1) absent -> None (serde default).
+        unsafe { std::env::remove_var("CRW_CRAWLER__PROXY") };
+        assert_eq!(load(), None, "absent proxy env should be None");
+
+        // (2) present-but-empty -> None (the issue #154 case).
+        unsafe { std::env::set_var("CRW_CRAWLER__PROXY", "") };
+        assert_eq!(load(), None, "empty proxy env should normalize to None");
+
+        // (3) whitespace-only -> None.
+        unsafe { std::env::set_var("CRW_CRAWLER__PROXY", "   ") };
+        assert_eq!(
+            load(),
+            None,
+            "whitespace proxy env should normalize to None"
+        );
+
+        // (4) a real value -> Some (trimmed).
+        unsafe { std::env::set_var("CRW_CRAWLER__PROXY", "  http://proxy:8080  ") };
+        assert_eq!(
+            load(),
+            Some("http://proxy:8080".to_string()),
+            "valid proxy env should be preserved and trimmed"
+        );
+
+        unsafe {
+            std::env::remove_var("CRW_CRAWLER__PROXY");
+            std::env::remove_var("CRW_USER_CONFIG_DIR");
+        }
+        std::fs::remove_dir_all(&tmp).ok();
     }
 
     #[test]
