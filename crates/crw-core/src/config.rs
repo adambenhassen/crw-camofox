@@ -1213,6 +1213,11 @@ pub struct LlmConfig {
     /// proven not to raise abstention.
     #[serde(default)]
     pub temperature: Option<f32>,
+    /// Optional reasoning-effort hint forwarded to OpenAI-compatible providers
+    /// that support it. `None` (default) and the empty string send no key,
+    /// preserving each provider's default behavior.
+    #[serde(default)]
+    pub reasoning_effort: Option<String>,
 }
 
 impl Default for LlmConfig {
@@ -1228,6 +1233,7 @@ impl Default for LlmConfig {
             max_html_bytes: default_llm_max_html_bytes(),
             require_byok_header: None,
             temperature: None,
+            reasoning_effort: None,
         }
     }
 }
