@@ -246,6 +246,13 @@ pub struct SearchConfig {
     /// answer layer are untouched, so precision/SaaS-parity are preserved.
     #[serde(default)]
     pub query_expand: bool,
+    /// Overlap the original-query scrape with the expansion fetch (LLM rewrite +
+    /// variant fetches) on the LLM path, instead of running them serially. The
+    /// final unioned pool — and therefore the reranked source set — is identical;
+    /// only the ~5-10s expansion overhead is hidden behind the original scrape.
+    /// Requires `query_expand` + an LLM + `scrapeOptions`. Defaults to `false`.
+    #[serde(default)]
+    pub pipeline_overlap: bool,
     /// Number of LLM-generated query rewrites to fetch + union when
     /// `query_expand` is on. `1` reproduces the original single-variant
     /// behavior. Higher values request more DIVERSE reformulations
@@ -376,6 +383,7 @@ impl Default for SearchConfig {
             github_token: None,
             rerank_enabled: true,
             query_expand: false,
+            pipeline_overlap: false,
             query_expand_variants: default_query_expand_variants(),
             multi_round: false,
             passage_select: false,
