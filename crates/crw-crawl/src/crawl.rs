@@ -631,11 +631,16 @@ pub async fn discover_urls(opts: DiscoverOptions<'_>) -> CrwResult<DiscoverResul
         }
 
         let discover_deadline = crw_core::Deadline::from_request_ms(deadline_ms_per_page);
+        // render_js = None (auto), not Some(false): SPAs (Angular/React/Vue)
+        // serve an empty app shell over plain HTTP, so HTTP-only discovery finds
+        // zero navigational links and /map returns only the seed URL (issue #166).
+        // Auto mode lets the renderer escalate thin/SPA shells to a JS render
+        // (it stays HTTP-only for static sites), matching /scrape and /crawl.
         let fetch = renderer
             .fetch(
                 &url,
                 &Default::default(),
-                Some(false),
+                None,
                 None,
                 None,
                 discover_deadline,
