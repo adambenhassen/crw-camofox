@@ -201,6 +201,15 @@ async fn parse_in_subprocess(
         .arg(max_pages.unwrap_or(0).to_string())
         .arg(max_decompressed.to_string())
         .env_clear() // child inherits NO secrets / config
+        // Bound the child's VIRTUAL address space so a legitimately small PDF
+        // doesn't trip `RLIMIT_AS` and abort. pdf-inspector parses with rayon, and
+        // glibc spawns up to 8×ncpu malloc arenas reserving ~64 MiB of virtual
+        // space EACH — on a multi-core host that alone blows past a 512 MiB
+        // `RLIMIT_AS`, the alloc fails, the child SIGABRTs, and the parent
+        // misreports it as `pdf_too_large`. Capping arenas + rayon threads keeps
+        // virtual usage far under the cap while real RSS stays tiny.
+        .env("MALLOC_ARENA_MAX", "2")
+        .env("RAYON_NUM_THREADS", "2")
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::null());
