@@ -1010,11 +1010,35 @@ fn default_jitter() -> f64 {
     0.2
 }
 
+/// Single source of truth for the Chrome major version. It must match the
+/// `Sec-Ch-Ua` client hint (`crw-renderer/src/http_only.rs`, which also uses
+/// this macro) — a UA/hint mismatch is itself a bot tell. Bump here only.
+/// A `macro_rules!` (not a `const`) so it expands to a literal usable inside
+/// `concat!`, keeping the UA strings `const &'static str`.
+#[macro_export]
+macro_rules! chrome_major {
+    () => {
+        "150"
+    };
+}
+
 /// Built-in realistic user-agent pool used when stealth is enabled.
 pub const BUILTIN_UA_POOL: &[&str] = &[
-    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/150.0.0.0 Safari/537.36",
-    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/150.0.0.0 Safari/537.36",
-    "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/150.0.0.0 Safari/537.36",
+    concat!(
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/",
+        chrome_major!(),
+        ".0.0.0 Safari/537.36"
+    ),
+    concat!(
+        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/",
+        chrome_major!(),
+        ".0.0.0 Safari/537.36"
+    ),
+    concat!(
+        "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/",
+        chrome_major!(),
+        ".0.0.0 Safari/537.36"
+    ),
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:140.0) Gecko/20100101 Firefox/140.0",
     "Mozilla/5.0 (Macintosh; Intel Mac OS X 15_5) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.5 Safari/605.1.15",
 ];
@@ -1090,11 +1114,15 @@ fn default_true() -> bool {
 }
 fn default_ua() -> String {
     // Modern Chrome UA. The legacy "CRW/0.1" was rejected by UA-filtering sites
-    // (opencorporates, killeenisd, wsj) returning 403/404. Kept in sync with the
-    // Sec-Ch-Ua client hint in `crw-renderer/src/http_only.rs`.
-    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 \
-     (KHTML, like Gecko) Chrome/150.0.0.0 Safari/537.36"
-        .into()
+    // (opencorporates, killeenisd, wsj) returning 403/404. Chrome major comes
+    // from `chrome_major!` so it stays in sync with the Sec-Ch-Ua client hint.
+    concat!(
+        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 ",
+        "(KHTML, like Gecko) Chrome/",
+        chrome_major!(),
+        ".0.0.0 Safari/537.36"
+    )
+    .into()
 }
 fn default_depth() -> u32 {
     2

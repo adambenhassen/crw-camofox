@@ -150,9 +150,15 @@ fn build_client(
 /// These mimic a real browser's default request headers.
 const STEALTH_ACCEPT: &str =
     "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8";
-/// Chrome 150 client hint — kept in sync with the UA strings in BUILTIN_UA_POOL.
-const STEALTH_SEC_CH_UA: &str =
-    r#""Google Chrome";v="150", "Chromium";v="150", "Not_A Brand";v="24""#;
+/// Chrome client hint — major version comes from `crw_core::chrome_major!` so it
+/// can't drift from the UA strings in BUILTIN_UA_POOL (a mismatch is a bot tell).
+const STEALTH_SEC_CH_UA: &str = concat!(
+    r#""Google Chrome";v=""#,
+    crw_core::chrome_major!(),
+    r#"", "Chromium";v=""#,
+    crw_core::chrome_major!(),
+    r#"", "Not_A Brand";v="24""#,
+);
 
 /// Simple HTTP fetcher using reqwest. No JS rendering.
 pub struct HttpFetcher {
