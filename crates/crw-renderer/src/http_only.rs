@@ -195,9 +195,23 @@ impl HttpFetcher {
         } else {
             None
         };
-        // 429 proxy-retry client, armed only when the env proxy URL is set.
-        let ratelimit_proxy_client = ratelimit_proxy_url()
-            .map(|purl| build_client(user_agent, Some(purl.as_str()), request_timeout, false));
+        // 429 proxy-retry client, armed only when the env proxy URL is set AND
+        // parses. A malformed value must DISABLE the feature (leave this None),
+        // not fall through build_client's warn-and-drop to a proxy-less client —
+        // otherwise the 429 path engages, logs "retrying via proxy", and silently
+        // re-fetches from the same egress IP.
+        let ratelimit_proxy_client = ratelimit_proxy_url().and_then(|purl| {
+            match reqwest::Proxy::all(&purl) {
+                Ok(_) => Some(build_client(user_agent, Some(purl.as_str()), request_timeout, false)),
+                Err(e) => {
+                    tracing::error!(
+                        "CRW_HTTP_RATELIMIT_PROXY_URL '{}' is invalid ({e}); 429 proxy-retry disabled",
+                        purl
+                    );
+                    None
+                }
+            }
+        });
         Self {
             client,
             relaxed_client,
