@@ -201,11 +201,18 @@ pub async fn search_inner(
     // variant fetches) instead of doing them serially. The final pool is the
     // identical union, so the reranked source set is unchanged — only the
     // ~5-10s expansion overhead is hidden behind the original scrape.
+    // Only when the final data will be Flat: with `sources` the result is
+    // Grouped, the Flat-gated prescrape fold below is skipped, and the originals
+    // get scraped a second time by enrich_with_scrape — so the overlap would
+    // double the scrape cost instead of saving it. Mirror the `has_sources`
+    // check (defined after the fetch) here.
+    let no_sources = !req.sources.as_ref().is_some_and(|s| !s.is_empty());
     let c1_overlap = state.config.search.pipeline_overlap
         && state.config.search.query_expand
         && llm_path
         && req.scrape_options.is_some()
-        && effective_llm.is_some();
+        && effective_llm.is_some()
+        && no_sources;
     let mut prescraped: Vec<SearchResult> = Vec::new();
     let mut response = if c1_overlap {
         let llm = effective_llm.expect("c1_overlap requires effective_llm");
