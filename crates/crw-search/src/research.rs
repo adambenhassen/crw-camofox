@@ -469,10 +469,27 @@ pub async fn search_papers_pools(
     k: usize,
     f: &SearchFilters,
 ) -> Vec<Vec<PaperHit>> {
+    // SS is a booster (its failures degrade gracefully to OpenAlex + the route's
+    // web leg). Keyless it hits the shared 1-RPS tier where concurrent legs are
+    // near-certain 429s — wasted round-trips that only add backoff load — so skip
+    // them entirely without a key and let OpenAlex carry scholarly recall.
+    let has_s2 = keys.s2_key.is_some();
     let (oa, ss, snip) = tokio::join!(
         openalex_search(keys, query, k, f),
-        ss_search(keys, query, k),
-        ss_snippet_ids(keys, query),
+        async {
+            if has_s2 {
+                ss_search(keys, query, k).await
+            } else {
+                Vec::new()
+            }
+        },
+        async {
+            if has_s2 {
+                ss_snippet_ids(keys, query).await
+            } else {
+                Vec::new()
+            }
+        },
     );
     // snippet ids -> thin hits (arxiv only) so the union picks up body matches
     let snip_hits: Vec<PaperHit> = snip
