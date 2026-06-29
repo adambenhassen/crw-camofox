@@ -119,6 +119,7 @@ pub struct SimilarResponse {
     pub results: Vec<ResearchPaperResult>,
     pub pool_size: usize,
     pub truncated: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub note: Option<String>,
 }
 
