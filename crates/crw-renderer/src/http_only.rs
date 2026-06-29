@@ -85,14 +85,17 @@ fn is_cert_error(e: &reqwest::Error) -> bool {
     let mut src: Option<&(dyn std::error::Error + 'static)> = Some(e);
     while let Some(s) = src {
         let m = s.to_string().to_ascii_lowercase();
-        if m.contains("certificate")
+        // Cert-errors ONLY. Every cert-class message above ("certificate",
+        // "invalid peer cert", "certusedasend", "cert verify", ssl+cert)
+        // contains "cert", so the chain collapses to this. Deliberately does
+        // NOT match a bare "tls handshake" failure — those include non-cert
+        // causes (cipher/protocol mismatch, mid-handshake reset) that the
+        // relaxed-TLS retry (which disables cert AND hostname checks) must not
+        // react to.
+        if m.contains("cert")
             || m.contains("peerfailedverification")
             || m.contains("sslconnecterror")
-            || m.contains("invalid peer cert")
-            || m.contains("certusedasend")
-            || m.contains("cert verify")
-            || m.contains("tls handshake")
-            || (m.contains("ssl") && (m.contains("verif") || m.contains("cert")))
+            || (m.contains("ssl") && m.contains("verif"))
         {
             return true;
         }
