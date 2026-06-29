@@ -125,21 +125,28 @@ async fn get_json(url: &str, x_api_key: Option<&str>) -> Option<serde_json::Valu
     if let Some(hit) = inf.cache.get(&ck).await {
         return Some(hit);
     }
-    let _permit = sem().acquire().await.ok()?;
     for i in 0..4u32 {
+        // Hold a concurrency permit only for the request + body read, never
+        // across the backoff sleep — otherwise a burst of upstream 429s parks
+        // all permits in their 2/4/8s sleeps and stalls every other research
+        // leg (including the healthy ones) behind `sem().acquire()`.
+        let permit = sem().acquire().await.ok()?;
         let mut req = inf.http.get(url);
         if let Some(k) = x_api_key {
             req = req.header("x-api-key", k);
         }
         match req.send().await {
             Ok(r) if r.status().is_success() => {
-                if let Ok(v) = r.json::<serde_json::Value>().await {
+                let parsed = r.json::<serde_json::Value>().await;
+                drop(permit);
+                if let Ok(v) = parsed {
                     inf.cache.insert(ck, v.clone()).await;
                     return Some(v);
                 }
                 return None;
             }
             Ok(r) if r.status().as_u16() == 429 || r.status().is_server_error() => {
+                drop(permit); // release before sleeping so backoff frees the slot
                 if i == 3 {
                     return None;
                 }
