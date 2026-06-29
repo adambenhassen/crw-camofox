@@ -727,19 +727,25 @@ async fn ss_expand(keys: &ResearchKeys<'_>, arxiv: &str, mode: Mode) -> Vec<Pape
 /// `GET /papers/{id}/similar` — citation-graph expansion → ranked results.
 /// `mode` selects references / citers / similar. Accepts an `arxiv:`-prefixed,
 /// bare, or versioned id (normalized).
+///
+/// Returns `(results, pool_size)` where `pool_size` is the count of distinct
+/// candidates BEFORE the `take(k)` cap, so callers can report real coverage /
+/// truncation instead of reading it back off the already-truncated list.
 pub async fn related(
     keys: &ResearchKeys<'_>,
     id: &str,
     mode: Mode,
     k: usize,
-) -> Vec<ResearchPaperResult> {
+) -> (Vec<ResearchPaperResult>, usize) {
     let aid = norm_arxiv(id);
     let hits: Vec<PaperHit> = ss_expand(keys, &aid, mode)
         .await
         .into_iter()
         .filter(|h| h.arxiv.as_deref() != Some(aid.as_str()))
         .collect();
-    merge_rank(vec![hits], k)
+    let mut seen = std::collections::HashSet::new();
+    let pool_size = hits.iter().filter(|h| seen.insert(h.key())).count();
+    (merge_rank(vec![hits], k), pool_size)
 }
 
 #[cfg(test)]
@@ -819,7 +825,7 @@ mod tests {
         assert!(!results.is_empty(), "search returned nothing");
 
         // citation graph (references of the transformer paper)
-        let refs = related(&keys, "1706.03762", Mode::References, 20).await;
+        let (refs, _pool) = related(&keys, "1706.03762", Mode::References, 20).await;
         println!("references: {}", refs.len());
     }
 

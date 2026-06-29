@@ -238,13 +238,13 @@ pub async fn similar(
         _ => Mode::Similar,
     };
     let kz = keys(&state);
-    let results = research::related(&kz, &id, mode, k).await;
-    let pool_size = results.len();
+    let (results, pool_size) = research::related(&kz, &id, mode, k).await;
+    let truncated = pool_size > results.len();
     Ok(Json(SimilarResponse {
         success: true,
         results,
         pool_size,
-        truncated: pool_size >= k,
+        truncated,
         note: None,
     }))
 }
