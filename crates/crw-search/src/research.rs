@@ -429,6 +429,12 @@ pub fn merge_rank(pools: Vec<Vec<PaperHit>>, k: usize) -> Vec<ResearchPaperResul
                 .and_modify(|(existing, freq)| {
                     *freq += 1;
                     // keep the richest record (prefer one with abstract / work_id)
+                    // A snippet-only or web hit can seed the key with an empty
+                    // title; recover a real one from a later pool (e.g. OpenAlex
+                    // display_name) so the result isn't returned title-less.
+                    if existing.title.is_empty() && !hit.title.is_empty() {
+                        existing.title = hit.title.clone();
+                    }
                     if existing.abstract_.is_none() && hit.abstract_.is_some() {
                         existing.abstract_ = hit.abstract_.clone();
                     }
