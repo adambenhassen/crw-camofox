@@ -1099,12 +1099,13 @@ async fn fetch_expanded(
     llm: &LlmConfig,
     max_variants: usize,
 ) -> Result<SearxngResponse, SearchError> {
-    // Original fetch overlaps the expansion+variant fetches; union is identical.
-    let (orig, variant_pools) = tokio::join!(
-        client.fetch(base_params),
-        fetch_variant_pools(client, query, base_params, llm, max_variants)
-    );
-    let mut merged = orig?;
+    // Fetch the original first and short-circuit on its error (same failure
+    // semantics as the single-fetch path): if the backend is down there is no
+    // point spending the LLM rewrite + N variant fetches on a doomed request.
+    // The pipeline_overlap (C1) path is where original/expansion concurrency is
+    // intentional; here correctness of the failure path wins.
+    let mut merged = client.fetch(base_params).await?;
+    let variant_pools = fetch_variant_pools(client, query, base_params, llm, max_variants).await;
     union_pools(&mut merged, variant_pools);
     Ok(merged)
 }
