@@ -390,6 +390,31 @@ async fn ss_search(keys: &ResearchKeys<'_>, query: &str, k: usize) -> Vec<PaperH
         .unwrap_or_default()
 }
 
+/// Collect normalized arXiv ids from the STRING leaves of a JSON value, in
+/// document order, deduped. Walking leaves (vs regexing the serialized blob)
+/// skips numeric metadata — citation counts, offsets, scores — that a
+/// whole-document `\d{4}\.\d{4,5}` scan would false-match as paper ids, and
+/// avoids re-serializing the already-parsed response.
+fn collect_arxiv_ids(
+    v: &serde_json::Value,
+    seen: &mut std::collections::HashSet<String>,
+    out: &mut Vec<String>,
+) {
+    match v {
+        serde_json::Value::String(s) => {
+            for m in arxiv_re().find_iter(s) {
+                let id = norm_arxiv(m.as_str());
+                if seen.insert(id.clone()) {
+                    out.push(id);
+                }
+            }
+        }
+        serde_json::Value::Array(a) => a.iter().for_each(|x| collect_arxiv_ids(x, seen, out)),
+        serde_json::Value::Object(o) => o.values().for_each(|x| collect_arxiv_ids(x, seen, out)),
+        _ => {}
+    }
+}
+
 /// SS full-text snippet search → arXiv ids only (recovers body-relevant papers
 /// keyword/abstract search misses). The 59.6% harness's big lever.
 async fn ss_snippet_ids(keys: &ResearchKeys<'_>, query: &str) -> Vec<String> {
@@ -400,13 +425,10 @@ async fn ss_snippet_ids(keys: &ResearchKeys<'_>, query: &str) -> Vec<String> {
     let Some(v) = get_json(&url, keys.s2_key).await else {
         return Vec::new();
     };
-    let blob = v.to_string();
     let mut seen = std::collections::HashSet::new();
-    arxiv_re()
-        .find_iter(&blob)
-        .map(|m| norm_arxiv(m.as_str()))
-        .filter(|id| seen.insert(id.clone()))
-        .collect()
+    let mut out = Vec::new();
+    collect_arxiv_ids(&v, &mut seen, &mut out);
+    out
 }
 
 /// Merge candidate pools, dedup by [`PaperHit::key`], rank, cap at `k`.
