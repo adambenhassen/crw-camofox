@@ -942,23 +942,43 @@ fn build_byok_search_llm_config(
     server_cfg: Option<&LlmConfig>,
 ) -> Option<LlmConfig> {
     let api_key = req.llm_api_key.as_ref()?.clone();
-    let mut cfg = match server_cfg {
-        Some(s) => s.clone(),
-        None => LlmConfig::default(),
+    // Fail-closed allowlist: build from defaults and copy ONLY the fields a BYOK
+    // request legitimately needs, so no server-only field silently rides into the
+    // customer's endpoint — and a field added to LlmConfig later defaults to NOT
+    // leaking until it's deliberately carried here. Identity (provider/model/
+    // base_url) comes from the request, falling back to server config so a caller
+    // can send just a key; operational tuning is carried so answer behavior is
+    // unchanged. `reasoning_effort` (400s on providers that validate it) and the
+    // `require_byok_header` gate secret are deliberately NOT carried.
+    let mut cfg = LlmConfig {
+        api_key,
+        ..LlmConfig::default()
     };
-    cfg.api_key = api_key;
-    if let Some(p) = &req.llm_provider {
-        cfg.provider = p.clone();
+    if let Some(p) = req
+        .llm_provider
+        .clone()
+        .or_else(|| server_cfg.map(|s| s.provider.clone()))
+    {
+        cfg.provider = p;
     }
-    if let Some(m) = &req.llm_model {
-        cfg.model = m.clone();
+    if let Some(m) = req
+        .llm_model
+        .clone()
+        .or_else(|| server_cfg.map(|s| s.model.clone()))
+    {
+        cfg.model = m;
     }
-    if let Some(b) = &req.base_url {
-        cfg.base_url = Some(b.clone());
+    cfg.base_url = req
+        .base_url
+        .clone()
+        .or_else(|| server_cfg.and_then(|s| s.base_url.clone()));
+    if let Some(s) = server_cfg {
+        cfg.max_tokens = s.max_tokens;
+        cfg.azure_api_version = s.azure_api_version.clone();
+        cfg.max_concurrency = s.max_concurrency;
+        cfg.max_html_bytes = s.max_html_bytes;
+        cfg.temperature = s.temperature;
     }
-    // Never inherit the server's reasoning_effort into a BYOK request — the
-    // customer's endpoint must receive only what they explicitly configure.
-    cfg.reasoning_effort = None;
     Some(cfg)
 }
 
