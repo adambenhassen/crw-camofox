@@ -318,10 +318,10 @@ async fn openalex_search(
 ) -> Vec<PaperHit> {
     let mut filter = String::new();
     if let Some(from) = &f.from {
-        filter.push_str(&format!(",from_publication_date:{from}"));
+        filter.push_str(&format!(",from_publication_date:{}", enc(from)));
     }
     if let Some(to) = &f.to {
-        filter.push_str(&format!(",to_publication_date:{to}"));
+        filter.push_str(&format!(",to_publication_date:{}", enc(to)));
     }
     if let Some(a) = &f.authors {
         filter.push_str(&format!(",raw_author_name.search:{}", enc(a)));
@@ -580,9 +580,9 @@ async fn ss_inspect(keys: &ResearchKeys<'_>, arxiv: &str) -> Option<ResearchPape
 /// OpenAlex inspect for work ids / DOIs / arXiv-preprint-only papers.
 async fn openalex_inspect(keys: &ResearchKeys<'_>, id: &str) -> Option<ResearchPaperMeta> {
     let filter = if let Some(d) = id.strip_prefix("doi:") {
-        format!("filter=doi:{d}")
+        format!("filter=doi:{}", enc(d))
     } else if id.starts_with('W') {
-        format!("filter=openalex_id:{id}")
+        format!("filter=openalex_id:{}", enc(id))
     } else {
         format!("filter=doi:10.48550/arxiv.{}", norm_arxiv(id))
     };
