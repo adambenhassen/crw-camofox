@@ -326,16 +326,21 @@ async fn openalex_search(
     if let Some(a) = &f.authors {
         filter.push_str(&format!(",raw_author_name.search:{}", enc(a)));
     }
-    // ponytail: `f.categories` (arXiv cat like "cs.LG") needs an arXiv-cat ->
-    // OpenAlex-concept/topic map to filter on; deferred. Currently ignored.
     let filter_param = if filter.is_empty() {
         String::new()
     } else {
         format!("&filter={}", filter.trim_start_matches(','))
     };
+    // `categories` (an arXiv cat like "cs.LG") has no clean arXiv-cat ->
+    // OpenAlex-concept/topic filter mapping, so fold it into the full-text
+    // search term rather than silently dropping an accepted parameter.
+    let search_term = match &f.categories {
+        Some(c) if !c.trim().is_empty() => format!("{query} {c}"),
+        _ => query.to_string(),
+    };
     let url = format!(
         "https://api.openalex.org/works?search={}{}&per_page={}&select=id,display_name,ids,abstract_inverted_index,cited_by_count,relevance_score{}",
-        enc(query),
+        enc(&search_term),
         filter_param,
         k.min(50),
         openalex_base(keys),
