@@ -1189,7 +1189,10 @@ impl Drop for WsFetchGuard {
             .take();
         let renderer = std::mem::take(&mut self.renderer);
         if tokio::runtime::Handle::try_current().is_ok() {
-            let _ = Self::spawn_reap(conn, tid, renderer);
+            // Detached: discard the JoinHandle, the reap runs to completion on
+            // its own. `drop` (not `let _`) so clippy sees the future is
+            // intentionally not awaited.
+            drop(Self::spawn_reap(conn, tid, renderer));
         }
         // No runtime (non-async teardown) → `conn` drops here, aborting its
         // event loop — the best we can do without a runtime to await on.

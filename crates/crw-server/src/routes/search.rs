@@ -206,7 +206,7 @@ pub async fn search_inner(
     // get scraped a second time by enrich_with_scrape — so the overlap would
     // double the scrape cost instead of saving it. Mirror the `has_sources`
     // check (defined after the fetch) here.
-    let no_sources = !req.sources.as_ref().is_some_and(|s| !s.is_empty());
+    let no_sources = req.sources.as_ref().is_none_or(|s| s.is_empty());
     let c1_overlap = state.config.search.pipeline_overlap
         && state.config.search.query_expand
         && llm_path
