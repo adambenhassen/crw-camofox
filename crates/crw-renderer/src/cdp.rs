@@ -1109,6 +1109,93 @@ async fn close_target(conn: &CdpConnection, target_id: &str, renderer: &str) {
     }
 }
 
+/// Cancellation-safe reaper for the browser-owned target created during a
+/// legacy (pool-off) [`CdpRenderer::fetch_with_ws`].
+///
+/// The dispatcher wraps that fetch in `tokio::time::timeout` and the fallback
+/// ladder can drop it, so a cancellation *mid-`fetch_inner`* would skip the
+/// inline `closeTarget` and orphan the target. `Target.createTarget` targets
+/// are browser-owned with `disposeOnDetach` unset, so a bare WS close does NOT
+/// reap them — the page (and any runaway JS pegging a core) leaks inside the
+/// browser. Mirrors the pool path's `PoolGuard::drop`.
+///
+/// The guard owns the connection: the happy/normal-error path calls
+/// [`finish`](WsFetchGuard::finish) to close inline (awaited) and disarm; any
+/// cancellation runs [`Drop`], which reaps best-effort on a detached task
+/// (Drop cannot await).
+struct WsFetchGuard {
+    conn: Option<CdpConnection>,
+    tid_slot: std::sync::Arc<std::sync::Mutex<Option<String>>>,
+    renderer: String,
+}
+
+impl WsFetchGuard {
+    /// Borrow the connection to run the fetch. Valid until `finish`/drop.
+    fn conn(&self) -> &CdpConnection {
+        self.conn
+            .as_ref()
+            .expect("WsFetchGuard::conn after finish/drop")
+    }
+
+    /// Detached best-effort reap: `closeTarget` (if a target was created) then
+    /// close the WS. Spawned — never awaited inline — so it runs to completion
+    /// even if the *caller's* await is cancelled by the outer
+    /// `tokio::time::timeout`. An inline `closeTarget().await` could itself be
+    /// cancelled mid-flight and re-orphan the target. The task owns `conn`, so
+    /// the CDP event loop stays alive to deliver the close before the socket
+    /// drops.
+    fn spawn_reap(
+        conn: CdpConnection,
+        tid: Option<String>,
+        renderer: String,
+    ) -> tokio::task::JoinHandle<()> {
+        tokio::spawn(async move {
+            if let Some(tid) = tid {
+                close_target(&conn, &tid, &renderer).await;
+            }
+            conn.close().await;
+        })
+    }
+
+    /// Not-cancelled path: spawn the reap and await the handle for backpressure
+    /// (keeps the caller's concurrency permit held until cleanup is done). If
+    /// *this* await is cancelled by the outer timeout, the spawned reap still
+    /// finishes — that's the whole point. Consumes the guard, disarming `Drop`.
+    async fn finish(mut self) {
+        let conn = self.conn.take().expect("WsFetchGuard::finish called once");
+        let tid = self
+            .tid_slot
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .take();
+        let renderer = std::mem::take(&mut self.renderer);
+        let _ = Self::spawn_reap(conn, tid, renderer).await;
+    }
+}
+
+impl Drop for WsFetchGuard {
+    fn drop(&mut self) {
+        // finish() already reaped → conn is None → nothing to do.
+        let Some(conn) = self.conn.take() else {
+            return;
+        };
+        // Cancellation before finish(): spawn the same detached reap. Poison-
+        // tolerant lock (the repo's `lock_pgids` idiom) so a Drop that runs
+        // during unwinding can't double-panic → abort.
+        let tid = self
+            .tid_slot
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .take();
+        let renderer = std::mem::take(&mut self.renderer);
+        if tokio::runtime::Handle::try_current().is_ok() {
+            let _ = Self::spawn_reap(conn, tid, renderer);
+        }
+        // No runtime (non-async teardown) → `conn` drops here, aborting its
+        // event loop — the best we can do without a runtime to await on.
+    }
+}
+
 /// Consume events from `events` until `Page.loadEventFired` (returns the main
 /// document status) or a fatal event arrives. Uses `main_document_status`
 /// captured from `Network.responseReceived` when available.
@@ -1420,8 +1507,19 @@ impl CdpRenderer {
         let recorder = move |tid: &str| {
             *tid_slot_rec.lock().unwrap() = Some(tid.to_string());
         };
+
+        // Cancellation-safe cleanup: the dispatcher wraps this whole future in
+        // `tokio::time::timeout`, so a mid-`fetch_inner` timeout must not skip
+        // the target close (that orphans a browser-owned target → leaked page →
+        // 100% CPU spin). The guard owns `conn`; `finish()` closes inline on the
+        // not-cancelled path, its `Drop` reaps on cancellation. See WsFetchGuard.
+        let guard = WsFetchGuard {
+            conn: Some(conn),
+            tid_slot: tid_slot.clone(),
+            renderer: self.name.clone(),
+        };
         let result = self
-            .fetch_inner(&conn, None, &recorder, url, wait_for_ms, deadline)
+            .fetch_inner(guard.conn(), None, &recorder, url, wait_for_ms, deadline)
             .await;
 
         // B2 gate metric: pre-navigation overhead (connect + createTarget +
@@ -1430,12 +1528,9 @@ impl CdpRenderer {
             .chrome_request_handshake_seconds
             .with_label_values(&["off", "n/a"])
             .observe(handshake_t0.elapsed().as_secs_f64());
-        let captured_tid = tid_slot.lock().unwrap().take();
-        if let Some(tid) = captured_tid {
-            close_target(&conn, &tid, &self.name).await;
-        }
 
-        conn.close().await;
+        // Not cancelled: close target + WS inline (awaited), disarm the reaper.
+        guard.finish().await;
 
         let (html, status_code, truncated, final_href, captured_responses, _tid_ignored) = result?;
 
@@ -2479,5 +2574,73 @@ mod tests {
         assert!(safe.contains("Chrome/150"));
         // A UA without the prefix is returned unchanged (no double-strip).
         assert_eq!(lightpanda_safe_ua("Chrome/150.0.0.0"), "Chrome/150.0.0.0");
+    }
+
+    /// A `fetch_with_ws` cancelled mid-flight (its future dropped) must still
+    /// close the browser-owned target, or the page leaks and can spin a core at
+    /// 100%. This drives the guard the same way a `tokio::time::timeout` does:
+    /// arm it, then drop WITHOUT `finish()`, and assert the detached reaper
+    /// sent `Target.closeTarget`.
+    #[tokio::test]
+    async fn ws_fetch_guard_reaps_target_on_cancel() {
+        use crate::cdp_conn::CdpConnection;
+        use futures::StreamExt;
+        use std::sync::{Arc, Mutex};
+        use std::time::Duration;
+        use tokio::net::TcpListener;
+        use tokio_tungstenite::accept_async;
+
+        // Mock CDP endpoint: record every inbound method, never reply.
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let recorded: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+        let rec = recorded.clone();
+        tokio::spawn(async move {
+            let Ok((stream, _)) = listener.accept().await else {
+                return;
+            };
+            let Ok(ws) = accept_async(stream).await else {
+                return;
+            };
+            let (_w, mut r) = ws.split();
+            while let Some(Ok(msg)) = r.next().await {
+                if let Ok(txt) = msg.to_text()
+                    && let Ok(v) = serde_json::from_str::<serde_json::Value>(txt)
+                    && let Some(m) = v.get("method").and_then(|x| x.as_str())
+                {
+                    rec.lock().unwrap().push(m.to_string());
+                }
+            }
+        });
+
+        let conn = CdpConnection::connect(&format!("ws://{addr}"), Duration::from_secs(2))
+            .await
+            .expect("connect to mock CDP ws");
+
+        // Arm with a recorded target, then drop without finish() = cancellation.
+        let tid_slot = Arc::new(Mutex::new(Some("TARGET-1".to_string())));
+        let guard = super::WsFetchGuard {
+            conn: Some(conn),
+            tid_slot,
+            renderer: "test".to_string(),
+        };
+        drop(guard);
+
+        // The detached reaper must have sent Target.closeTarget.
+        for _ in 0..50 {
+            if recorded
+                .lock()
+                .unwrap()
+                .iter()
+                .any(|m| m == "Target.closeTarget")
+            {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        panic!(
+            "cancellation did not reap target; recorded = {:?}",
+            recorded.lock().unwrap()
+        );
     }
 }
