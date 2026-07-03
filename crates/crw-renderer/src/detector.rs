@@ -7,12 +7,26 @@ static AKAMAI_REF_RE: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r"Reference #\d+\.[0-9a-f]+\.\d+\.[0-9a-f]+").expect("static regex")
 });
 
+/// Byte-cap a page prefix without slicing mid-character — a multibyte char
+/// straddling the cap would make `&str` indexing panic.
+fn prefix_within(html: &str, max: usize) -> &str {
+    let mut end = html.len().min(max);
+    while !html.is_char_boundary(end) {
+        end -= 1;
+    }
+    &html[..end]
+}
+
+/// Detector check window: heuristics scan at most this many bytes.
+/// Shared by [`needs_js_rendering`] and [`looks_like_thin_html`] so the two
+/// escalation gates always agree on where the page "ends".
+const DETECTOR_WINDOW: usize = 500_000;
+
 /// Heuristic: does the HTML look like an SPA shell that needs JS rendering?
 pub fn needs_js_rendering(html: &str) -> bool {
     // Check up to 500KB — some pages have huge <head> sections (CSS, preloaded data)
     // and the <body> may start well beyond 50KB.
-    let check_len = html.len().min(500_000);
-    let lower = html[..check_len].to_lowercase();
+    let lower = prefix_within(html, DETECTOR_WINDOW).to_lowercase();
     let body_len = extract_body_text_len(&lower);
 
     // Very short body text + presence of JS framework indicators.
@@ -139,7 +153,7 @@ pub fn looks_like_vendor_block(html: &str) -> Option<&'static str> {
     if html.len() > 200_000 {
         return None;
     }
-    let head = &html[..html.len().min(15_000)];
+    let head = prefix_within(html, 15_000);
     let lower_head = head.to_lowercase();
 
     // Cloudflare: challenge form with cf-managed token, error code span, or
@@ -203,8 +217,7 @@ pub fn looks_like_vendor_block(html: &str) -> Option<&'static str> {
 /// on raw markup, looking for framework shells. This one is purely about
 /// outcome — does the page have *any* content for an extractor to chew on.
 pub fn looks_like_thin_html(html: &str) -> bool {
-    let check_len = html.len().min(500_000);
-    let lower = html[..check_len].to_lowercase();
+    let lower = prefix_within(html, DETECTOR_WINDOW).to_lowercase();
     extract_body_text_len(&lower) < 200
 }
 
@@ -366,10 +379,13 @@ fn body_html_without_scripts_lower(lower: &str) -> String {
     let body_start = lower
         .find("<body")
         .and_then(|i| lower[i..].find('>').map(|j| i + j + 1));
-    let body_end = lower.rfind("</body>");
+    // `</body>` is optional in HTML5, and callers may pass a truncated
+    // prefix of a large document — in both cases the close tag is absent
+    // while real body content is present, so fall back to end-of-input.
+    let body_end = lower.rfind("</body>").unwrap_or(lower.len());
 
-    let body = match (body_start, body_end) {
-        (Some(start), Some(end)) if start < end => &lower[start..end],
+    let body = match body_start {
+        Some(start) if start < body_end => &lower[start..body_end],
         _ => return String::new(),
     };
 
@@ -558,6 +574,56 @@ mod tests {
         let filler = "x".repeat(100_000);
         let html = format!("<html><body><p>Loading...</p>{filler}</body></html>");
         assert!(!looks_like_loading_placeholder(&html));
+    }
+
+    #[test]
+    fn large_ssr_page_with_body_close_past_check_window_not_thin() {
+        // Regression (discovercars.com): a >500KB server-rendered page whose
+        // `</body>` lies beyond the 500KB detector window. The truncated
+        // prefix has `<body>` but no `</body>`; body text must be counted to
+        // end-of-prefix, not treated as empty — otherwise a content-rich page
+        // is classified as an SPA shell / thin content and escalated to JS.
+        let sentence = "Rent a car in Zakynthos from twelve euros per day with free cancellation. ";
+        let body_text = sentence.repeat(8_000); // ~600KB of visible text
+        let html = format!(
+            r#"<html><head><script src="/bundle.js"></script></head><body><article>{body_text}</article></body></html>"#
+        );
+        assert!(html.len() > 500_000);
+        assert!(!needs_js_rendering(&html));
+        assert!(!looks_like_thin_html(&html));
+    }
+
+    #[test]
+    fn multibyte_char_straddling_detector_window_does_not_panic() {
+        // Regression: `html[..500_000]` panicked when a multibyte char
+        // straddled the window edge. Place a '€' (3 bytes) across byte
+        // 500_000 and run every capped detector.
+        let pre = "<html><head></head><body><p>";
+        let pad = "a".repeat(499_999 - pre.len());
+        let html = format!(
+            "{pre}{pad}€€€{}</p></body></html>",
+            "real text. ".repeat(40)
+        );
+        assert!(!html.is_char_boundary(500_000));
+        let _ = needs_js_rendering(&html);
+        let _ = looks_like_thin_html(&html);
+        // 15KB head cap in looks_like_vendor_block: same class.
+        let head_pre = "<html><head>";
+        let head_html = format!(
+            "{head_pre}{}€€€</head></html>",
+            "b".repeat(14_999 - head_pre.len())
+        );
+        assert!(!head_html.is_char_boundary(15_000));
+        let _ = looks_like_vendor_block(&head_html);
+    }
+
+    #[test]
+    fn omitted_body_close_tag_not_placeholder() {
+        // `</body>` is optional in HTML5 — a real page omitting it must not
+        // read as an empty body.
+        let html = r#"<html><body><article><h1>Ferry timetables</h1><p>Daily departures from the port every morning at eight, with additional sailings in the summer season and connections to the mainland. Tickets are available at the harbour office or online, and vehicles should arrive at least forty-five minutes before departure to secure boarding.</p></article></html>"#;
+        assert!(!looks_like_loading_placeholder(html));
+        assert!(!looks_like_thin_html(html));
     }
 
     #[test]
