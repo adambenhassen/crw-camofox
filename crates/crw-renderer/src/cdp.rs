@@ -1478,7 +1478,7 @@ impl CdpRenderer {
             )));
         }
 
-        let final_url = final_href.and_then(|h| if h != url { Some(h) } else { None });
+        let final_url = final_href.filter(|h| h != url);
         Ok(FetchResult {
             url: url.to_string(),
             final_url,
@@ -1574,7 +1574,7 @@ impl CdpRenderer {
             )));
         }
 
-        let final_url = final_href.and_then(|h| if h != url { Some(h) } else { None });
+        let final_url = final_href.filter(|h| h != url);
 
         Ok(FetchResult {
             url: url.to_string(),
