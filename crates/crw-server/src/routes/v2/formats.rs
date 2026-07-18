@@ -63,8 +63,8 @@ pub struct DecomposedFormats {
     /// (Tier-3), so this is recorded for the response `warning` rather than
     /// silently dropped — the request still succeeds with the other formats.
     pub screenshot_requested: bool,
-    /// v2-only formats crw cannot yet produce (`images`, `attributes`,
-    /// `branding`, `audio`, `query`, `screenshot`). Surfaced as a warning.
+    /// v2-only formats crw cannot yet produce (`attributes`, `branding`,
+    /// `audio`, `query`, `screenshot`). Surfaced as a warning.
     pub unsupported: Vec<String>,
 }
 
@@ -119,7 +119,7 @@ fn handle_token(
             out.unsupported.push("screenshot".to_string());
             Ok(())
         }
-        "images" | "attributes" | "branding" | "audio" | "query" => {
+        "attributes" | "branding" | "audio" | "query" => {
             out.unsupported.push(ty.to_string());
             Ok(())
         }
@@ -251,13 +251,21 @@ mod tests {
     #[test]
     fn unsupported_formats_collected_not_fatal() {
         let d = decompose(&specs(
-            json!(["markdown", {"type": "images"}, {"type": "screenshot"}]),
+            json!(["markdown", {"type": "attributes"}, {"type": "audio"}]),
         ))
         .unwrap();
         assert!(d.formats.contains(&OutputFormat::Markdown));
-        assert!(d.unsupported.contains(&"images".to_string()));
-        assert!(d.unsupported.contains(&"screenshot".to_string()));
+        assert!(d.unsupported.contains(&"attributes".to_string()));
+        assert!(d.unsupported.contains(&"audio".to_string()));
         assert!(unsupported_warning(&d.unsupported).is_some());
+    }
+
+    #[test]
+    fn images_format_now_supported() {
+        // `images` moved from the unsupported list to a real format token.
+        let d = decompose(&specs(json!([{"type": "images"}]))).unwrap();
+        assert!(d.formats.contains(&OutputFormat::Images));
+        assert!(!d.unsupported.contains(&"images".to_string()));
     }
 
     #[test]

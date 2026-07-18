@@ -277,6 +277,7 @@ mod tests {
             raw_html: None,
             plain_text: None,
             links: None,
+            images: None,
             json: None,
             summary: None,
             llm_usage: None,
