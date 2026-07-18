@@ -33,6 +33,12 @@ const SESSION_KEY: &str = "render";
 /// JS evaluated to extract the fully-rendered DOM after navigation.
 const OUTER_HTML_EXPR: &str = "document.documentElement.outerHTML";
 
+/// Grace budget for the best-effort tab cleanup DELETE. Deliberately NOT tied to
+/// the request deadline: cleanup runs after the deadline may already be spent
+/// (e.g. an evaluate that timed out), and a leaked tab drives the camofox
+/// context toward MAX_SESSIONS, so the reap must still get a real chance to run.
+const CLEANUP_BUDGET: Duration = Duration::from_secs(3);
+
 /// Renderer backed by a camofox-browser REST endpoint.
 pub struct CamofoxRenderer {
     name: String,
@@ -96,6 +102,59 @@ impl CamofoxRenderer {
             .await
             .map_err(|e| CrwError::RendererError(format!("camofox {path} request failed: {e}")))
     }
+
+    /// Fire-and-discard POST bounded by `budget`. The response is dropped
+    /// unread, so only the request send is bounded — used for `/wait`, whose
+    /// body we never decode. The client's own `timeout` is a fixed per-op
+    /// ceiling (config `chrome_timeout`, commonly 30s) far longer than a tight
+    /// scrape deadline; without this each round-trip could run for that full
+    /// ceiling and blow past the caller's deadline (the `PageFetcher` contract).
+    /// Returns `Timeout` when the budget is already spent or the call outlives it.
+    async fn post_discard_within(
+        &self,
+        path: &str,
+        body: serde_json::Value,
+        budget: Duration,
+    ) -> CrwResult<()> {
+        if budget.is_zero() {
+            return Err(CrwError::Timeout(0));
+        }
+        match tokio::time::timeout(budget, self.post_json(path, body)).await {
+            Ok(r) => r.map(|_| ()),
+            Err(_) => Err(CrwError::Timeout(budget.as_millis() as u64)),
+        }
+    }
+
+    /// POST and decode the JSON body, the WHOLE round-trip (send, status check,
+    /// body read) bounded by `budget`. Bounding only the send would let a
+    /// stalled response body still overrun the deadline, so the decode is inside
+    /// the timeout too. Returns `Timeout` when the budget is spent or exceeded.
+    async fn post_decode_within<T: serde::de::DeserializeOwned>(
+        &self,
+        path: &str,
+        body: serde_json::Value,
+        budget: Duration,
+    ) -> CrwResult<T> {
+        if budget.is_zero() {
+            return Err(CrwError::Timeout(0));
+        }
+        let fut = async {
+            let resp = self.post_json(path, body).await?;
+            if !resp.status().is_success() {
+                return Err(CrwError::RendererError(format!(
+                    "camofox {path} returned {}",
+                    resp.status()
+                )));
+            }
+            resp.json::<T>()
+                .await
+                .map_err(|e| CrwError::RendererError(format!("camofox {path} bad response: {e}")))
+        };
+        match tokio::time::timeout(budget, fut).await {
+            Ok(r) => r,
+            Err(_) => Err(CrwError::Timeout(budget.as_millis() as u64)),
+        }
+    }
 }
 
 #[async_trait]
@@ -114,59 +173,59 @@ impl PageFetcher for CamofoxRenderer {
         }
         let start = Instant::now();
 
-        // 1. Open a tab navigated at `url`.
-        let create = self
-            .post_json(
+        // 1. Open a tab navigated at `url`. Send + body decode bounded by the
+        //    request budget so a stalled navigate cannot overrun the deadline.
+        //    NOTE: if create succeeds server-side but the response times out here
+        //    we never learn `tab_id`, so that one tab can leak until camofox
+        //    idle-evicts it. Eliminating that race needs the warm-tab+mutex model
+        //    the search client uses (crw-search::camofox_search); tracked as the
+        //    next step, out of scope for the deadline fix.
+        let tab_id = self
+            .post_decode_within::<CreateTabResponse>(
                 "/tabs",
                 json!({ "userId": USER_ID, "sessionKey": SESSION_KEY, "url": url }),
+                deadline.remaining(),
             )
-            .await?;
-        if !create.status().is_success() {
-            return Err(CrwError::RendererError(format!(
-                "camofox: create tab returned {}",
-                create.status()
-            )));
-        }
-        let tab_id = create
-            .json::<CreateTabResponse>()
-            .await
-            .map_err(|e| CrwError::RendererError(format!("camofox: bad /tabs response: {e}")))?
+            .await?
             .tab_id;
 
         // 2. Wait for readiness, bounded by the smaller of the caller's
-        //    `wait_for_ms` hint and the remaining request budget.
+        //    `wait_for_ms` hint and the remaining request budget. The HTTP call
+        //    itself is capped at the remaining budget too, so a server-side wait
+        //    that ignores its `timeout` can't overrun the deadline.
         let budget_ms = deadline.remaining().as_millis() as u64;
         let wait_ms = wait_for_ms.unwrap_or(budget_ms).min(budget_ms);
         let _ = self
-            .post_json(
+            .post_discard_within(
                 &format!("/tabs/{tab_id}/wait"),
                 json!({ "userId": USER_ID, "timeout": wait_ms }),
+                deadline.remaining(),
             )
             .await;
 
-        // 3. Evaluate the rendered DOM.
-        let html = async {
-            let resp = self
-                .post_json(
-                    &format!("/tabs/{tab_id}/evaluate"),
-                    json!({ "userId": USER_ID, "expression": OUTER_HTML_EXPR }),
-                )
-                .await?;
-            resp.json::<EvaluateResponse>().await.map_err(|e| {
-                CrwError::RendererError(format!("camofox: bad evaluate response: {e}"))
-            })
-        }
-        .await;
+        // 3. Evaluate the rendered DOM, send + body decode bounded by the budget.
+        let html = self
+            .post_decode_within::<EvaluateResponse>(
+                &format!("/tabs/{tab_id}/evaluate"),
+                json!({ "userId": USER_ID, "expression": OUTER_HTML_EXPR }),
+                deadline.remaining(),
+            )
+            .await;
 
-        // 4. Best-effort close — never fail the fetch on cleanup.
-        let _ = self
-            .auth(
+        // 4. Best-effort close — never fail the fetch on cleanup. Uses a fixed
+        //    grace budget (NOT the deadline, which may already be spent) so a
+        //    tab opened above is still reaped instead of leaking toward
+        //    MAX_SESSIONS. Deadline expiry is the common trigger for this path.
+        let _ = tokio::time::timeout(
+            CLEANUP_BUDGET,
+            self.auth(
                 self.client
                     .delete(format!("{}/tabs/{tab_id}", self.base_url)),
             )
             .json(&json!({ "userId": USER_ID }))
-            .send()
-            .await;
+            .send(),
+        )
+        .await;
 
         let html = html?.result.unwrap_or_default();
         if html.is_empty() {
@@ -175,6 +234,14 @@ impl PageFetcher for CamofoxRenderer {
             ));
         }
 
+        // The camofox-browser REST API exposes only `tabId` and the evaluated
+        // `result` — it returns no navigation status code, final URL, or response
+        // content-type. So these three are best-effort synthetic values, NOT
+        // observed from the wire: a camofox-rendered 404 or redirect is reported
+        // here as a 200. Downstream anti-bot/block classification still runs on
+        // the returned `html` (see crw_crawl::single::classify_block), which is
+        // the real signal for this tier; surfacing true status/final_url needs an
+        // API that returns them.
         Ok(FetchResult {
             url: url.to_string(),
             final_url: None,

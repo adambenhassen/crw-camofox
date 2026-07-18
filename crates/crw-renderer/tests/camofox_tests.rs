@@ -38,6 +38,13 @@ async fn wait(Path(_id): Path<String>, Json(_body): Json<Value>) -> Json<Value> 
     Json(json!({ "ok": true }))
 }
 
+/// A `/tabs` handler that hangs far longer than any test deadline — models a
+/// stalled camofox navigate (Google `/sorry` interstitial, dead upstream).
+async fn create_tab_stalls(Json(_body): Json<Value>) -> impl IntoResponse {
+    tokio::time::sleep(Duration::from_secs(30)).await;
+    (StatusCode::OK, Json(json!({ "tabId": "tab-slow" })))
+}
+
 async fn evaluate(Path(_id): Path<String>, Json(_body): Json<Value>) -> Json<Value> {
     Json(json!({
         "ok": true,
@@ -111,6 +118,42 @@ async fn is_available_reads_health() {
     let base = spawn_camofox_mock().await;
     let renderer = CamofoxRenderer::new("camofox", &base, None, Duration::from_secs(5));
     assert!(renderer.is_available().await);
+}
+
+#[tokio::test]
+async fn fetch_bounded_by_deadline_not_client_timeout() {
+    // The client timeout (10s) is far longer than the caller deadline (600ms).
+    // A stalled navigate must surface as a deadline-bounded failure quickly,
+    // NOT run for the full client timeout — the PageFetcher contract the
+    // failover ladder relies on to move to the next tier / return 504.
+    let app = Router::new().route("/tabs", post(create_tab_stalls));
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        axum::serve(listener, app).await.unwrap();
+    });
+    let base = format!("http://{addr}");
+    let renderer = CamofoxRenderer::new("camofox", &base, None, Duration::from_secs(10));
+
+    let started = std::time::Instant::now();
+    let res = renderer
+        .fetch(
+            "https://example.com",
+            &HashMap::new(),
+            None,
+            Deadline::now_plus(Duration::from_millis(600)),
+        )
+        .await;
+    let elapsed = started.elapsed();
+
+    assert!(
+        matches!(res, Err(crw_core::error::CrwError::Timeout(_))),
+        "a stalled navigate must surface as Timeout (→504), got {res:?}"
+    );
+    assert!(
+        elapsed < Duration::from_secs(3),
+        "must be bounded by the ~600ms deadline, not the 10s client timeout; took {elapsed:?}"
+    );
 }
 
 #[tokio::test]
