@@ -153,15 +153,14 @@ jobs:
           VERSION: ${{ needs.release-context.outputs.version }}
         run: |
           set -euo pipefail
-          notes=$(printf '%s\n' \
-            "Multi-arch Docker image (\`linux/amd64\` + \`linux/arm64\`):" \
-            "" \
-            "    docker pull ghcr.io/${{ github.repository }}:${VERSION}" \
-            "" \
-            "Also tagged \`${VERSION%.*}\` and \`latest\`.")
-          # Idempotent: create on first run, update notes on a re-run.
+          # Notes = this version's CHANGELOG.md section + a Docker-pull footer.
+          # CHANGELOG.md is the single source of truth, so a re-run regenerates
+          # identical notes and never clobbers curated text (edit curation in
+          # CHANGELOG.md, not the release page).
+          python3 scripts/release/render_release_notes.py "$VERSION" "${{ github.repository }}" > notes.md
+          # Idempotent: create on first run, refresh notes on a re-run.
           if gh release view "$TAG" --repo "${{ github.repository }}" >/dev/null 2>&1; then
-            gh release edit "$TAG" --repo "${{ github.repository }}" --notes "$notes"
+            gh release edit "$TAG" --repo "${{ github.repository }}" --notes-file notes.md
           else
-            gh release create "$TAG" --repo "${{ github.repository }}" --title "$TAG" --notes "$notes"
+            gh release create "$TAG" --repo "${{ github.repository }}" --title "$TAG" --notes-file notes.md
           fi
