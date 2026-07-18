@@ -107,10 +107,46 @@ the request deadline and search no longer fails silently.
 
 ## [1.0.0] - 2026-06-17
 
-First tagged release of the fork: a camofox-first, anti-detection variant of crw,
-distributed solely as a multi-arch Docker image. Upstream's crates.io / npm / PyPI
-packaging is intentionally dropped; the renderer ladder is lightpanda (CDP) plus
-the camofox / camoufox REST tiers.
+First tagged release of the fork — a camofox-first, anti-detection variant of crw,
+distributed solely as a multi-arch Docker image. This release establishes the
+fork's identity: the camofox (Camoufox / Firefox) browser is the heavy renderer
+and the sole search backend, and the upstream Chrome/Playwright and SearXNG
+machinery is removed.
+
+### Added
+
+- **Camofox renderer tier:** the camofox-browser REST server (Camoufox / Firefox
+  anti-detect browser) is wired in as the heavy/stealth JS tier, taking Chrome's
+  slot in the failover ladder.
+- **Camofox-backed search:** `/v1/search` drives the camofox browser directly —
+  Google via the built-in search macro; Bing, DuckDuckGo, Wikipedia, YouTube,
+  Reddit, and Amazon by navigating their result pages; GitHub via the REST Search
+  API — behind a per-engine extractor registry with a generic fallback.
+- **Multi-engine search:** a `SearchEngine` enum and an `engines` request field
+  fan a query out across up to four engines and merge/dedupe the results, exposed
+  across MCP, OpenAPI, the SDKs, and the CLI (stringified-array args accepted).
+- **crw-browse-camofox:** an MCP server over the camofox REST API for interactive
+  browser control (later switched to the upstream camofox-mcp).
+- A single warm camofox tab is reused across searches to end the context-teardown
+  race that produced empty or 5xx results.
+
+### Changed
+
+- Camofox is the **default heavy renderer** and the **only** `/v1/search` backend.
+- The Docker Compose stack defaults to camofox; distribution is Docker-only
+  (multi-arch image on GHCR).
+
+### Removed
+
+- **BREAKING:** the Chrome and Playwright renderer tiers and `crw-browse` — the
+  ladder is now lightpanda (CDP) plus the camofox / camoufox REST tiers only.
+- **BREAKING:** the SearXNG search backend, replaced entirely by camofox.
+- Upstream's crates.io / npm / PyPI / SDK packaging and install paths.
+
+### Fixed
+
+- Structured-extraction (Anthropic) chat URL no longer doubles `/v1`.
+- Engine cap and camofox-mcp configuration corrected against a live Docker stack.
 
 [1.2.0]: https://github.com/adambenhassen/crw-camofox/compare/v1.1.2...v1.2.0
 [1.1.2]: https://github.com/adambenhassen/crw-camofox/compare/v1.1.1...v1.1.2
