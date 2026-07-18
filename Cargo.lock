@@ -961,6 +961,7 @@ dependencies = [
  "crw-extract",
  "dashmap",
  "dirs",
+ "encoding_rs",
  "flate2",
  "futures",
  "libc",
@@ -975,6 +976,7 @@ dependencies = [
  "tokio-tungstenite",
  "tracing",
  "url",
+ "wiremock",
 ]
 
 [[package]]
