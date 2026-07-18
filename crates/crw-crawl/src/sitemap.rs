@@ -69,13 +69,30 @@ enum SitemapOutcome {
 }
 
 async fn fetch_sitemap_raw(url: &str, client: &reqwest::Client) -> SitemapOutcome {
-    let requested_site = match url::Url::parse(url).ok().as_ref().and_then(site_key) {
+    let parsed = match url::Url::parse(url) {
+        Ok(u) => u,
+        Err(_) => {
+            tracing::debug!("sitemap fetch skipped: cannot parse origin for {url}");
+            return SitemapOutcome::Empty;
+        }
+    };
+    let requested_site = match site_key(&parsed) {
         Some(k) => k,
         None => {
             tracing::debug!("sitemap fetch skipped: cannot parse origin for {url}");
             return SitemapOutcome::Empty;
         }
     };
+    // SSRF: resolve-and-validate EVERY sitemap URL before the GET, exactly like
+    // the BFS page-fetch path does per URL. The route entry only validates the
+    // seed origin, and `site_key` deliberately collapses apex/`www` — so a child
+    // sitemap on `www.<domain>` (or any same-site entry from a crafted index)
+    // would otherwise be fetched without its host ever being resolved against
+    // the private-range blocklist.
+    if let Err(e) = crw_core::url_safety::validate_safe_url_resolved(&parsed).await {
+        tracing::warn!("sitemap fetch blocked by SSRF guard for {url}: {e}");
+        return SitemapOutcome::Empty;
+    }
 
     let resp = match client
         .get(url)
@@ -525,6 +542,16 @@ fn same_site(u: &str, target: &str) -> bool {
 mod tests {
     use super::*;
 
+    /// wiremock binds to loopback, which the per-URL SSRF guard in
+    /// `fetch_sitemap_raw` rejects by default. Same escape the discover
+    /// integration tests use.
+    fn allow_loopback() {
+        // SAFETY: set before any sitemap fetch runs in the test.
+        unsafe {
+            std::env::set_var("CRW_ALLOW_LOOPBACK_FOR_TESTS", "1");
+        }
+    }
+
     #[test]
     fn parses_urlset_into_page_urls() {
         let xml = r#"<?xml version="1.0" encoding="UTF-8"?>
@@ -684,6 +711,7 @@ mod tests {
 
     #[tokio::test]
     async fn fetch_sitemap_handles_404() {
+        allow_loopback();
         let mock = wiremock::MockServer::start().await;
         wiremock::Mock::given(wiremock::matchers::any())
             .respond_with(wiremock::ResponseTemplate::new(404))
@@ -698,6 +726,7 @@ mod tests {
 
     #[tokio::test]
     async fn fetch_sitemap_recursion_via_tree() {
+        allow_loopback();
         let mock = wiremock::MockServer::start().await;
         let host = mock.uri().replace("http://", "");
 
@@ -761,6 +790,7 @@ mod tests {
 
     #[tokio::test]
     async fn fetch_sitemap_tree_filters_cross_origin_children() {
+        allow_loopback();
         let mock = wiremock::MockServer::start().await;
         let host = mock.uri().replace("http://", "");
 
@@ -808,6 +838,7 @@ mod tests {
 
     #[tokio::test]
     async fn fetch_sitemap_tree_breaks_cycle() {
+        allow_loopback();
         let mock = wiremock::MockServer::start().await;
         let host = mock.uri().replace("http://", "");
 
@@ -873,6 +904,7 @@ mod tests {
 
     #[tokio::test]
     async fn fetch_sitemap_tree_escalates_challenged_sitemap() {
+        allow_loopback();
         // /sitemap.xml is served as a 403 wall; the escalator (standing in for a
         // JS renderer that solved the challenge) returns the real XML.
         let mock = wiremock::MockServer::start().await;
@@ -928,6 +960,7 @@ mod tests {
 
     #[tokio::test]
     async fn fetch_sitemap_rejects_cross_origin_redirect() {
+        allow_loopback();
         // A same-origin seed (mock_a) 302s to a different mock host (mock_b).
         // Even though the redirect target is SSRF-safe, fetch_sitemap must
         // refuse to parse the body — otherwise an attacker could host a

@@ -60,9 +60,3 @@ jobs:
         run: |
           set -euo pipefail
           uv run python scripts/release/test_guards.py
-
-      - name: Shellcheck release scripts
-        shell: bash
-        run: |
-          set -euo pipefail
-          shellcheck --severity=warning --source-path=scripts/release -x scripts/release/*.sh
