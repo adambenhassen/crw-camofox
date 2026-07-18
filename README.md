@@ -19,6 +19,8 @@ Upstream offers a managed API at `api.fastcrw.com`; this fork is self-host only.
 
 <p align="center">
   <a href="https://github.com/adambenhassen/crw-camofox/actions/workflows/ci.yml"><img src="https://github.com/adambenhassen/crw-camofox/actions/workflows/ci.yml/badge.svg?branch=main&event=push" alt="CI"></a>
+  <a href="https://github.com/adambenhassen/crw-camofox/releases"><img src="https://img.shields.io/github/v/release/adambenhassen/crw-camofox?sort=semver&color=blue" alt="Latest release"></a>
+  <a href="https://github.com/adambenhassen/crw-camofox/pkgs/container/crw-camofox"><img src="https://img.shields.io/badge/ghcr.io-crw--camofox-2496ED?logo=docker&logoColor=white" alt="Docker image"></a>
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-AGPL--3.0-blue.svg" alt="License"></a>
   <a href="https://github.com/adambenhassen/crw-camofox/stargazers"><img src="https://img.shields.io/github/stars/adambenhassen/crw-camofox?style=social" alt="GitHub Stars"></a>
 </p>
@@ -115,66 +117,39 @@ This brings up the REST API on `localhost:3000` plus the real render ladder
 (HTTP → LightPanda → Camofox) and Camofox-driven search, so JS-heavy pages and
 web search work out of the box.
 
-### REST API
-
-Firecrawl-compatible (`/v1/*` + `/v2/*`) — point any Firecrawl client at
-`http://localhost:3000`, or call it directly:
-
-```bash
-# /v1/scrape — URL → markdown / HTML / JSON / links
-curl http://localhost:3000/v1/scrape \
-  -H "Content-Type: application/json" \
-  -d '{"url":"https://example.com","formats":["markdown"]}'
-```
-
-```bash
-# /v1/extract — structured JSON from a URL via a JSON Schema
-curl http://localhost:3000/v1/extract \
-  -H "Content-Type: application/json" \
-  -d '{
-    "url":"https://example.com",
-    "schema":{"type":"object","properties":{"title":{"type":"string"}}}
-  }'
-```
-
-```bash
-# /v1/crawl — async multi-page job (returns a job id; poll with /v1/crawl/:id)
-curl http://localhost:3000/v1/crawl \
-  -H "Content-Type: application/json" \
-  -d '{"url":"https://docs.example.com","maxDepth":2,"maxPages":50}'
-```
+The full REST surface (`/v1/*` + `/v2/*`) is listed under
+[API endpoints](#api-endpoints) below.
 
 ### MCP
 
-Point any MCP-compatible agent (Claude Code, Cursor, Windsurf, Cline, Continue.dev,
-Codex, Gemini CLI) at the running server over the Streamable HTTP transport — it
-exposes 6 scraping tools (`crw_scrape`, `crw_crawl`, `crw_check_crawl_status`,
-`crw_map`, `crw_search`, `crw_parse_file`) with no bespoke glue:
+The Compose stack exposes two MCP servers over Streamable HTTP — point any
+MCP agent (Claude Code, Cursor, Windsurf, Cline, Continue.dev, Codex, Gemini CLI)
+at whichever fits the job:
+
+**Scraping** — `crw`'s own `/mcp`, 6 tools to *fetch* pages (`crw_scrape`,
+`crw_crawl`, `crw_check_crawl_status`, `crw_map`, `crw_search`, `crw_parse_file`):
 
 ```bash
 claude mcp add --transport http crw http://localhost:3000/mcp
 ```
 
-**Interactive browser automation:** the scraping tools above *fetch* pages; for
-agents that must *operate* a site across steps (log in, fill forms, click through
-flows), the Docker stack runs the upstream
-**[`camofox-mcp`](https://github.com/redf0x1/camofox-mcp)** server, which drives
-a live [Camofox](https://github.com/redf0x1/camofox-browser) (Firefox) browser —
-47 tools (navigate, snapshot, click, type, press, scroll, evaluate, screenshot,
-cookies, …) over MCP. It runs as a **separate** MCP server (not routed through
-crw's `/mcp`), published on `localhost:9378` by the Compose stack. It requires a
-bearer token (camofox-mcp won't expose HTTP without one); the stack ships a
-loopback-only default dev key, so wire it up with that token:
+**Interactive browser** — for agents that must *operate* a site (log in, fill
+forms, click through flows), the upstream
+[`camofox-mcp`](https://github.com/redf0x1/camofox-mcp) server drives a live
+[Camofox](https://github.com/redf0x1/camofox-browser) (Firefox) browser: 47 tools
+(navigate, click, type, scroll, evaluate, screenshot, cookies, …). It's a separate
+server on `localhost:9378` and needs a bearer token; the stack ships a
+loopback-only dev key:
 
 ```bash
 claude mcp add --transport http camofox http://localhost:9378/mcp \
   --header "Authorization: Bearer crw-local-dev-insecure-default-key"
 ```
 
-These tools drive a real browser. Before exposing the port beyond localhost,
-override `CAMOFOX_HTTP_API_KEY` in `.env` (≥32 chars, e.g. `openssl rand -hex 24`)
-and use that token instead. See the upstream
-[camofox-mcp docs](https://github.com/redf0x1/camofox-mcp).
+> [!WARNING]
+> These tools drive a real browser. Before exposing port 9378 beyond localhost,
+> set your own `CAMOFOX_HTTP_API_KEY` in `.env` (≥32 chars, e.g.
+> `openssl rand -hex 24`) and use that token instead of the dev key.
 
 ### Agent skills
 
@@ -210,13 +185,12 @@ cargo build --release -p crw-server --features cdp,camofox -p crw-mcp -p crw-cli
 | `GET` | `/v1/crawl/:id` | Check crawl status and retrieve results |
 | `DELETE` | `/v1/crawl/:id` | Cancel a running crawl job |
 | `POST` | `/v1/map` | Discover all URLs on a site |
-| `POST` | `/v1/extract` | Structured JSON extraction from a URL via JSON Schema |
 | `POST` | `/v1/search` | Web search via Camofox-driven engines (Google default; 8 selectable), with optional content scraping |
 | `POST` | `/v1/change-tracking/diff` | Diff a scrape against a supplied snapshot (the [monitoring](https://us.github.io/crw/monitoring) primitive) — single or batch |
 | `GET` | `/health` | Health check (no auth required) |
 | `POST` | `/mcp` | Streamable HTTP MCP transport |
 
-**Firecrawl v2 surface** — `scrape`, `crawl`, `map`, `search` are also served under `/v2/*` with Firecrawl v2 request/response shapes, plus v2-only `POST /v2/batch/scrape`, `POST /v2/parse` (PDF/doc → markdown), and `GET /v2/crawl/active`. This makes the official `firecrawl-py` v4 SDK a drop-in: `FirecrawlApp(api_url="http://localhost:3000")`.
+**Firecrawl v2 surface** — `scrape`, `crawl`, `map`, `search` are also served under `/v2/*` with Firecrawl v2 request/response shapes, plus v2-only `POST /v2/extract` (async structured JSON via JSON Schema; poll `GET /v2/extract/:id`), `POST /v2/batch/scrape`, `POST /v2/parse` (PDF/doc → markdown), and `GET /v2/crawl/active`. This makes the official `firecrawl-py` v4 SDK a drop-in: `FirecrawlApp(api_url="http://localhost:3000")`.
 
 Full reference at [docs.fastcrw.com/#rest-api](https://docs.fastcrw.com/#rest-api).
 The Firecrawl compatibility matrix (field-by-field diff) lives in
