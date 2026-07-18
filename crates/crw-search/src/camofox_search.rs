@@ -308,9 +308,12 @@ impl CamofoxSearchClient {
                 Ok(rows) => {
                     any_ok = true;
                     if rows.is_empty() {
+                        // Zero rows is either a genuine empty result or a
+                        // bot-wall/consent page served as HTTP 200 — the scrape
+                        // can't tell them apart, so word it neutrally.
                         unresponsive.push(serde_json::json!([
                             label,
-                            "returned no results (possible bot wall or consent page)"
+                            "returned no results (no matches, or a bot wall / consent page)"
                         ]));
                     }
                     all.extend(rows);
