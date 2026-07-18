@@ -41,6 +41,7 @@ libc = { workspace = true }
 
 [dev-dependencies]
 axum = { workspace = true }
+wiremock = { workspace = true }
 tokio = { workspace = true }
 flate2 = "1"
 brotli = "8"
