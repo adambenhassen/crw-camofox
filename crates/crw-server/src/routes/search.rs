@@ -374,6 +374,18 @@ pub async fn search_inner(
 
     let mut warning: Option<String> = None;
     let mut warnings: Vec<String> = Vec::new();
+
+    // Surface engines that failed or returned nothing (from the search backend's
+    // `unresponsive_engines`) so a blocked/hung engine isn't an invisible empty
+    // success. Each entry is `[label, reason]`; malformed entries are skipped.
+    for entry in &response.unresponsive_engines {
+        if let Some(arr) = entry.as_array() {
+            let label = arr.first().and_then(|v| v.as_str()).unwrap_or("engine");
+            let reason = arr.get(1).and_then(|v| v.as_str()).unwrap_or("unavailable");
+            warnings.push(format!("search engine '{label}' {reason}"));
+        }
+    }
+
     if let Some(opts) = req.scrape_options.as_ref() {
         match enrich_with_scrape(&mut data, opts, state).await {
             Ok(()) => {}

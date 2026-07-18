@@ -277,8 +277,15 @@ impl CamofoxSearchClient {
         let mut all: Vec<SearxngResult> = Vec::new();
         let mut last_err: Option<SearchError> = None;
         let mut any_ok = false;
+        // Engines that failed OR returned zero rows, so a caller can tell a
+        // blocked/consent-walled engine (0 rows despite HTTP 200) from a genuine
+        // "no matches". Surfaced via SearxngResponse.unresponsive_engines →
+        // response warnings; without it a hung/blocked engine looks like a clean
+        // empty success (the exact Bing/Google-from-a-flagged-IP silent failure).
+        let mut unresponsive: Vec<serde_json::Value> = Vec::new();
 
         for &engine in &params.camofox_engines {
+            let label = engine.label();
             // GitHub uses the REST Search API, not the browser — no tab, no
             // stale-tab retry. Every other engine drives the warm camofox tab.
             let outcome = if matches!(engine, SearchEngine::Github) {
@@ -300,16 +307,25 @@ impl CamofoxSearchClient {
             match outcome {
                 Ok(rows) => {
                     any_ok = true;
+                    if rows.is_empty() {
+                        unresponsive.push(serde_json::json!([
+                            label,
+                            "returned no results (possible bot wall or consent page)"
+                        ]));
+                    }
                     all.extend(rows);
                 }
-                Err(e) => last_err = Some(e),
+                Err(e) => {
+                    unresponsive.push(serde_json::json!([label, engine_failure_reason(&e)]));
+                    last_err = Some(e);
+                }
             }
         }
 
         if !any_ok {
             return Err(last_err.unwrap_or(SearchError::Timeout));
         }
-        Ok(merge_results(params.q.clone(), all))
+        Ok(merge_results(params.q.clone(), all, unresponsive))
     }
 
     /// Ensure a warm tab exists, then run one engine's search against it. Caller
@@ -491,7 +507,22 @@ impl CamofoxSearchClient {
 /// by multiple engines accumulates their `engines`/`positions` and sums their
 /// position-scores, so cross-engine agreement ranks higher. First-appearance
 /// order is preserved; downstream `rerank` does the final ordering.
-fn merge_results(query: String, rows: Vec<SearxngResult>) -> SearxngResponse {
+/// Concise, user-facing reason for an engine failure — no internal detail, just
+/// enough to tell a timeout/block apart. Feeds `unresponsive_engines`.
+fn engine_failure_reason(e: &SearchError) -> String {
+    match e {
+        SearchError::Timeout => "timed out".to_string(),
+        SearchError::Upstream { status, .. } => format!("upstream error (HTTP {status})"),
+        SearchError::InvalidResponse(_) => "unreadable response".to_string(),
+        _ => "request failed".to_string(),
+    }
+}
+
+fn merge_results(
+    query: String,
+    rows: Vec<SearxngResult>,
+    unresponsive_engines: Vec<serde_json::Value>,
+) -> SearxngResponse {
     use std::collections::HashMap;
     let mut order: Vec<String> = Vec::new();
     let mut by_url: HashMap<String, SearxngResult> = HashMap::new();
@@ -514,6 +545,7 @@ fn merge_results(query: String, rows: Vec<SearxngResult>) -> SearxngResponse {
         query,
         number_of_results: results.len() as u64,
         results,
+        unresponsive_engines,
         ..Default::default()
     }
 }
@@ -573,6 +605,41 @@ mod extractor_tests {
         assert_eq!(rd["url"], "https://www.reddit.com/search/?q=rust+lang");
         let am = navigate_body(SearchEngine::Amazon, "rust lang");
         assert_eq!(am["url"], "https://www.amazon.com/s?k=rust+lang");
+    }
+
+    #[test]
+    fn engine_failure_reason_is_concise_and_leaks_no_internals() {
+        assert_eq!(engine_failure_reason(&SearchError::Timeout), "timed out");
+        assert_eq!(
+            engine_failure_reason(&SearchError::Upstream {
+                status: 503,
+                body: "secret internal detail".into(),
+            }),
+            "upstream error (HTTP 503)"
+        );
+        // The upstream body (potential internal detail) must not leak through.
+        assert!(
+            !engine_failure_reason(&SearchError::Upstream {
+                status: 500,
+                body: "stacktrace".into(),
+            })
+            .contains("stacktrace")
+        );
+    }
+
+    #[test]
+    fn merge_results_propagates_unresponsive_engines() {
+        // A zero-row / errored engine is carried on the response so the route can
+        // warn instead of returning a silent empty success.
+        let resp = merge_results(
+            "q".into(),
+            vec![],
+            vec![serde_json::json!(["bing", "timed out"])],
+        );
+        assert!(resp.results.is_empty());
+        assert_eq!(resp.unresponsive_engines.len(), 1);
+        assert_eq!(resp.unresponsive_engines[0][0], "bing");
+        assert_eq!(resp.unresponsive_engines[0][1], "timed out");
     }
 }
 
