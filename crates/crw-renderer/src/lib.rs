@@ -1739,7 +1739,9 @@ mod tests {
                 _w: Option<u64>,
                 _d: crw_core::Deadline,
             ) -> CrwResult<FetchResult> {
-                Err(CrwError::TargetUnreachable(format!("Could not reach {url}")))
+                Err(CrwError::TargetUnreachable(format!(
+                    "Could not reach {url}"
+                )))
             }
             fn name(&self) -> &str {
                 "http"
