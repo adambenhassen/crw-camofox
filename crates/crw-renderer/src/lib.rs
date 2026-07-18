@@ -808,6 +808,11 @@ impl FallbackRenderer {
                     let failed_render = detector::looks_like_failed_render(&result.html);
                     let is_bot_wall = detector::looks_like_generic_bot_wall(&result.html);
                     let vendor_block = detector::looks_like_vendor_block(&result.html);
+                    // Size-independent Cloudflare interstitial check: modern
+                    // managed challenges are 100-300KB with the challenge marker
+                    // deep in the body, which the size-capped detectors above
+                    // miss — the challenge text would be returned as content.
+                    let cf_challenge = detector::looks_like_cloudflare_challenge(&result.html);
                     // Mirrors the HTTP-tier escalation set (lib.rs:658). A JS
                     // renderer can return 200 with bot HTML or 403 with content
                     // — without this check, both slip through as "valid".
@@ -835,6 +840,7 @@ impl FallbackRenderer {
                         && failed_render.is_none()
                         && !is_bot_wall
                         && vendor_block.is_none()
+                        && !cf_challenge
                         && !is_status_blocked
                         && !antibot_blocked
                     {
@@ -1172,9 +1178,13 @@ impl FallbackRenderer {
                         let is_placeholder = detector::looks_like_loading_placeholder(&result.html);
                         let failed_render = detector::looks_like_failed_render(&result.html);
                         let truncated = result.truncated;
+                        // A large CF challenge shell has body text > 50 and no
+                        // placeholder/failed marker, so guard it explicitly or it
+                        // would leak through this path as success.
                         let content_ok = text_len >= Self::MIN_RENDERED_TEXT_LEN
                             && !is_placeholder
-                            && failed_render.is_none();
+                            && failed_render.is_none()
+                            && !detector::looks_like_cloudflare_challenge(&result.html);
                         let outcome = classify_outcome(content_ok, truncated, false, &attempt_ctx);
                         // Record host only — global stays untouched so the
                         // existing trip can finish its cooldown naturally.
