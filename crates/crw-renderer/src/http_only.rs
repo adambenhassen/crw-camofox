@@ -603,6 +603,4 @@ mod tests {
         // No charset info → still UTF-8 by default.
         assert_eq!(decode_html_bytes(bytes, None), "café İstanbul 東京");
     }
-
-
 }

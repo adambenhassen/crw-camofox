@@ -269,7 +269,6 @@ pub async fn get_scrape_job(
 mod tests {
     use super::*;
 
-
     fn minimal_doc() -> V2Document {
         use crw_core::types::{PageMetadata, ScrapeData};
         let data = ScrapeData {
@@ -334,5 +333,4 @@ mod tests {
         assert_eq!(v["success"], true);
         assert!(v.get("error").is_none(), "error omitted on success");
     }
-
 }

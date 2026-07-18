@@ -981,7 +981,6 @@ mod tests {
         );
     }
 
-
     #[test]
     fn classify_block_pdf_skipped() {
         // PDF branch has empty html — must not false-flag as StructuralFailure.
