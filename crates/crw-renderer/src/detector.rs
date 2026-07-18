@@ -232,8 +232,7 @@ pub fn looks_like_thin_html(html: &str) -> bool {
 /// Pure-data script blocks (`application/json`, `application/ld+json`,
 /// `importmap`, `speculationrules`) never execute, so they do NOT count.
 pub fn warrants_browser_retry(html: &str) -> bool {
-    let check_len = html.len().min(500_000);
-    let lower = html[..check_len].to_lowercase();
+    let lower = prefix_within(html, DETECTOR_WINDOW).to_lowercase();
 
     // Client-side redirect a browser would follow to real content. Matched per
     // <meta> tag (http-equiv refresh + a url target in the SAME tag) so an
@@ -724,6 +723,16 @@ mod tests {
         );
         assert!(!head_html.is_char_boundary(15_000));
         let _ = looks_like_vendor_block(&head_html);
+        // warrants_browser_retry scans the same window; regression for the
+        // unguarded slice it originally shipped with.
+        let _ = warrants_browser_retry(&html);
+        // 512KB strong-marker cap in looks_like_cloudflare_challenge.
+        let big = format!(
+            "{pre}{}€€€</p></body></html>",
+            "c".repeat(524_287 - pre.len())
+        );
+        assert!(!big.is_char_boundary(524_288));
+        let _ = looks_like_cloudflare_challenge(&big);
     }
 
     #[test]
