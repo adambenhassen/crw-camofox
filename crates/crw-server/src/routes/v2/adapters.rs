@@ -306,6 +306,7 @@ mod tests {
             debug_extraction: None,
             content_type: Some("text/html".into()),
             change_tracking: None,
+            block: None,
         }
     }
 

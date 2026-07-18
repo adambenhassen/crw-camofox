@@ -884,6 +884,8 @@ pub fn extract(opts: ExtractOptions<'_>) -> CrwResult<ScrapeData> {
         // FetchResult.content_type; change_tracking is computed there too.
         content_type: None,
         change_tracking: None,
+        // Anti-bot verdict is stamped post-extract at the scrape choke.
+        block: None,
     })
 }
 

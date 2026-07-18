@@ -558,6 +558,29 @@ pub struct ScrapeData {
     /// the orchestration layer ran the judge).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub change_tracking: Option<ChangeTrackingResult>,
+    /// Anti-bot verdict stamped once at the scrape choke (`single::scrape_url`).
+    /// `Some` means the page is a block/challenge shell — v1/v2 turn this into
+    /// `success:false`. `None` (skipped when serializing) = not blocked.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub block: Option<BlockOutcome>,
+}
+
+/// Typed anti-bot block verdict. `vendor` is the antibot `class_name`
+/// (cloudflare|datadome|perimeterx|generic_block|structural_failure|…);
+/// `reason` is the detector's human-readable explanation.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BlockOutcome {
+    pub vendor: String,
+    pub reason: String,
+}
+
+impl BlockOutcome {
+    /// Standard anti-bot block error string shared by the v1 and v2 handlers so
+    /// the two API surfaces label the same block identically.
+    pub fn message(&self) -> String {
+        format!("Blocked by anti-bot ({}): {}", self.vendor, self.reason)
+    }
 }
 
 /// Per-request extraction debug trace. One entry per extract() call
