@@ -372,6 +372,14 @@ impl FallbackRenderer {
         })
     }
 
+    /// True when a JS renderer (lightpanda / camofox) is wired in, so a
+    /// `render_js` request can actually execute a page. The sitemap
+    /// escalation arm uses this to skip pointless re-fetches of a challenged
+    /// sitemap when no renderer could clear the wall anyway.
+    pub fn js_capable(&self) -> bool {
+        !self.js_renderers.is_empty()
+    }
+
     /// Drain the chrome browser-context pool. Idempotent and a no-op when
     /// the pool is disabled. Call from the server's SIGTERM handler after
     /// the HTTP server has finished serving in-flight requests.
