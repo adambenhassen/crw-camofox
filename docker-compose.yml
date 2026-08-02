@@ -16,14 +16,9 @@ services:
       - CRW_CONFIG=config.docker
     volumes:
       - ./config.docker.toml:/app/config.docker.toml:ro
-    # ── Host protection (defense-in-depth for untrusted PDF/scrape input) ──
-    # `mem_limit` is the hard ceiling: no matter what a malicious upload does,
-    # this container (and its sandboxed PDF-parse children, which share this
-    # cgroup) can never exceed it — the host stays safe. With config.docker.toml
-    # `[document] sandbox = true`, each parse runs in a child with its own
-    # RLIMIT_AS, so peak ≈ base + max_concurrent_parses × sandbox_memory.
-    mem_limit: 2g
-    memswap_limit: 2g          # no swap escape hatch — count swap against the cap
+    # Host protection for untrusted PDF/scrape input.
+    # With config.docker.toml `[document] sandbox = true`, each parse runs in a
+    # child with its own RLIMIT_AS.
     pids_limit: 512            # bound fork-bombs / runaway worker spawning
     read_only: true            # immutable root FS; nothing the parser can drop survives
     tmpfs:
@@ -36,8 +31,7 @@ services:
   # Heavy/stealth JS renderer + `/v1/search` backend. Camofox wraps the
   # Camoufox (Firefox) anti-detect browser behind a REST API on :9377. It is
   # the heavy tier in the default ladder — LightPanda handles the light cases,
-  # Camofox the heavy SPA / anti-bot ones. Firefox is heavier than LightPanda,
-  # hence the larger mem_limit.
+  # Camoufox the heavy SPA / anti-bot ones. Firefox is heavier than LightPanda.
   #
   # CAMOFOX_HOST=0.0.0.0 is required so the server is reachable over the docker
   # bridge as `camofox:9377` (it binds loopback otherwise). The port is NOT
@@ -56,8 +50,6 @@ services:
       - CAMOFOX_PORT=9377
       - CAMOFOX_API_KEY=${CAMOFOX_API_KEY:-}
       - CAMOFOX_AUTH_MODE=${CAMOFOX_AUTH_MODE:-disabled}
-    mem_limit: 2g
-    memswap_limit: 2g
     shm_size: "1g"
     healthcheck:
       test: ["CMD", "curl", "-fsS", "http://localhost:9377/health"]
@@ -99,8 +91,6 @@ services:
       - CAMOFOX_HTTP_API_KEY=${CAMOFOX_HTTP_API_KEY:-crw-local-dev-insecure-default-key}
     ports:
       - "127.0.0.1:9378:8080"
-    mem_limit: 512m
-    memswap_limit: 512m
     pids_limit: 256
 
   # Primary JS renderer — lightweight (~64 MB), fast startup.
@@ -110,13 +100,9 @@ services:
   # or segfault on adversarial pages (heavy SPA bundles, Cloudflare turnstile),
   # and without auto-restart the breaker stays open forever and every JS
   # request falls through to Camofox — defeating the lightweight tier.
-  # `mem_limit` keeps a runaway tab from dragging Camofox and the host into
-  # swap on small VPS instances.
   lightpanda:
     image: lightpanda/browser:latest
     restart: unless-stopped
-    mem_limit: 1g
-    memswap_limit: 1g
     healthcheck:
       test: ["CMD", "bash", "-c", "exec 3<>/dev/tcp/127.0.0.1/9222"]
       interval: 30s

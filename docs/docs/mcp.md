@@ -264,7 +264,10 @@ Available when connected to a CRW **server** that has a search backend configure
 | `lang` | string | no | Language code (e.g. `"en"`, `"tr"`) |
 | `country` | string | no | Country code (e.g. `"us"`, `"tr"`) |
 | `engines` | string[] | no | Camofox backend only. Engine(s) to query, default `["google"]`, max 4. Valid: `google`, `bing`, `duckduckgo`, `wikipedia`, `youtube`, `reddit`, `amazon`, `github` (e.g. `["google","bing","duckduckgo"]`). Results are merged and deduped. Ignored by the SearXNG backend. |
-| `scrapeOptions` | object | no | Scrape each result page (e.g. `{"formats": ["markdown"]}`) |
+| `scrapeOptions` | object | no | Scrape each result page and inline requested formats (e.g. `{"formats": ["markdown"]}`) |
+| `maxLength` | integer | no | Max total characters across all inlined scrape content (default: 15,000; `0` disables limit) |
+
+For lower context use, search without `scrapeOptions`, then call `crw_scrape` only for selected URLs. When inline scraping is useful, reduce `limit` or `maxLength`; search metadata such as title, URL, description, and snippet does not consume this content budget.
 
 ## Example Agent Tool Flow
 

@@ -236,16 +236,15 @@ pub fn tool_definitions(proxy_mode: bool) -> Value {
         }),
     ];
 
-    // `crw_search` is always advertised. In embedded mode it dispatches to a
-    // local SearXNG sidecar via crw-server's `/v1/search` pipeline; in proxy
-    // mode it forwards to the configured remote API. Whether the underlying
-    // SearXNG instance is configured is a runtime concern — the server returns
-    // a clear `search_disabled` error when [search].searxng_url is unset.
+    // `crw_search` is always advertised. Embedded mode dispatches through the
+    // configured Camofox renderer; proxy mode forwards to the remote API. Search
+    // availability remains a runtime concern, with a clear `search_disabled`
+    // error when no backend is configured.
     let _ = proxy_mode;
     tools.push(json!({
         "name": "crw_search",
         "title": "Web search",
-        "description": "Search the web (needs a configured search backend; this build defaults to Camofox-driven Google, SearXNG opt-in). Returns results with url/title/description/snippet.",
+        "description": "Search the web through configured Camofox renderer.",
         "annotations": {
             "readOnlyHint": true,
             "destructiveHint": false,
@@ -304,6 +303,11 @@ pub fn tool_definitions(proxy_mode: bool) -> Value {
                             "description": "Strip nav/footer/ads (default true)"
                         }
                     }
+                },
+                "maxLength": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "description": "Total inline scrape chars; 0 = unlimited (default 15000)"
                 }
             },
             "required": ["query"]
@@ -426,7 +430,7 @@ pub enum ProtocolResult {
 ///
 /// `search_available` controls whether `crw_search` is advertised in `tools/list`.
 /// Proxy callers pass `true` (the remote decides); embedded callers pass whether a
-/// search backend (SearXNG) is actually configured, so users who run `npx … crw`
+/// search backend (Camofox renderer) is actually configured, so users who run `npx … crw`
 /// with no backend don't see a tool that only ever returns `search_disabled`.
 pub fn handle_protocol_method(
     server_name: &str,
@@ -632,24 +636,59 @@ fn bound_map_links(value: &mut Value, limit: usize) {
     }
 }
 
-/// Truncate any scrape content inlined into `crw_search` results (via
-/// `scrapeOptions`). `results` lives at `data.results` and is either a flat array
-/// of items or a grouped `{web,news,images}` object of arrays.
+/// Truncate scrape fields while consuming one shared output-character budget.
+/// Metadata fields never consume the budget.
+fn truncate_scrape_obj_to_budget(value: &mut Value, remaining: &mut usize) {
+    let Some(obj) = value.as_object_mut() else {
+        return;
+    };
+    let mut any = false;
+    for field in SCRAPE_TEXT_FIELDS {
+        let Some(Value::String(content)) = obj.get(*field) else {
+            continue;
+        };
+        let chars = content.chars().count();
+        if chars <= *remaining {
+            *remaining -= chars;
+            continue;
+        }
+
+        let marker = format!("\n…[truncated — original {chars} chars]");
+        let marker_chars = marker.chars().count();
+        let truncated = if *remaining >= marker_chars {
+            let keep = *remaining - marker_chars;
+            format!("{}{marker}", content.chars().take(keep).collect::<String>())
+        } else {
+            String::new()
+        };
+        obj.insert((*field).to_string(), Value::String(truncated));
+        *remaining = 0;
+        any = true;
+    }
+    if any {
+        obj.insert("truncated".to_string(), Value::Bool(true));
+    }
+}
+
+/// Truncate scrape content inlined into `crw_search` results (via
+/// `scrapeOptions`) to one aggregate source-character budget. `results` lives at
+/// `data.results` and is either a flat array or grouped `{web,news,images}` arrays.
 fn bound_search_results(value: &mut Value, max: usize) {
     let Some(results) = value.get_mut("data").and_then(|d| d.get_mut("results")) else {
         return;
     };
+    let mut remaining = max;
     match results {
         Value::Array(items) => {
-            for item in items.iter_mut() {
-                truncate_scrape_obj(item, max);
+            for item in items {
+                truncate_scrape_obj_to_budget(item, &mut remaining);
             }
         }
         Value::Object(groups) => {
-            for arr in groups.values_mut() {
-                if let Some(items) = arr.as_array_mut() {
-                    for item in items.iter_mut() {
-                        truncate_scrape_obj(item, max);
+            for group in ["web", "news", "images"] {
+                if let Some(items) = groups.get_mut(group).and_then(Value::as_array_mut) {
+                    for item in items {
+                        truncate_scrape_obj_to_budget(item, &mut remaining);
                     }
                 }
             }
@@ -710,7 +749,7 @@ pub fn apply_bounds(tool_name: &str, args: &Value, mut value: Value) -> Value {
 pub fn strip_mcp_only_args(tool_name: &str, mut args: Value) -> Value {
     if let Some(obj) = args.as_object_mut() {
         match tool_name {
-            "crw_scrape" | "crw_parse_file" | "crw_check_crawl_status" => {
+            "crw_scrape" | "crw_parse_file" | "crw_check_crawl_status" | "crw_search" => {
                 obj.remove("maxLength");
             }
             _ => {}
@@ -1202,8 +1241,12 @@ mod tests {
         assert_eq!(map["limit"], json!(50));
 
         // crw_search.limit is a real backend param — must NOT be stripped.
-        let search = strip_mcp_only_args("crw_search", json!({ "query": "q", "limit": 5 }));
+        let search = strip_mcp_only_args(
+            "crw_search",
+            json!({ "query": "q", "limit": 5, "maxLength": 100 }),
+        );
         assert_eq!(search["limit"], json!(5));
+        assert!(search.get("maxLength").is_none());
     }
 
     /// B10 — unknown/other tools pass through apply_bounds unchanged.
@@ -1321,37 +1364,115 @@ mod tests {
         assert_eq!(without.len(), 5);
     }
 
-    /// B13 — crw_search inlined scrape content (flat + grouped) is truncated.
+    /// B13 — crw_search shares one scrape-content budget across flat/grouped results.
     #[test]
-    fn b13_search_inlined_content_is_bounded() {
-        // Flat results with inlined markdown.
+    fn b13_search_inlined_content_uses_aggregate_budget() {
         let flat = json!({
             "success": true,
             "data": { "results": [
-                { "url": "https://e.com/1", "markdown": long_md(DEFAULT_MAX_LENGTH + 100) },
-                { "url": "https://e.com/2", "description": "no scrape content" }
+                {
+                    "url": "https://e.com/1",
+                    "title": "first",
+                    "markdown": long_md(8)
+                },
+                {
+                    "url": "https://e.com/2",
+                    "title": "second",
+                    "markdown": long_md(60)
+                }
             ]}
         });
-        let out = apply_bounds("crw_search", &json!({}), flat);
+        let out = apply_bounds("crw_search", &json!({ "maxLength": 50 }), flat);
+        assert_eq!(out["data"]["results"][0]["markdown"], json!(long_md(8)));
+        assert!(out["data"]["results"][0].get("truncated").is_none());
         assert!(
-            out["data"]["results"][0]["markdown"]
+            out["data"]["results"][1]["markdown"]
                 .as_str()
                 .unwrap()
                 .contains("[truncated")
         );
-        assert_eq!(out["data"]["results"][0]["truncated"], json!(true));
-        assert!(out["data"]["results"][1].get("truncated").is_none());
+        let flat_chars: usize = out["data"]["results"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|item| item["markdown"].as_str().unwrap().chars().count())
+            .sum();
+        assert_eq!(flat_chars, 50);
+        assert_eq!(out["data"]["results"][1]["truncated"], json!(true));
+        assert_eq!(out["data"]["results"][1]["title"], json!("second"));
+        assert_eq!(out["data"]["results"][1]["url"], json!("https://e.com/2"));
 
-        // Grouped results.
         let grouped = json!({
             "success": true,
             "data": { "results": {
-                "web": [{ "url": "https://e.com/w", "html": long_md(DEFAULT_MAX_LENGTH + 100) }],
-                "news": [{ "url": "https://e.com/n", "description": "short" }]
+                "web": [{ "url": "https://e.com/w", "html": long_md(6) }],
+                "news": [{ "url": "https://e.com/n", "plainText": "é".repeat(60) }],
+                "images": [{ "url": "https://e.com/i", "description": "metadata" }]
             }}
         });
-        let out = apply_bounds("crw_search", &json!({}), grouped);
-        assert_eq!(out["data"]["results"]["web"][0]["truncated"], json!(true));
-        assert!(out["data"]["results"]["news"][0].get("truncated").is_none());
+        let out = apply_bounds("crw_search", &json!({ "maxLength": 50 }), grouped);
+        assert_eq!(out["data"]["results"]["web"][0]["html"], json!(long_md(6)));
+        assert!(
+            out["data"]["results"]["news"][0]["plainText"]
+                .as_str()
+                .unwrap()
+                .starts_with('é')
+        );
+        let grouped_chars = out["data"]["results"]["web"][0]["html"]
+            .as_str()
+            .unwrap()
+            .chars()
+            .count()
+            + out["data"]["results"]["news"][0]["plainText"]
+                .as_str()
+                .unwrap()
+                .chars()
+                .count();
+        assert_eq!(grouped_chars, 50);
+        assert_eq!(out["data"]["results"]["news"][0]["truncated"], json!(true));
+        assert_eq!(
+            out["data"]["results"]["images"][0]["description"],
+            json!("metadata")
+        );
+    }
+
+    /// B14 — search defaults to an aggregate cap and supports explicit unbounded mode.
+    #[test]
+    fn b14_search_default_and_unbounded_budgets() {
+        let value = json!({
+            "success": true,
+            "data": { "results": [
+                { "markdown": long_md(DEFAULT_MAX_LENGTH) },
+                { "markdown": "tail" }
+            ]}
+        });
+        let bounded = apply_bounds("crw_search", &json!({}), value.clone());
+        assert_eq!(bounded["data"]["results"][1]["markdown"], json!(""));
+        assert_eq!(bounded["data"]["results"][1]["truncated"], json!(true));
+
+        let unbounded = apply_bounds("crw_search", &json!({ "maxLength": 0 }), value.clone());
+        assert_eq!(unbounded, value);
+    }
+
+    /// B15 — search advertises its MCP-only aggregate content budget.
+    #[test]
+    fn b15_search_schema_advertises_max_length() {
+        let defs = tool_definitions(true);
+        let max_length =
+            &tool_by_name(&defs, "crw_search")["inputSchema"]["properties"]["maxLength"];
+        assert_eq!(max_length["type"], json!("integer"));
+        assert_eq!(max_length["minimum"], json!(0));
+        assert!(
+            max_length["description"]
+                .as_str()
+                .unwrap()
+                .contains("inline scrape chars")
+        );
+        assert!(
+            max_length["description"]
+                .as_str()
+                .unwrap()
+                .contains("0 = unlimited")
+        );
     }
 }

@@ -146,9 +146,9 @@ pub struct AppState {
     /// is a single merged JSON object, not a `Vec<ScrapeData>`.
     pub extract_jobs: Arc<RwLock<HashMap<Uuid, ExtractRecord>>>,
     pub crawl_semaphore: Arc<tokio::sync::Semaphore>,
-    /// Active search upstream (Camofox-direct Google by default, SearXNG when
-    /// opted in). `None` when neither is configured, in which case `/v1/search`
-    /// returns a clear `search_disabled` error.
+    /// Active Camofox-direct search upstream. `None` when search is disabled or
+    /// no Camofox renderer is configured; `/v1/search` then returns a clear
+    /// `search_disabled` error.
     pub search: Option<SearchBackend>,
     /// Server-wide default /map URL filter. `None` disables the filter
     /// entirely (legacy behaviour). Per-request overrides may swap or
