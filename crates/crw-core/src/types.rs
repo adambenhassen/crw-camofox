@@ -580,14 +580,84 @@ pub struct ScrapeData {
     /// the orchestration layer ran the judge).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub change_tracking: Option<ChangeTrackingResult>,
-    /// Anti-bot verdict stamped once at the scrape choke (`single::scrape_url`).
-    /// `Some` means the page is a block/challenge shell — v1/v2 turn this into
-    /// `success:false`. `None` (skipped when serializing) = not blocked.
+    /// Why this document has no body: an anti-bot verdict stamped at the scrape
+    /// choke (`single::scrape_url`), or — on the crawl and batch paths, which
+    /// return documents rather than one envelope — `HTTP_ERROR_VENDOR` for an
+    /// origin error page. `Some` means the caller did not get the page they
+    /// asked for, so v1/v2 turn it into `success:false`.
+    /// `None` (skipped when serializing) = a real page.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub block: Option<BlockOutcome>,
 }
 
+/// Above this many bytes of body, a `>= 400` response is treated as the real page
+/// rather than the origin's error page.
+///
+/// Measured, not guessed. Across one prod day (43 responses graded `success` while
+/// carrying `metadata.statusCode >= 400`) the largest error page — a CentOS Apache
+/// test page — rendered to 2,356 bytes of markdown, and the next-largest 4xx body
+/// was 3,340. So the bar sits in that gap. Above it live real pages served under an
+/// error status, which the renderer deliberately keeps (`crw_renderer` accept gate,
+/// and `crw_crawl::single`: "the status is a soft signal, not a content gate"):
+/// stackoverflow.com under 403 renders 39,499 chars, a YouTube watch page under 401
+/// renders 12,256, a Medium article under 403 renders 10,826.
+///
+/// Deliberately conservative. It leaves large branded 404s (GitHub's is 3,340)
+/// passing as successes; raising it is a recall decision that needs its own
+/// benchmark run, not a nudge.
+const ERROR_PAGE_MAX_TEXT: usize = 2_500;
+
 impl ScrapeData {
+    /// Size of the body the caller actually asked for, in bytes.
+    ///
+    /// Text formats first: the previous gate took `.max()` across all four body
+    /// fields, so an error page's raw HTML — always large — kept the gate from
+    /// ever firing whenever `formats` included `html` or `rawHtml`.
+    ///
+    /// But measuring only text would be worse than the bug it fixes. A request
+    /// for `formats:["rawHtml"]` populates neither text field, so a text-only
+    /// measurement reads 0 and fails **every** `>= 400` response, including the
+    /// large real pages that soft-block statuses are known to carry. So when the
+    /// caller asked for no text at all, fall back to the markup we do hold. It
+    /// discriminates less well (an error page's HTML is bulkier than its text),
+    /// which is the right direction to be wrong in.
+    /// `None` when the document holds no body at all — `formats:["screenshot"]`,
+    /// `["links"]` and a summary-only request all populate none of these fields,
+    /// and "nothing to measure" must not be read as "measured nothing".
+    /// A present-but-empty field is a real measurement of 0: the caller asked for
+    /// that format and the page yielded none of it.
+    fn rendered_text_len(&self) -> Option<usize> {
+        let text = [self.markdown.as_deref(), self.plain_text.as_deref()]
+            .into_iter()
+            .flatten()
+            .map(str::len)
+            .max();
+        text.or_else(|| {
+            [self.html.as_deref(), self.raw_html.as_deref()]
+                .into_iter()
+                .flatten()
+                .map(str::len)
+                .max()
+        })
+    }
+
+    /// `Some(message)` when the origin answered `>= 400` and what we are holding is
+    /// its error page rather than the page that was asked for.
+    ///
+    /// One helper for every surface: v1, v2, crawl and batch all have to agree, or
+    /// the same URL is refunded on one endpoint and billed on another.
+    pub fn http_error(&self) -> Option<String> {
+        let status = self.metadata.status_code;
+        if status < 400 || self.rendered_text_len()? >= ERROR_PAGE_MAX_TEXT {
+            return None;
+        }
+        Some(
+            self.warning
+                .clone()
+                .unwrap_or_else(|| format!("Target returned HTTP {status}")),
+        )
+    }
+
     /// Clear the page-content fields (markdown, HTML, text, links, and any
     /// LLM-derived outputs), keeping `metadata`, `block`, and warnings. Used
     /// on the block-response path so a detected anti-bot interstitial returns
@@ -621,6 +691,12 @@ pub struct BlockOutcome {
 /// keeps inside `AntibotSignal` because `is_blocked()` drives renderer escalation.
 /// See `message()` for why the customer-facing wording splits here.
 pub const STRUCTURAL_FAILURE_VENDOR: &str = "structural_failure";
+
+/// `BlockOutcome::vendor` for "the origin answered with an error status and this
+/// is its error page". Not an anti-bot verdict, but the same consequence for the
+/// caller and for billing, and the crawl/batch surfaces have nowhere else to say
+/// it: they return an array of documents, not an envelope with an error code.
+pub const HTTP_ERROR_VENDOR: &str = "http_error";
 
 impl BlockOutcome {
     /// Standard anti-bot block error string shared by the v1 and v2 handlers so
@@ -787,6 +863,108 @@ pub fn resolve_pinned_renderer(req: Option<RequestedRenderer>) -> Option<&'stati
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A fully populated document, so each test can vary just the field it is about.
+    fn blocked_fixture() -> ScrapeData {
+        ScrapeData {
+            markdown: Some("Just a moment... Humans only".into()),
+            html: Some("<html>challenge</html>".into()),
+            raw_html: Some("<html>challenge</html>".into()),
+            plain_text: Some("challenge text".into()),
+            links: Some(vec!["https://help.example.com".into()]),
+            images: Some(vec![ScrapedImage {
+                url: "https://help.example.com/logo.png".into(),
+                alt: Some("logo".into()),
+            }]),
+            json: Some(serde_json::json!({"junk": true})),
+            summary: Some("a summary of junk".into()),
+            llm_usage: None,
+            chunks: None,
+            warning: Some("blocked".into()),
+            warnings: vec!["blocked".into()],
+            render_decision: None,
+            credit_cost: 0,
+            metadata: PageMetadata {
+                title: None,
+                description: None,
+                og_title: None,
+                og_description: None,
+                og_image: None,
+                canonical_url: None,
+                source_url: "https://www.glassdoor.com/Reviews/x.htm".into(),
+                language: None,
+                status_code: 200,
+                rendered_with: None,
+                elapsed_ms: 0,
+                page_count: None,
+                source_filename: None,
+            },
+            debug_extraction: None,
+            content_type: Some("text/html".into()),
+            change_tracking: None,
+            block: Some(BlockOutcome {
+                vendor: "cloudflare".into(),
+                reason: "cloudflare challenge interstitial".into(),
+            }),
+        }
+    }
+
+    fn page(status: u16, markdown_len: usize) -> ScrapeData {
+        let mut d = blocked_fixture();
+        d.metadata.status_code = status;
+        d.markdown = Some("x".repeat(markdown_len));
+        d.plain_text = None;
+        d.html = None;
+        d.raw_html = None;
+        d.warning = None;
+        d
+    }
+
+    #[test]
+    fn http_error_fires_on_an_error_page_and_spares_a_real_one() {
+        // americastire.com: 403 with 650 bytes of CloudFront prose, billed as a
+        // success in prod for months because the old bar was 200 bytes.
+        assert!(page(403, 650).http_error().is_some());
+        // stackoverflow.com/questions/tagged/rust answers 403 and serves the real
+        // page (39,499 chars). The renderer keeps it on purpose; so must this.
+        assert!(page(403, 39_499).http_error().is_none());
+        // A thin page that the origin says is fine stays a success.
+        assert!(page(200, 2).http_error().is_none());
+    }
+
+    #[test]
+    fn http_error_is_silent_when_there_is_no_body_to_judge() {
+        // `formats:["screenshot"]` / `["links"]` populate none of the four body
+        // fields. Nothing to measure is not a measurement of nothing.
+        let mut d = page(403, 0);
+        d.markdown = None;
+        d.plain_text = None;
+        d.html = None;
+        d.raw_html = None;
+        assert!(d.http_error().is_none());
+    }
+
+    #[test]
+    fn http_error_measures_markup_when_no_text_was_requested() {
+        // `formats:["rawHtml"]` populates neither text field. Measuring text only
+        // would read 0 and fail every >= 400 response, including the large real
+        // pages that soft-block statuses are known to carry.
+        let mut d = page(403, 0);
+        d.markdown = None;
+        d.raw_html = Some("<html>".repeat(2_000));
+        assert!(d.http_error().is_none());
+        d.raw_html = Some("<html>403</html>".into());
+        assert!(d.http_error().is_some());
+    }
+
+    #[test]
+    fn http_error_ignores_raw_html_length() {
+        // The old gate took `.max()` across markdown/text/html/rawHtml, so asking
+        // for `rawHtml` made the bar unreachable and the gate never fired.
+        let mut d = page(404, 250);
+        d.raw_html = Some("<html>".repeat(10_000));
+        assert!(d.http_error().is_some());
+    }
 
     #[test]
     fn clear_body_drops_content_keeps_metadata_and_block() {

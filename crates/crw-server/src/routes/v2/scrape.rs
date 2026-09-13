@@ -207,26 +207,7 @@ pub async fn scrape(
     // is a plain HTTP error, not an anti-bot block. It must short-circuit before
     // the block check so classify()'s StructuralFailure can't mislabel it, and
     // so both API surfaces label the identical page the same way.
-    let status_code = data.metadata.status_code;
-    let http_error = if status_code >= 400 {
-        let body_len = [
-            data.markdown.as_deref(),
-            data.plain_text.as_deref(),
-            data.html.as_deref(),
-            data.raw_html.as_deref(),
-        ]
-        .iter()
-        .filter_map(|opt| opt.map(|t| t.len()))
-        .max()
-        .unwrap_or(0);
-        (body_len < 200).then(|| {
-            data.warning
-                .clone()
-                .unwrap_or_else(|| format!("Target returned HTTP {status_code}"))
-        })
-    } else {
-        None
-    };
+    let http_error = data.http_error();
     // Anti-bot verdict from the choke: a blocked page is `success:false` with an
     // error string, matching v1's behaviour. Read before `to_v2_document`
     // consumes `data`.

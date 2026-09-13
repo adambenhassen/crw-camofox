@@ -1556,6 +1556,7 @@ async fn wait_for_page_ready(
 ) -> CrwResult<u16> {
     let deadline = tokio::time::Instant::now() + timeout;
     let mut main_document_status: Option<u16> = None;
+    let mut main_frame: Option<String> = None;
 
     loop {
         match tokio::time::timeout_at(deadline, events.recv()).await {
@@ -1577,7 +1578,24 @@ async fn wait_for_page_ready(
                             .get("type")
                             .and_then(|v| v.as_str())
                             .is_some_and(|v| v == "Document");
-                        if is_document {
+                        // An iframe is a Document too. Without the frame check a
+                        // 404 ad/widget frame inside a healthy page stamps the
+                        // page 404 — harmless while nothing read the status, but
+                        // `ScrapeData::http_error` now fails the page on it.
+                        // First Document response wins the main frame; later ones
+                        // on that frame are redirects, and last-wins is right.
+                        let frame_id = ev.params.get("frameId").and_then(|v| v.as_str());
+                        // Adopt only a frame we can actually name. Adopting a
+                        // `None` would leave the slot unfilled and let the NEXT
+                        // Document response — an iframe — claim it.
+                        if is_document && main_frame.is_none() && frame_id.is_some() {
+                            main_frame = frame_id.map(str::to_string);
+                        }
+                        // Until a main frame is known, keep the old behaviour of
+                        // taking any Document status rather than reporting none.
+                        if is_document
+                            && (main_frame.is_none() || frame_id == main_frame.as_deref())
+                        {
                             main_document_status = ev
                                 .params
                                 .get("response")
