@@ -486,6 +486,12 @@ impl CamofoxSearchClient {
                 json!({ "userId": USER_ID, "expression": scrape_js(engine) }),
             )
             .await?;
+        if !eval.status().is_success() {
+            // A JSON error body (`{"error":"tab not found"}`) would otherwise
+            // decode as `result: None` and pass for an empty SERP, bypassing
+            // the stale-tab retry.
+            return Err(upstream_error("evaluate", eval).await);
+        }
         let raw = eval
             .json::<EvaluateResponse>()
             .await
@@ -1128,6 +1134,58 @@ mod github_api_tests {
         assert_eq!(resp.results.len(), 1);
         assert_eq!(client.tab.lock().await.as_deref(), Some("t2"));
         server.verify().await;
+    }
+
+    /// A failed `/evaluate` (camofox answers a dead tab with a JSON error, not
+    /// an empty result) is an `Upstream` error, so the stale-tab retry runs
+    /// instead of reporting a clean empty SERP.
+    #[tokio::test]
+    async fn evaluate_error_status_triggers_stale_retry() {
+        let server = MockServer::start().await;
+        let rows = r#"[{"url":"https://rust-lang.org","title":"Rust","content":"lang"}]"#;
+        mount_tab_sequence(&server, &["t1", "t2"]).await;
+        for tab in ["t1", "t2"] {
+            Mock::given(method("POST"))
+                .and(path(format!("/tabs/{tab}/navigate")))
+                .respond_with(ResponseTemplate::new(200).set_body_json(json!({ "ok": true })))
+                .mount(&server)
+                .await;
+            Mock::given(method("POST"))
+                .and(path(format!("/tabs/{tab}/wait")))
+                .respond_with(ResponseTemplate::new(200).set_body_json(json!({ "ok": true })))
+                .mount(&server)
+                .await;
+        }
+        Mock::given(method("POST"))
+            .and(path("/tabs/t1/evaluate"))
+            .respond_with(
+                ResponseTemplate::new(500).set_body_json(json!({ "error": "tab not found" })),
+            )
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/tabs/t2/evaluate"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({ "result": rows })))
+            .mount(&server)
+            .await;
+
+        let client = CamofoxSearchClient::new(server.uri(), None, None, Duration::from_secs(5));
+        let params = SearxngParams {
+            q: "rust".to_string(),
+            camofox_engines: vec![SearchEngine::Bing],
+            ..Default::default()
+        };
+        let resp = client
+            .fetch(&params)
+            .await
+            .expect("evaluate 5xx recovers on a fresh tab");
+        assert_eq!(resp.results.len(), 1);
+        assert!(
+            resp.unresponsive_engines.is_empty(),
+            "{:?}",
+            resp.unresponsive_engines
+        );
+        assert_eq!(client.tab.lock().await.as_deref(), Some("t2"));
     }
 
     /// An empty error body degrades to the bare step label.
