@@ -374,10 +374,7 @@ impl CamofoxSearchClient {
             )
             .await?;
         if !create.status().is_success() {
-            return Err(SearchError::Upstream {
-                status: create.status().as_u16(),
-                body: "camofox: create tab failed".to_string(),
-            });
+            return Err(upstream_error("create tab", create).await);
         }
         let id = create
             .json::<CreateTabResponse>()
@@ -401,10 +398,7 @@ impl CamofoxSearchClient {
             )
             .await?;
         if !nav.status().is_success() {
-            return Err(SearchError::Upstream {
-                status: nav.status().as_u16(),
-                body: "camofox: navigate failed".to_string(),
-            });
+            return Err(upstream_error("navigate", nav).await);
         }
 
         let _ = self
@@ -569,6 +563,30 @@ fn merge_results(
         unresponsive_engines,
         ..Default::default()
     }
+}
+
+/// Cap on how much of a failed camofox response body is carried into the error.
+const UPSTREAM_BODY_CAP: usize = 300;
+
+/// Turn a non-2xx camofox response into an `Upstream` error that carries the
+/// server's own message. camofox puts the real cause in the body
+/// (`{"error":"Profile for user \"crw-search\" was created with Camoufox 135…"}`);
+/// a fixed label in its place hid that behind a bare `HTTP 500` and cost a
+/// diagnosis round-trip. `what` names the step (`create tab`, `navigate`).
+async fn upstream_error(what: &str, resp: reqwest::Response) -> SearchError {
+    let status = resp.status().as_u16();
+    let raw = resp.text().await.unwrap_or_default();
+    let detail = serde_json::from_str::<serde_json::Value>(&raw)
+        .ok()
+        .and_then(|v| v.get("error")?.as_str().map(str::to_string))
+        .unwrap_or(raw);
+    let detail: String = detail.trim().chars().take(UPSTREAM_BODY_CAP).collect();
+    let body = if detail.is_empty() {
+        format!("camofox: {what} failed")
+    } else {
+        format!("camofox: {what} failed: {detail}")
+    };
+    SearchError::Upstream { status, body }
 }
 
 /// Whether an error means the warm tab/context is gone and recreating it could
@@ -894,5 +912,70 @@ mod github_api_tests {
             "recovery should be transparent, got {:?}",
             second.unresponsive_engines
         );
+    }
+
+    /// A failed camofox call carries the server's own `error` message in the
+    /// `Upstream` body (truncated), not a fixed label — the message is what
+    /// tells a profile-version pin apart from a crashed browser.
+    #[tokio::test]
+    async fn create_tab_error_surfaces_camofox_message() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/tabs"))
+            .respond_with(ResponseTemplate::new(500).set_body_json(json!({
+                "error": "Profile for user \"crw-search\" was created with Camoufox 135.0.1-beta.24, but the current version is 152.0.4-beta.28"
+            })))
+            .mount(&server)
+            .await;
+
+        let client = CamofoxSearchClient::new(server.uri(), None, None, Duration::from_secs(5));
+        let params = SearxngParams {
+            q: "rust".to_string(),
+            camofox_engines: vec![SearchEngine::Google],
+            ..Default::default()
+        };
+        let err = client.fetch(&params).await.unwrap_err();
+        match err {
+            SearchError::Upstream { status, body } => {
+                assert_eq!(status, 500);
+                assert!(
+                    body.starts_with("camofox: create tab failed: Profile for user"),
+                    "{body}"
+                );
+                assert!(body.contains("152.0.4-beta.28"), "{body}");
+            }
+            other => panic!("expected Upstream, got {other:?}"),
+        }
+    }
+
+    /// A non-JSON (or empty) error body degrades to the bare step label.
+    #[tokio::test]
+    async fn navigate_error_without_body_keeps_label() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/tabs"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({ "tabId": "t1" })))
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/tabs/t1/navigate"))
+            .respond_with(ResponseTemplate::new(502))
+            .mount(&server)
+            .await;
+
+        let client = CamofoxSearchClient::new(server.uri(), None, None, Duration::from_secs(5));
+        let params = SearxngParams {
+            q: "rust".to_string(),
+            camofox_engines: vec![SearchEngine::Bing],
+            ..Default::default()
+        };
+        let err = client.fetch(&params).await.unwrap_err();
+        match err {
+            SearchError::Upstream { status, body } => {
+                assert_eq!(status, 502);
+                assert_eq!(body, "camofox: navigate failed");
+            }
+            other => panic!("expected Upstream, got {other:?}"),
+        }
     }
 }
