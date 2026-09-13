@@ -493,6 +493,8 @@ async fn scrape_url_inner(
                                 fetch_result.html = std::mem::take(&mut js_fetch.html);
                                 // The verdict describes the body, so it moves with it.
                                 fetch_result.wall = js_fetch.wall.take();
+                                // So is whether it is a partial-DOM snapshot.
+                                fetch_result.truncated = js_fetch.truncated;
                                 // Replace the original "Target returned 4xx" with the JS
                                 // fetch's warning (which is None for a clean 2xx render),
                                 // so a successful escalation doesn't leak the original

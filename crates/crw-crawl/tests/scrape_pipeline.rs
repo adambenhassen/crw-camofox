@@ -230,3 +230,34 @@ async fn empty_truncated_render_fails_with_the_requested_budget() {
         other => panic!("expected Timeout(30000), got {other:?}"),
     }
 }
+
+fn tier_truncated(name: &'static str, body: String, truncated: bool) -> Arc<dyn PageFetcher> {
+    Arc::new(Tier {
+        name,
+        body: Ok(body),
+        content_type: "text/html",
+        truncated,
+    })
+}
+
+/// `truncated` describes the body, so it follows the render the post-extract
+/// escalation keeps. A short real article (not a placeholder) passes the ladder
+/// and only the markdown threshold escalates it.
+#[tokio::test]
+async fn accepted_escalation_reports_the_kept_renders_truncation() {
+    let r = renderer(vec![
+        tier_truncated("lightpanda", article(2), true),
+        tier_truncated("camofox", article(30), false),
+    ]);
+    let data = scrape(&r).await.expect("scrape");
+    assert_eq!(data.metadata.rendered_with.as_deref(), Some("camofox"));
+    assert!(!data.truncated, "camofox recovered the full page");
+
+    let r = renderer(vec![
+        tier_truncated("lightpanda", article(2), false),
+        tier_truncated("camofox", article(30), true),
+    ]);
+    let data = scrape(&r).await.expect("scrape");
+    assert_eq!(data.metadata.rendered_with.as_deref(), Some("camofox"));
+    assert!(data.truncated, "the kept camofox render was cut off");
+}
