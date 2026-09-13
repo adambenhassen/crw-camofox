@@ -38,7 +38,11 @@ pub(crate) async fn read_capped(
     let mut buf: Vec<u8> = Vec::with_capacity(64 * 1024);
     let mut stream = response.bytes_stream();
     while let Some(chunk) = stream.next().await {
-        let chunk = chunk.map_err(|e: reqwest::Error| SearchError::Transport(e.to_string()))?;
+        let chunk = chunk.map_err(|e: reqwest::Error| {
+            // Same reason as the `send()` arm below (issue #90): the embedded
+            // request URL can carry the backend host and its credentials.
+            SearchError::Transport(crw_core::error::reqwest_message(e))
+        })?;
         if buf.len() + chunk.len() > cap {
             return Err(SearchError::InvalidResponse(format!(
                 "response too large: exceeded {cap}-byte cap"

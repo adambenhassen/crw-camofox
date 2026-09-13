@@ -246,11 +246,19 @@ pub(crate) async fn call_anthropic(
         .json(&body)
         .send()
         .await
-        .map_err(|e| CrwError::ExtractionError(format!("Anthropic API request failed: {e}")))?;
+        .map_err(|e| {
+            CrwError::ExtractionError(format!(
+                "Anthropic API request failed: {}",
+                crw_core::error::reqwest_message(e)
+            ))
+        })?;
 
     let status = resp.status();
     let text = resp.text().await.map_err(|e| {
-        CrwError::ExtractionError(format!("Failed to read Anthropic response: {e}"))
+        CrwError::ExtractionError(format!(
+            "Failed to read Anthropic response: {}",
+            crw_core::error::reqwest_message(e)
+        ))
     })?;
 
     if !status.is_success() {
@@ -487,13 +495,20 @@ pub(crate) async fn call_openai(
         .json(&body)
         .send()
         .await
-        .map_err(|e| CrwError::ExtractionError(format!("OpenAI API request failed: {e}")))?;
+        .map_err(|e| {
+            CrwError::ExtractionError(format!(
+                "OpenAI API request failed: {}",
+                crw_core::error::reqwest_message(e)
+            ))
+        })?;
 
     let status = resp.status();
-    let text = resp
-        .text()
-        .await
-        .map_err(|e| CrwError::ExtractionError(format!("Failed to read OpenAI response: {e}")))?;
+    let text = resp.text().await.map_err(|e| {
+        CrwError::ExtractionError(format!(
+            "Failed to read OpenAI response: {}",
+            crw_core::error::reqwest_message(e)
+        ))
+    })?;
 
     if !status.is_success() {
         return Err(CrwError::ExtractionError(format!(

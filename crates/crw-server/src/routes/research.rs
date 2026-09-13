@@ -275,10 +275,9 @@ pub async fn github(
         safesearch: None,
         camofox_engines: vec![SearchEngine::Github],
     };
-    let resp = client
-        .fetch(&params)
-        .await
-        .map_err(|e| CrwError::HttpError(format!("github search failed: {e}")))?;
+    let resp = client.fetch(&params).await.map_err(|e| {
+        super::search::map_search_error(e, state.config.search.timeout_ms, client.base_url())
+    })?;
     let results: Vec<ResearchGithubItem> = resp
         .results
         .into_iter()

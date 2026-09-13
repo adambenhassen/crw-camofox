@@ -169,7 +169,10 @@ async fn run_crawl_inner(opts: CrawlOptions<'_>) {
         if let Ok(p) = reqwest::Proxy::all(proxy_url) {
             client_builder = client_builder.proxy(p);
         } else {
-            tracing::warn!("Invalid crawl proxy URL: {proxy_url}");
+            tracing::warn!(
+                "Invalid crawl proxy URL: {}",
+                crw_core::redact_proxy_url(proxy_url)
+            );
         }
     }
     let client = client_builder

@@ -145,7 +145,14 @@ impl CamofoxRenderer {
             .json(&body)
             .send()
             .await
-            .map_err(|e| CrwError::RendererError(format!("camofox {path} request failed: {e}")))
+            .map_err(|e| {
+                // The camofox URL is internal; log it, return the stripped message.
+                tracing::warn!("camofox {path} request failed: {e}");
+                CrwError::RendererError(format!(
+                    "camofox {path} request failed: {}",
+                    crw_core::error::reqwest_message(e)
+                ))
+            })
     }
 
     /// Open a blank tab, retrying a 5xx create (see [`CREATE_TAB_ATTEMPTS`]).
@@ -172,7 +179,10 @@ impl CamofoxRenderer {
                         .await
                         .map(|r| Ok(r.tab_id))
                         .map_err(|e| {
-                            CrwError::RendererError(format!("camofox /tabs bad response: {e}"))
+                            CrwError::RendererError(format!(
+                                "camofox /tabs bad response: {}",
+                                crw_core::error::reqwest_message(e)
+                            ))
                         });
                 }
                 let detail = error_detail(resp).await;
@@ -389,9 +399,12 @@ impl CamofoxRenderer {
                     "camofox {path} returned {status}{detail}"
                 )));
             }
-            resp.json::<T>()
-                .await
-                .map_err(|e| CrwError::RendererError(format!("camofox {path} bad response: {e}")))
+            resp.json::<T>().await.map_err(|e| {
+                CrwError::RendererError(format!(
+                    "camofox {path} bad response: {}",
+                    crw_core::error::reqwest_message(e)
+                ))
+            })
         };
         match tokio::time::timeout(budget, fut).await {
             Ok(r) => r,

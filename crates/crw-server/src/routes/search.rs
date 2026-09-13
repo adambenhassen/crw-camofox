@@ -1082,25 +1082,33 @@ fn validate_request(req: &SearchRequest, max_limit: u32) -> Result<(), CrwError>
 }
 
 /// Map a transport/timeout/upstream `SearchError` onto the HTTP `CrwError`.
-/// `base_url` is the configured camofox URL; the transport
-/// (`target_unreachable`) arm names its **origin** (issue #90) so the operator
-/// sees *which* host failed — sanitized, so a credentialed URL never reaches
-/// the response. Timeouts keep `error_code: "timeout"`; the host is correlated
-/// via the startup log instead.
-fn map_search_error(err: SearchError, timeout_ms: u64, base_url: &str) -> CrwError {
+/// `base_url` is the configured search backend URL. The operator still learns
+/// which host failed (issue #90), but through the log: the response names no
+/// host, and an upstream error page is reduced to its status, because both are
+/// internal infrastructure a caller may not see. Timeouts keep
+/// `error_code: "timeout"`.
+pub(crate) fn map_search_error(err: SearchError, timeout_ms: u64, base_url: &str) -> CrwError {
     match err {
         SearchError::Timeout => CrwError::Timeout(timeout_ms),
-        SearchError::Upstream { status, body } => CrwError::HttpError(format!(
-            "search backend returned HTTP {status}: {}",
-            body.chars().take(200).collect::<String>()
-        )),
+        SearchError::Upstream { status, body } => {
+            tracing::warn!(
+                search_backend = %crate::diagnostics::sanitize_url_origin(base_url),
+                status,
+                body = %body.chars().take(200).collect::<String>(),
+                "search backend returned an error"
+            );
+            CrwError::HttpError(format!("search backend returned HTTP {status}"))
+        }
         SearchError::InvalidResponse(msg) => {
             CrwError::HttpError(format!("search backend returned invalid JSON: {msg}"))
         }
-        SearchError::Transport(msg) => CrwError::TargetUnreachable(format!(
-            "search backend ({}): {msg}",
-            crate::diagnostics::sanitize_url_origin(base_url)
-        )),
+        SearchError::Transport(msg) => {
+            tracing::warn!(
+                search_backend = %crate::diagnostics::sanitize_url_origin(base_url),
+                "search backend unreachable: {msg}"
+            );
+            CrwError::TargetUnreachable(format!("search backend unreachable: {msg}"))
+        }
     }
 }
 
@@ -1534,14 +1542,17 @@ mod tests {
     }
 
     #[test]
-    fn map_search_error_transport_names_sanitized_host() {
-        // issue #90: the unreachable error must name the configured host so the
-        // operator knows *what* failed — but origin-only, never the raw URL.
+    fn map_search_error_transport_names_no_host() {
+        // The unreachable error keeps the transport reason for the caller and
+        // nothing about the backend: no host, no userinfo, no path token. The
+        // operator gets the sanitized origin from the log line instead.
         let err = SearchError::Transport("dns error: failed to lookup address".into());
         let mapped = map_search_error(err, 5000, "https://user:pass@searxng:8080/tok?k=v");
         match mapped {
             CrwError::TargetUnreachable(msg) => {
-                assert!(msg.contains("https://searxng:8080"), "{msg}");
+                assert!(msg.contains("dns error"), "{msg}");
+                assert!(!msg.contains("searxng"), "must not name the backend: {msg}");
+                assert!(!msg.contains("8080"), "must not leak the port: {msg}");
                 assert!(!msg.contains("user"), "must not leak userinfo: {msg}");
                 assert!(!msg.contains("pass"), "must not leak credentials: {msg}");
                 assert!(!msg.contains("tok"), "must not leak path token: {msg}");

@@ -405,7 +405,12 @@ impl CamofoxSearchClient {
         let id = create
             .json::<CreateTabResponse>()
             .await
-            .map_err(|e| SearchError::InvalidResponse(format!("camofox: bad /tabs response: {e}")))?
+            .map_err(|e| {
+                SearchError::InvalidResponse(format!(
+                    "camofox: bad /tabs response: {}",
+                    crw_core::error::reqwest_message(e)
+                ))
+            })?
             .tab_id;
         *tab = Some(id.clone());
         Ok(id)
@@ -496,7 +501,10 @@ impl CamofoxSearchClient {
             .json::<EvaluateResponse>()
             .await
             .map_err(|e| {
-                SearchError::InvalidResponse(format!("camofox: bad evaluate response: {e}"))
+                SearchError::InvalidResponse(format!(
+                    "camofox: bad evaluate response: {}",
+                    crw_core::error::reqwest_message(e)
+                ))
             })?
             .result
             .unwrap_or_default();
@@ -568,7 +576,10 @@ impl CamofoxSearchClient {
             });
         }
         let data = resp.json::<GithubSearchResponse>().await.map_err(|e| {
-            SearchError::InvalidResponse(format!("github: bad search response: {e}"))
+            SearchError::InvalidResponse(format!(
+                "github: bad search response: {}",
+                crw_core::error::reqwest_message(e)
+            ))
         })?;
 
         let n = data.items.len();

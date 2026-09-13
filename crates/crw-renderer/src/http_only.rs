@@ -150,7 +150,10 @@ fn ratelimit_proxy_url() -> Option<String> {
 /// fallback should react to. Detected by message (rustls/openssl surface these
 /// as opaque connect errors, so there is no typed predicate to match on).
 fn is_cert_error(e: &reqwest::Error) -> bool {
-    let mut src: Option<&(dyn std::error::Error + 'static)> = Some(e);
+    // Start at the source: the reqwest error's own Display is the kind string
+    // plus the request URL, so matching it could only ever false-positive on a
+    // target path that happens to mention certificates.
+    let mut src: Option<&(dyn std::error::Error + 'static)> = std::error::Error::source(e);
     while let Some(s) = src {
         let m = s.to_string().to_ascii_lowercase();
         // Cert-errors ONLY. Every cert-class message above ("certificate",
@@ -201,7 +204,12 @@ fn build_client(
     if let Some(proxy_url) = proxy {
         match reqwest::Proxy::all(proxy_url) {
             Ok(p) => builder = builder.proxy(p),
-            Err(e) => tracing::warn!("Invalid proxy URL '{}': {}", proxy_url, e),
+            // NEVER interpolate `proxy_url` itself: it carries `user:pass@`.
+            Err(e) => tracing::warn!(
+                "Invalid proxy URL '{}': {}",
+                crw_core::redact_proxy_url(proxy_url),
+                crw_core::error::reqwest_message(e)
+            ),
         }
     }
 
@@ -279,8 +287,9 @@ impl HttpFetcher {
                 Ok(_) => Some(build_client(user_agent, Some(purl.as_str()), request_timeout, false)),
                 Err(e) => {
                     tracing::error!(
-                        "CRW_HTTP_RATELIMIT_PROXY_URL '{}' is invalid ({e}); 429 proxy-retry disabled",
-                        purl
+                        "CRW_HTTP_RATELIMIT_PROXY_URL '{}' is invalid ({}); 429 proxy-retry disabled",
+                        crw_core::redact_proxy_url(&purl),
+                        crw_core::error::reqwest_message(e)
                     );
                     None
                 }
@@ -633,10 +642,16 @@ impl PageFetcher for HttpFetcher {
                     // once we switched to the proxy, a failure may be the proxy infra's
                     // fault, not the origin's, so keep it a 502 (our side) rather than
                     // blaming the caller. A post-handshake reset likewise stays 502.
-                    return Err(if e.is_connect() && !use_proxy {
-                        CrwError::TargetUnreachable(format!("Could not reach {url}: {e}"))
+                    let unreachable = e.is_connect() && !use_proxy;
+                    // reqwest's " for url (...)" tail carries the request target, not
+                    // the proxy, so dropping it here is for uniformity with every other
+                    // site. `url` is the caller's own target and safe to echo, so both
+                    // arms name it themselves.
+                    let msg = crw_core::error::reqwest_message(e);
+                    return Err(if unreachable {
+                        CrwError::TargetUnreachable(format!("Could not reach {url}: {msg}"))
                     } else {
-                        CrwError::HttpError(e.to_string())
+                        CrwError::HttpError(format!("{url}: {msg}"))
                     });
                 }
             }
@@ -681,7 +696,7 @@ impl PageFetcher for HttpFetcher {
         let bytes = resp
             .bytes()
             .await
-            .map_err(|e| CrwError::HttpError(e.to_string()))?;
+            .map_err(|e| CrwError::HttpError(crw_core::error::reqwest_message(e)))?;
 
         if bytes.len() > MAX_RESPONSE_BYTES {
             return Err(CrwError::HttpError(format!(
