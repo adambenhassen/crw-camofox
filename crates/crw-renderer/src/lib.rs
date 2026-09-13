@@ -156,7 +156,14 @@ fn credit_for(kind: RendererKind) -> u32 {
 /// Stamp `render_decision` and `credit_cost` for an HTTP-only result.
 /// `requested_renderer` is taken into account: if the user explicitly
 /// pinned `"http"` we mark it as `UserPinned`, otherwise `AutoDefault`.
-fn stamp_http_decision(result: &mut FetchResult, requested_renderer: Option<&str>) {
+/// `decision` is the `render_route_decision_total` label: `success` for an HTTP
+/// result that needed no browser, `jsLadderExhausted` for an HTTP body returned
+/// because every JS tier failed.
+fn stamp_http_decision(
+    result: &mut FetchResult,
+    requested_renderer: Option<&str>,
+    decision: &'static str,
+) {
     if result.render_decision.is_some() {
         return;
     }
@@ -169,7 +176,7 @@ fn stamp_http_decision(result: &mut FetchResult, requested_renderer: Option<&str
     // Mirror the JS-renderer metric so dashboards see HTTP routing too.
     metrics()
         .render_route_decision_total
-        .with_label_values(&[kind.as_str(), "success"])
+        .with_label_values(&[kind.as_str(), decision])
         .inc();
 }
 
@@ -665,7 +672,7 @@ impl FallbackRenderer {
         match effective {
             Some(false) => {
                 let mut r = self.http.fetch(url, headers, None, deadline).await?;
-                stamp_http_decision(&mut r, requested_renderer);
+                stamp_http_decision(&mut r, requested_renderer, "success");
                 Ok(r)
             }
             Some(true) => {
@@ -700,7 +707,7 @@ impl FallbackRenderer {
                     Err(e) => return Err(e),
                 };
                 if http_result.content_type.as_deref() == Some("application/pdf") {
-                    stamp_http_decision(&mut http_result, requested_renderer);
+                    stamp_http_decision(&mut http_result, requested_renderer, "success");
                     return Ok(http_result);
                 }
 
@@ -716,7 +723,7 @@ impl FallbackRenderer {
                         "JS rendering requested but no renderer available; HTTP fallback used"
                             .into(),
                     );
-                    stamp_http_decision(&mut result, requested_renderer);
+                    stamp_http_decision(&mut result, requested_renderer, "success");
                     Ok(result)
                 } else {
                     // The HTTP body was already fetched above for the content-type
@@ -769,18 +776,13 @@ impl FallbackRenderer {
                             http_result.elapsed_ms = http_result
                                 .elapsed_ms
                                 .saturating_add(started_at.elapsed().as_millis() as u64);
-                            // `stamp_http_decision` records a plain `http` route,
-                            // which reads as "no browser was needed". Emit the
-                            // real story first so forced-JS fallbacks are separable
-                            // from ordinary HTTP traffic in metrics.
-                            metrics()
-                                .render_route_decision_total
-                                .with_label_values(&[
-                                    RendererKind::Http.as_str(),
-                                    "jsLadderExhausted",
-                                ])
-                                .inc();
-                            stamp_http_decision(&mut http_result, requested_renderer);
+                            // Labelled apart from ordinary HTTP traffic: a plain
+                            // `success` reads as "no browser was needed".
+                            stamp_http_decision(
+                                &mut http_result,
+                                requested_renderer,
+                                "jsLadderExhausted",
+                            );
                             Ok(http_result)
                         }
                     }
@@ -820,7 +822,7 @@ impl FallbackRenderer {
 
                 // PDFs don't need JS rendering — return immediately.
                 if result.content_type.as_deref() == Some("application/pdf") {
-                    stamp_http_decision(&mut result, requested_renderer);
+                    stamp_http_decision(&mut result, requested_renderer, "success");
                     return Ok(result);
                 }
 
@@ -956,12 +958,16 @@ impl FallbackRenderer {
                                 Some(prev) => format!("{warning}; {prev}"),
                                 None => warning,
                             });
-                            stamp_http_decision(&mut result, requested_renderer);
+                            stamp_http_decision(
+                                &mut result,
+                                requested_renderer,
+                                "jsLadderExhausted",
+                            );
                             Ok(result)
                         }
                     }
                 } else {
-                    stamp_http_decision(&mut result, requested_renderer);
+                    stamp_http_decision(&mut result, requested_renderer, "success");
                     Ok(result)
                 }
             }
@@ -2470,6 +2476,13 @@ mod tests {
             ),
         });
         r.render_js_default = None; // auto branch
+        let exhausted = || {
+            metrics()
+                .render_route_decision_total
+                .with_label_values(&["http", "jsLadderExhausted"])
+                .get()
+        };
+        let exhausted_before = exhausted();
 
         let result = r
             .fetch(
@@ -2489,6 +2502,8 @@ mod tests {
             "a 200-status wall must report the ladder as exhausted so the caller \
              does not re-run it; got {warning:?}"
         );
+        // Counted as a fallback, not as an HTTP result that needed no browser.
+        assert!(exhausted() > exhausted_before);
     }
 
     /// An HTTP tier that cannot reach the origin at all.
