@@ -53,6 +53,9 @@ ws_url = "ws://127.0.0.1:9222/"
 # [renderer.camofox]
 # base_url = "http://127.0.0.1:9377"
 # api_key = "..."                 # only if the camofox server runs with auth
+# challenge_wait_ms = 20000       # wait for a Cloudflare "Just a moment" page to clear; 0 = off
+# challenge_click = false         # click the Turnstile checkbox after the wait (patched image only)
+# clearance_reuse = true          # cache cf_clearance + UA per host, reuse on the HTTP tier
 
 [search]
 enabled = true
@@ -130,6 +133,9 @@ Use the `CRW_` prefix with `__` as a nesting separator:
 | `renderer.proxy_default_country` | `CRW_RENDERER__PROXY_DEFAULT_COUNTRY` |
 | `renderer.camofox.base_url` | `CRW_RENDERER__CAMOFOX__BASE_URL` |
 | `renderer.camofox.api_key` | `CRW_RENDERER__CAMOFOX__API_KEY` |
+| `renderer.camofox.challenge_wait_ms` | `CRW_RENDERER__CAMOFOX__CHALLENGE_WAIT_MS` |
+| `renderer.camofox.challenge_click` | `CRW_RENDERER__CAMOFOX__CHALLENGE_CLICK` |
+| `renderer.camofox.clearance_reuse` | `CRW_RENDERER__CAMOFOX__CLEARANCE_REUSE` |
 | `search.searxng_url` | `CRW_SEARCH__SEARXNG_URL` |
 | `search.github_token` | `CRW_SEARCH__GITHUB_TOKEN` |
 | `extraction.llm.api_key` | `CRW_EXTRACTION__LLM__API_KEY` |

@@ -1001,6 +1001,30 @@ pub struct CamofoxEndpoint {
     pub base_url: String,
     #[serde(default)]
     pub api_key: Option<String>,
+    /// Longest the Camofox tier waits, on the open tab, for a Cloudflare
+    /// managed challenge ("Just a moment...") to clear before it snapshots
+    /// whatever is on screen. `0` disables the wait. Always clamped to the
+    /// request deadline.
+    #[serde(default = "default_challenge_wait_ms")]
+    pub challenge_wait_ms: u64,
+    /// After the passive wait gives up, click the Turnstile checkbox once
+    /// and wait again. Needs a camofox-browser build with the coordinate
+    /// click patch; off by default.
+    #[serde(default)]
+    pub challenge_click: bool,
+    /// After a successful render that earned a `cf_clearance` cookie, cache
+    /// the tab's cookies + user agent per host so the HTTP tier can reuse
+    /// them and skip the browser on the next scrape of that host.
+    #[serde(default = "default_clearance_reuse")]
+    pub clearance_reuse: bool,
+}
+
+fn default_challenge_wait_ms() -> u64 {
+    20_000
+}
+
+fn default_clearance_reuse() -> bool {
+    true
 }
 
 /// Stealth mode configuration for evading bot detection.
@@ -1568,6 +1592,23 @@ impl AppConfig {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn camofox_endpoint_defaults_for_challenge_and_clearance() {
+        let ep: CamofoxEndpoint =
+            toml::from_str("base_url = \"http://camofox:9377\"").expect("minimal endpoint parses");
+        assert_eq!(ep.challenge_wait_ms, 20_000);
+        assert!(!ep.challenge_click);
+        assert!(ep.clearance_reuse);
+
+        let ep: CamofoxEndpoint = toml::from_str(
+            "base_url = \"http://camofox:9377\"\nchallenge_wait_ms = 0\nchallenge_click = true\nclearance_reuse = false",
+        )
+        .expect("explicit values parse");
+        assert_eq!(ep.challenge_wait_ms, 0);
+        assert!(ep.challenge_click);
+        assert!(!ep.clearance_reuse);
+    }
 
     /// Env var tests modify process-wide state; serialize them to avoid cross-test
     /// interference (e.g. `force_js` alias + `render_js_default` direct both set).

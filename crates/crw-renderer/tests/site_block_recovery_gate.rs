@@ -75,6 +75,9 @@ fn site_block_suppression_tracks_whether_a_recovery_tier_exists() {
             camofox: Some(crw_core::config::CamofoxEndpoint {
                 base_url: "http://127.0.0.1:9377".into(),
                 api_key: None,
+                challenge_wait_ms: 20_000,
+                challenge_click: false,
+                clearance_reuse: true,
             }),
             ..lightpanda_only()
         };
