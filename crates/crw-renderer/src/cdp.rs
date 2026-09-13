@@ -957,6 +957,45 @@ static RESOLVE_LIMIT: LazyLock<tokio::sync::Semaphore> =
 /// applies backpressure instead of failing requests; answering our own
 /// saturation with `failRequest` would drop real subresources and surface as a
 /// badly rendered page rather than as an error.
+/// Close a child target whose requests cannot be checked. Resuming it would run
+/// an unvalidated frame; leaving it paused stalls the render.
+async fn close_unguarded_child(conn: &CdpConnection, child_target: &str, cmd_timeout: Duration) {
+    crw_core::metrics::metrics()
+        .chrome_blocked_requests_total
+        .with_label_values(&["child_unguarded"])
+        .inc();
+    tracing::warn!(
+        target_id = %child_target,
+        "could not intercept a child target; closing it"
+    );
+    let closed = !child_target.is_empty()
+        && conn
+            .send_recv(
+                "Target.closeTarget",
+                serde_json::json!({ "targetId": child_target }),
+                None,
+                cmd_timeout,
+            )
+            .await
+            .is_ok();
+    if !closed {
+        // Deliberately still not resumed: that would run an unchecked target.
+        // The child stays frozen, which costs this frame and at worst burns the
+        // nav budget. Counted so the trade-off is visible rather than silent.
+        crw_core::metrics::metrics()
+            .chrome_blocked_requests_total
+            .with_label_values(&["child_stuck"])
+            .inc();
+    }
+}
+
+/// Did the browser answer `method` with a protocol error, i.e. it does not
+/// support the command, as opposed to the call timing out or the socket failing?
+/// `CdpConnection::send_recv` formats only protocol errors as `CDP {method}: …`.
+fn is_cdp_protocol_rejection(e: &CrwError, method: &str) -> bool {
+    matches!(e, CrwError::RendererError(m) if m.starts_with(&format!("CDP {method}:")))
+}
+
 async fn run_intercept_pump(
     conn: &CdpConnection,
     mut rx: broadcast::Receiver<CdpEvent>,
@@ -1056,41 +1095,16 @@ async fn run_intercept_pump(
                             .await
                             .is_ok();
                         if !enabled {
-                            crw_core::metrics::metrics()
-                                .chrome_blocked_requests_total
-                                .with_label_values(&["child_unguarded"])
-                                .inc();
-                            tracing::warn!(
-                                target_id = %child_target,
-                                "could not intercept a child target; closing it"
-                            );
-                            let closed = !child_target.is_empty()
-                                && conn
-                                    .send_recv(
-                                        "Target.closeTarget",
-                                        serde_json::json!({ "targetId": child_target }),
-                                        None,
-                                        cmd_timeout,
-                                    )
-                                    .await
-                                    .is_ok();
-                            if !closed {
-                                // Deliberately still not resumed: that would run
-                                // an unchecked target. The child stays frozen,
-                                // which costs this frame and at worst burns the
-                                // nav budget. Counted so the trade-off is visible
-                                // rather than silent.
-                                crw_core::metrics::metrics()
-                                    .chrome_blocked_requests_total
-                                    .with_label_values(&["child_stuck"])
-                                    .inc();
-                            }
+                            close_unguarded_child(conn, &child_target, cmd_timeout).await;
                             return;
                         }
                         // Auto-attach does not cascade, so ask the child to
                         // attach ITS children too; otherwise an iframe nested
-                        // inside an out-of-process iframe never surfaces.
-                        let _ = conn
+                        // inside an out-of-process iframe never surfaces. Same
+                        // rule as a failed `Fetch.enable`: if it cannot be turned
+                        // on, the child's own children would escape the check, so
+                        // the child is closed rather than resumed.
+                        let auto_attached = conn
                             .send_recv(
                                 "Target.setAutoAttach",
                                 serde_json::json!({
@@ -1101,7 +1115,12 @@ async fn run_intercept_pump(
                                 Some(&child),
                                 cmd_timeout,
                             )
-                            .await;
+                            .await
+                            .is_ok();
+                        if !auto_attached {
+                            close_unguarded_child(conn, &child_target, cmd_timeout).await;
+                            return;
+                        }
                         let _ = conn
                             .send_recv(
                                 "Runtime.runIfWaitingForDebugger",
@@ -2425,10 +2444,15 @@ impl CdpRenderer {
         // destination check entirely. `waitForDebuggerOnStart: true` because the
         // request that matters is the child's own first navigation, which would
         // otherwise outrun `Fetch.enable`; the pump resumes every child it sees,
-        // and a child it cannot intercept is closed rather than resumed. Best-effort — a browser without
-        // the command keeps the previous behaviour rather than failing the
-        // render.
-        let _ = conn
+        // and a child it cannot intercept is closed rather than resumed.
+        //
+        // A timeout or a dead socket fails the render, exactly like
+        // `Fetch.enable` above: silently continuing would let out-of-process
+        // iframes navigate and fetch without the destination check. A browser
+        // that answers with a protocol error does not implement the command and
+        // so has no auto-attachable children to escape; that keeps rendering,
+        // logged and counted so it is visible.
+        if let Err(e) = conn
             .send_recv(
                 "Target.setAutoAttach",
                 serde_json::json!({
@@ -2439,7 +2463,17 @@ impl CdpRenderer {
                 Some(&session_id),
                 self.page_timeout,
             )
-            .await;
+            .await
+        {
+            if !is_cdp_protocol_rejection(&e, "Target.setAutoAttach") {
+                return Err(e);
+            }
+            tracing::warn!(tier = %self.name, "browser rejected Target.setAutoAttach: {e}");
+            crw_core::metrics::metrics()
+                .chrome_blocked_requests_total
+                .with_label_values(&["auto_attach_unsupported"])
+                .inc();
+        }
         // Not repeated at browser scope. Service workers and shared workers are
         // not children of the page target, so this does not reach them, and
         // their `fetch` is the one remaining path that can carry a response back
@@ -3063,6 +3097,103 @@ mod tests {
     /// 100%. This drives the guard the same way a `tokio::time::timeout` does:
     /// arm it, then drop WITHOUT `finish()`, and assert the detached reaper
     /// sent `Target.closeTarget`.
+    #[test]
+    fn auto_attach_rejection_is_told_apart_from_a_transport_failure() {
+        use crw_core::error::CrwError;
+        assert!(super::is_cdp_protocol_rejection(
+            &CrwError::RendererError(
+                "CDP Target.setAutoAttach: 'Target.setAutoAttach' wasn't found".into()
+            ),
+            "Target.setAutoAttach"
+        ));
+        assert!(!super::is_cdp_protocol_rejection(
+            &CrwError::Timeout(2000),
+            "Target.setAutoAttach"
+        ));
+        assert!(!super::is_cdp_protocol_rejection(
+            &CrwError::RendererError("CDP connection closed".into()),
+            "Target.setAutoAttach"
+        ));
+    }
+
+    /// A child target whose `Target.setAutoAttach` fails must not be resumed:
+    /// its own children (an iframe nested in an out-of-process iframe) would
+    /// never attach, so their requests would reach the network unchecked.
+    #[tokio::test]
+    async fn child_without_auto_attach_is_closed_not_resumed() {
+        use crate::cdp_conn::CdpConnection;
+        use futures::{SinkExt, StreamExt};
+        use std::sync::{Arc, Mutex};
+        use std::time::Duration;
+        use tokio::net::TcpListener;
+        use tokio_tungstenite::accept_async;
+        use tokio_tungstenite::tungstenite::Message;
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let recorded: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+        let rec = recorded.clone();
+        tokio::spawn(async move {
+            let Ok((stream, _)) = listener.accept().await else {
+                return;
+            };
+            let Ok(ws) = accept_async(stream).await else {
+                return;
+            };
+            let (mut w, mut r) = ws.split();
+            // The child appears under our page session.
+            let attached = serde_json::json!({
+                "method": "Target.attachedToTarget",
+                "sessionId": "PAGE",
+                "params": {"sessionId": "CHILD", "targetInfo": {"targetId": "T-CHILD"}},
+            });
+            let _ = w.send(Message::Text(attached.to_string().into())).await;
+            while let Some(Ok(msg)) = r.next().await {
+                let Ok(txt) = msg.to_text() else { continue };
+                let Ok(v) = serde_json::from_str::<serde_json::Value>(txt) else {
+                    continue;
+                };
+                let method = v["method"].as_str().unwrap_or_default().to_string();
+                rec.lock().unwrap().push(method.clone());
+                // Answer everything except the child's auto-attach, which hangs.
+                if method != "Target.setAutoAttach" {
+                    let reply = serde_json::json!({"id": v["id"], "result": {}});
+                    let _ = w.send(Message::Text(reply.to_string().into())).await;
+                }
+            }
+        });
+
+        let conn = CdpConnection::connect(&format!("ws://{addr}"), Duration::from_secs(2))
+            .await
+            .expect("connect to mock CDP ws");
+        let ctx = super::OutboundCtx {
+            memo: Default::default(),
+            render_limit: tokio::sync::Semaphore::new(1),
+            budget: Duration::from_secs(1),
+            doc_host: "example.com".into(),
+            unresolved: std::sync::atomic::AtomicBool::new(false),
+        };
+        let outstanding: super::Outstanding = Default::default();
+        let rx = conn.subscribe();
+        let _ = tokio::time::timeout(
+            Duration::from_secs(4),
+            super::run_intercept_pump(&conn, rx, None, "PAGE", &ctx, &outstanding),
+        )
+        .await;
+
+        let methods = recorded.lock().unwrap().clone();
+        assert!(
+            methods.iter().any(|m| m == "Target.closeTarget"),
+            "a child whose auto-attach failed must be closed; saw {methods:?}"
+        );
+        assert!(
+            !methods
+                .iter()
+                .any(|m| m == "Runtime.runIfWaitingForDebugger"),
+            "a child whose auto-attach failed must not be resumed; saw {methods:?}"
+        );
+    }
+
     #[tokio::test]
     async fn ws_fetch_guard_reaps_target_on_cancel() {
         use crate::cdp_conn::CdpConnection;
