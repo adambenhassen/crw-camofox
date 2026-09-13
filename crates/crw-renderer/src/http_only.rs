@@ -378,6 +378,7 @@ impl PageFetcher for HttpFetcher {
         };
         let mut use_proxy = proxy_first;
         let mut direct_rescue_used = false;
+        let mut origin_answered = false;
         // Set when the DIRECT egress got NOTHING back from the origin: a connect-phase
         // timeout, i.e. the blackholed SYN. See where it is set for why the shape is
         // narrowed that far and why the 422 below depends on it.
@@ -441,6 +442,16 @@ impl PageFetcher for HttpFetcher {
             };
             let send_fut = build_request(active_client).send();
             let send_result = tokio::time::timeout(remaining, send_fut).await;
+            // "The origin answered us at least once on this request." Recorded HERE,
+            // once, rather than in the `Ok(Ok(_))` arms below, so no future arm can
+            // forget it. Direct egress only: a response relayed through the proxy could
+            // be the proxy's own (407, its 502), which proves nothing about the origin.
+            // This is the real predicate behind `direct_connect_failed`: an origin
+            // answering 502-504 and then connect-timing-out on the retry must not be
+            // reported as "no response from the origin".
+            if !use_proxy && matches!(send_result, Ok(Ok(_))) {
+                origin_answered = true;
+            }
             match send_result {
                 // The proxy-first attempt HUNG until its capped budget ran out.
                 // This is the case the reserve exists for: fall back to direct with
@@ -650,7 +661,12 @@ impl PageFetcher for HttpFetcher {
                     // proxy pool HANGS exactly like a proxy waiting on a dead origin, so
                     // the hang on its own proves nothing; requiring the direct blackhole
                     // first means proxy congestion alone can never reach 422.
-                    direct_connect_failed = e.is_connect() && e.is_timeout();
+                    //
+                    // `!origin_answered` is the third requirement: if the origin ever
+                    // answered us with an HTTP status on this request, "no response from
+                    // the origin" is provably false. Narrowed here at the source rather
+                    // than at the arms that read it, so both inherit the same meaning.
+                    direct_connect_failed = e.is_connect() && e.is_timeout() && !origin_answered;
                 }
                 // Retry once on the same egress. Read-phase timeouts qualify (the origin
                 // connected and is slow — a retry may help). Connection-level failures
@@ -680,7 +696,24 @@ impl PageFetcher for HttpFetcher {
                     // once we switched to the proxy, a failure may be the proxy infra's
                     // fault, not the origin's, so keep it a 502 (our side) rather than
                     // blaming the caller. A post-handshake reset likewise stays 502.
-                    let unreachable = e.is_connect() && !use_proxy;
+                    //
+                    // `direct_connect_failed` is the one exception, the same rule the
+                    // `Err(_)` arm above applies: it is set ONLY when the DIRECT egress
+                    // hit a connect-phase TIMEOUT, a first-hand observation that the
+                    // origin swallowed our SYNs. A proxy failure layered on top does not
+                    // overturn that. Without this the class exits as `HttpError`, the
+                    // ladder never short-circuits (`lib.rs` only stops on
+                    // `TargetUnreachable`), and a host with no listening socket is handed
+                    // every JS tier's full budget. A refused or reset proxy still lands
+                    // at 502 because a refusal is not a timeout.
+                    if e.is_connect() && use_proxy && direct_connect_failed {
+                        tracing::warn!(
+                            url,
+                            "direct connect-timeout and proxy attempt both failed; \
+                             reporting target_unreachable (was: http_error)"
+                        );
+                    }
+                    let unreachable = e.is_connect() && (!use_proxy || direct_connect_failed);
                     // reqwest's " for url (...)" tail carries the request target, not
                     // the proxy, so dropping it here is for uniformity with every other
                     // site. `url` is the caller's own target and safe to echo, so both
@@ -1338,6 +1371,51 @@ mod tests {
             matches!(err, CrwError::TargetUnreachable(_)),
             "a blackholing origin behind a reachable-but-hanging proxy must surface as \
              TargetUnreachable (422), not a 504; got {err:?}"
+        );
+    }
+
+    /// The third shape, and the one prod actually produces: the origin blackholes our
+    /// direct SYNs and the proxy then fails FAST (refused / DNS / TLS) rather than
+    /// hanging. That lands on `Ok(Err(_))`, not the `Err(_)` timeout arm, so before this
+    /// it exited as `HttpError` and the JS ladder never short-circuited — measured on
+    /// prod at ~38 s per request across ~1,050 requests/day, and 895 proxy arms in a
+    /// single 6-hour window with the existing 422 path firing zero times.
+    ///
+    /// Sits between the two tests above: the discriminator is still the DIRECT
+    /// connect-timeout, never the proxy's failure mode.
+    #[tokio::test]
+    async fn direct_blackhole_then_refusing_proxy_is_target_unreachable() {
+        // proxy: closed port, so the connect fails immediately (the fast-fail shape).
+        let p = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let paddr = p.local_addr().unwrap();
+        drop(p);
+        let fetcher = HttpFetcher {
+            client: reqwest::Client::builder()
+                .connect_timeout(std::time::Duration::from_millis(300))
+                .build()
+                .unwrap(),
+            relaxed_client: None,
+            ratelimit_proxy_client: Some(build_client(
+                "ua",
+                Some(&format!("http://{paddr}")),
+                std::time::Duration::from_secs(5),
+                false,
+            )),
+            inject_stealth_headers: false,
+        };
+        let err = fetcher
+            .fetch(
+                "http://192.0.2.1/",
+                &HashMap::new(),
+                None,
+                Deadline::from_request_ms(2_000),
+            )
+            .await
+            .expect_err("origin blackholes and the proxy refuses");
+        assert!(
+            matches!(err, CrwError::TargetUnreachable(_)),
+            "a blackholing origin must surface as TargetUnreachable (422) even when the \
+             proxy fails fast rather than hanging; got {err:?}"
         );
     }
 
