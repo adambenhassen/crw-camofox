@@ -608,6 +608,21 @@ pub struct ScrapeData {
 const ERROR_PAGE_MAX_TEXT: usize = 2_500;
 
 impl ScrapeData {
+    /// Whether any page-content field survived. A document without a body is a
+    /// placeholder for a URL that produced no page (a cleared wall, or a scrape
+    /// error), as opposed to an origin error page that was kept readable.
+    pub fn has_body(&self) -> bool {
+        self.markdown.is_some()
+            || self.html.is_some()
+            || self.raw_html.is_some()
+            || self.plain_text.is_some()
+            || self.links.is_some()
+            || self.images.is_some()
+            || self.json.is_some()
+            || self.summary.is_some()
+            || self.chunks.is_some()
+    }
+
     /// True when the body the caller asked for is no bigger than an error page
     /// (see [`ERROR_PAGE_MAX_TEXT`]). `false` when there is nothing to measure.
     pub fn is_error_page_sized(&self) -> bool {
@@ -1085,6 +1100,20 @@ mod tests {
         d.raw_html = None;
         d.warning = None;
         d
+    }
+
+    #[test]
+    fn has_body_separates_a_placeholder_from_a_readable_error_page() {
+        let mut d = ScrapeData::default();
+        assert!(!d.has_body(), "a failed_page or cleared wall has no body");
+        d.markdown = Some("404 Not Found".into());
+        assert!(
+            d.has_body(),
+            "an origin error page kept readable has a body"
+        );
+        d.markdown = None;
+        d.links = Some(vec!["https://example.com/a".into()]);
+        assert!(d.has_body(), "a links-only format still delivered a page");
     }
 
     #[test]

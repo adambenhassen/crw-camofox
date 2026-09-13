@@ -50,6 +50,19 @@ pub async fn scrape_url(
         .await
 }
 
+/// Reject the faults in a scrape template that no fetch can repair, before any
+/// network work. Shared by the single scrape and the batch route, so a bad
+/// template is one 400 on both surfaces rather than one placeholder document
+/// per URL labelled as a block.
+pub fn validate_scrape_template(req: &ScrapeRequest) -> CrwResult<()> {
+    if req.actions.is_some() {
+        return Err(crw_core::error::CrwError::InvalidRequest(
+            "The 'actions' parameter is not yet supported. Use cssSelector or xpath for element targeting.".into()
+        ));
+    }
+    Ok(())
+}
+
 #[allow(clippy::too_many_arguments)]
 async fn scrape_url_inner(
     req: &ScrapeRequest,
@@ -61,12 +74,7 @@ async fn scrape_url_inner(
     render_js_default: Option<bool>,
     deadline: Deadline,
 ) -> CrwResult<ScrapeData> {
-    // Reject unsupported `actions` parameter early with a clear error.
-    if req.actions.is_some() {
-        return Err(crw_core::error::CrwError::InvalidRequest(
-            "The 'actions' parameter is not yet supported. Use cssSelector or xpath for element targeting.".into()
-        ));
-    }
+    validate_scrape_template(req)?;
 
     // Determine whether stealth headers should be injected for this request.
     let inject_stealth = req.stealth.unwrap_or(default_stealth);

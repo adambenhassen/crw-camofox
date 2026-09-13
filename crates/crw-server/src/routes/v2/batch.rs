@@ -66,6 +66,10 @@ pub async fn start_batch(
         .map_err(|e| CrwError::InvalidRequest(format!("invalid batch scrape options: {e}")))?;
     let (mut template, _decomposed, _tier) = to_internal(template_v2)?;
     template.url = String::new();
+    // A fault in the caller's own template is one 400 here, not one placeholder
+    // document per URL labelled as a block.
+    crate::state::validate_renderer_pin(template.renderer, template.render_js, &state)?;
+    crw_crawl::single::validate_scrape_template(&template)?;
 
     // Partition URLs into valid / invalid (SSRF-checked, same as v1 scrape).
     let mut valid = Vec::new();
@@ -142,4 +146,31 @@ pub async fn cancel_batch(state: State<AppState>, id: Path<Uuid>) -> Result<Json
 
 pub async fn get_errors(state: State<AppState>, id: Path<Uuid>) -> Result<Json<Value>, AppError> {
     super::crawl::get_errors(state, id).await
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crw_core::config::AppConfig;
+    use serde_json::json;
+
+    /// A template fault is rejected before any URL work, instead of surfacing
+    /// as one placeholder per URL: here, a renderer this server does not run.
+    #[tokio::test]
+    async fn v2_start_batch_rejects_an_unavailable_renderer_before_any_url_work() {
+        let config: AppConfig = toml::from_str("").unwrap();
+        let state = AppState::new(config).unwrap();
+        let result = start_batch(
+            State(state),
+            HeaderMap::new(),
+            Ok(Json(
+                json!({ "urls": ["https://example.com/"], "renderer": "lightpanda" }),
+            )),
+        )
+        .await;
+        let Err(err) = result else {
+            panic!("a bad template must be rejected");
+        };
+        assert_eq!(err.0.error_code(), "invalid_request", "{:?}", err.0);
+    }
 }
