@@ -451,21 +451,28 @@ impl PageFetcher for HttpFetcher {
         // Build a fresh, fully-decorated request for each attempt. Closure
         // captures `self`, `url`, and `headers`; called once per attempt so
         // every retry sends an independent (yet identical) request.
+        // A caller-supplied User-Agent (e.g. the Firefox UA cached with a
+        // `cf_clearance`) must not travel with Chrome client hints: Firefox
+        // never sends Sec-Ch-Ua, and the mismatch is a bot-detection tell.
+        let caller_ua = headers.keys().any(|k| k.eq_ignore_ascii_case("user-agent"));
         let build_request = |client: &reqwest::Client| {
             let mut req = client.get(url);
             if self.inject_stealth_headers {
                 req = req
                     .header("Accept", STEALTH_ACCEPT)
                     .header("Accept-Language", "en-US,en;q=0.9")
-                    .header("Sec-Ch-Ua", STEALTH_SEC_CH_UA)
-                    .header("Sec-Ch-Ua-Mobile", "?0")
-                    .header("Sec-Ch-Ua-Platform", "\"Windows\"")
                     .header("Sec-Fetch-Dest", "document")
                     .header("Sec-Fetch-Mode", "navigate")
                     .header("Sec-Fetch-Site", "none")
                     .header("Sec-Fetch-User", "?1")
                     .header("Upgrade-Insecure-Requests", "1")
                     .header("Priority", "u=0, i");
+                if !caller_ua {
+                    req = req
+                        .header("Sec-Ch-Ua", STEALTH_SEC_CH_UA)
+                        .header("Sec-Ch-Ua-Mobile", "?0")
+                        .header("Sec-Ch-Ua-Platform", "\"Windows\"");
+                }
             }
             for (k, v) in headers {
                 req = req.header(k.as_str(), v.as_str());

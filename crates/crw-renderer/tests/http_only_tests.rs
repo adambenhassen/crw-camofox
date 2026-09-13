@@ -243,3 +243,43 @@ async fn http_fetcher_enforces_deadline_against_slow_origin() {
         "deadline not enforced — took {elapsed:?} for a 300ms budget"
     );
 }
+
+/// A caller-supplied User-Agent (e.g. the Firefox UA cached with a
+/// `cf_clearance`) must not travel with Chrome client hints: Firefox never
+/// sends `Sec-Ch-Ua`, and the mismatch is a bot-detection tell.
+#[tokio::test]
+async fn caller_user_agent_disables_chrome_client_hints() {
+    use wiremock::matchers::method;
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .respond_with(ResponseTemplate::new(200).set_body_string("<html>ok</html>"))
+        .mount(&server)
+        .await;
+
+    let fetcher = HttpFetcher::new("crw-test", None, true);
+    let mut headers = HashMap::new();
+    headers.insert("User-Agent".to_string(), "Firefox/128.0 test".to_string());
+    fetcher
+        .fetch(&server.uri(), &headers, None, tdl())
+        .await
+        .expect("fetch ok");
+
+    let reqs = server.received_requests().await.unwrap();
+    let req = reqs.last().unwrap();
+    assert_eq!(
+        req.headers.get("user-agent").unwrap().to_str().unwrap(),
+        "Firefox/128.0 test"
+    );
+    assert!(
+        req.headers.get("sec-ch-ua").is_none(),
+        "client hints must not accompany a caller UA"
+    );
+    assert!(req.headers.get("sec-ch-ua-mobile").is_none());
+    assert!(req.headers.get("sec-ch-ua-platform").is_none());
+    assert!(
+        req.headers.get("accept-language").is_some(),
+        "other stealth headers still sent"
+    );
+}
