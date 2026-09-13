@@ -285,6 +285,18 @@ fn lightpanda_download_url() -> Option<String> {
     }
 }
 
+/// Ranges [`crw_core::url_safety`] rejects that LightPanda's own
+/// `--block-private-networks` group does not cover, so the browser we launch
+/// enforces the same policy the rest of the pipeline does.
+/// The v6 translation prefixes are blocked wholesale here rather than decoded
+/// like [`crw_core::url_safety`] does, because a CIDR list cannot express
+/// "carrying a private IPv4". Both are effectively dead protocols, so
+/// over-blocking them costs nothing and this flag is the only control covering
+/// websockets and worker targets.
+const LIGHTPANDA_EXTRA_BLOCK_CIDRS: &str = "0.0.0.0/8,100.64.0.0/10,224.0.0.0/4,240.0.0.0/4,\
+192.0.0.0/24,192.0.2.0/24,198.18.0.0/15,198.51.100.0/24,203.0.113.0/24,\
+fec0::/10,ff00::/8,::/96,64:ff9b::/96,64:ff9b:1::/48,2002::/16";
+
 async fn try_lightpanda_native() -> Option<(ManagedBrowser, String)> {
     let bin = find_or_download_lightpanda().await?;
 
@@ -293,11 +305,25 @@ async fn try_lightpanda_native() -> Option<(ManagedBrowser, String)> {
     let port_str = port.to_string();
 
     let mut cmd = Command::new(&bin);
-    cmd.args(["serve", "--host", "127.0.0.1", "--port", &port_str])
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .kill_on_drop(true);
+    // Refuse private/internal destinations in the browser itself. This is the
+    // only control that sees what the CDP interception pump cannot — websockets,
+    // worker targets — and it runs on the resolved socket address, so it has no
+    // time-of-check window. An older binary that does not know the flag exits,
+    // the readiness poll below fails, and the ladder moves on.
+    cmd.args([
+        "serve",
+        "--host",
+        "127.0.0.1",
+        "--port",
+        &port_str,
+        "--block-private-networks",
+        "--block-cidrs",
+        LIGHTPANDA_EXTRA_BLOCK_CIDRS,
+    ])
+    .stdin(Stdio::null())
+    .stdout(Stdio::null())
+    .stderr(Stdio::null())
+    .kill_on_drop(true);
     // Own process group: a group-kill reaps any LightPanda helper procs,
     // and detaching from crw's terminal group means Ctrl-C is delivered
     // by the teardown task, not twice. (Must ship with Phase 2 teardown.)
@@ -343,6 +369,17 @@ async fn try_lightpanda_docker() -> Option<(ManagedBrowser, String)> {
             "-p",
             "0:9222",
             "lightpanda/browser:latest",
+            // Overrides the image CMD, so the whole serve line has to be
+            // repeated. Same reasoning as the native launch above.
+            "/bin/lightpanda",
+            "serve",
+            "--host",
+            "0.0.0.0",
+            "--port",
+            "9222",
+            "--block-private-networks",
+            "--block-cidrs",
+            LIGHTPANDA_EXTRA_BLOCK_CIDRS,
         ])
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())

@@ -596,9 +596,14 @@ pub struct RendererConfig {
     /// fallback tier needs more headroom than direct Chrome.
     #[serde(default)]
     pub chrome_proxy_timeout_ms: Option<u64>,
-    /// Enable Chrome resource interception (`Fetch.enable` blocking of media,
-    /// fonts, trackers). Default `false`; flipped after the CDP-fake suite
-    /// validates pump + cleanup behaviour. See plan Phase 2.
+    /// Enable Chrome *resource* interception (blocking of media, fonts,
+    /// trackers). Default `false`.
+    ///
+    /// This no longer controls whether `Fetch.enable` runs: the interception
+    /// pump is always on, because it also validates every destination the
+    /// browser reaches on its own (redirects, JS navigation, iframes, XHR),
+    /// which the route-layer URL check cannot see. This flag only decides
+    /// whether the ad/resource blocklist runs alongside that check.
     #[serde(default)]
     pub chrome_intercept_resources: bool,
     /// Additionally block `stylesheet` requests when interception is enabled.
@@ -606,8 +611,11 @@ pub struct RendererConfig {
     /// CSS-driven visibility / lazy-content triggers.
     #[serde(default)]
     pub chrome_intercept_stylesheets: bool,
-    /// Per-host opt-out for chrome interception. Hosts in this list run with
-    /// interception disabled even when `chrome_intercept_resources = true`.
+    /// Per-host opt-out for the resource blocklist. Hosts in this list skip
+    /// ad/resource blocking even when `chrome_intercept_resources = true`.
+    ///
+    /// It no longer turns `Fetch.enable` off for those hosts: the destination
+    /// check is a security control and has no per-host opt-out.
     #[serde(default)]
     pub chrome_host_intercept_disable: Vec<String>,
     /// Hard chrome-tier navigation budget in ms. Wraps `wait_for_page_ready`

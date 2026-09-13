@@ -30,7 +30,6 @@ pub fn safe_redirect_policy() -> reqwest::redirect::Policy {
 /// `127.0.0.1:<random>`. The opt-in is read at every call (cheap) so it
 /// can be flipped per-test. Never set this in production.
 pub fn validate_safe_url(url: &url::Url) -> Result<(), String> {
-    let test_allow_loopback = std::env::var("CRW_ALLOW_LOOPBACK_FOR_TESTS").as_deref() == Ok("1");
     // URL length limit
     const MAX_URL_LENGTH: usize = 2048;
     if url.as_str().len() > MAX_URL_LENGTH {
@@ -49,7 +48,19 @@ pub fn validate_safe_url(url: &url::Url) -> Result<(), String> {
         return Err("Only http/https URLs are allowed".into());
     }
 
-    // Host check
+    validate_safe_host(url)
+}
+
+/// The destination half of [`validate_safe_url`]: deny-listed host names and
+/// blocked literal address ranges, without the URL-shape rules (length, null
+/// bytes, scheme).
+///
+/// Callers that validate a URL the *caller* supplied want the full
+/// [`validate_safe_url`]. Callers that validate a URL the *browser* produced —
+/// a redirect target, a subresource — want this one: a signed CDN URL past the
+/// length cap is not an SSRF, and failing it would drop a legitimate request.
+pub fn validate_safe_host(url: &url::Url) -> Result<(), String> {
+    let test_allow_loopback = std::env::var("CRW_ALLOW_LOOPBACK_FOR_TESTS").as_deref() == Ok("1");
     let host = url
         .host_str()
         .ok_or_else(|| "URL has no host".to_string())?;
@@ -84,7 +95,18 @@ pub fn validate_safe_url(url: &url::Url) -> Result<(), String> {
 /// is public and must not fetch it.
 pub async fn validate_safe_url_resolved(url: &url::Url) -> Result<(), String> {
     validate_safe_url(url)?;
+    resolve_and_validate(url).await
+}
 
+/// [`validate_safe_host`] plus DNS resolution. The destination check for URLs
+/// the browser produced rather than the caller; see [`validate_safe_host`] for
+/// why the URL-shape rules are excluded.
+pub async fn validate_safe_host_resolved(url: &url::Url) -> Result<(), String> {
+    validate_safe_host(url)?;
+    resolve_and_validate(url).await
+}
+
+async fn resolve_and_validate(url: &url::Url) -> Result<(), String> {
     let test_allow_loopback = std::env::var("CRW_ALLOW_LOOPBACK_FOR_TESTS").as_deref() == Ok("1");
     if test_allow_loopback {
         return Ok(());
@@ -203,16 +225,56 @@ fn is_blocked_ipv4(v4: &std::net::Ipv4Addr) -> bool {
         || (a == 203 && b == 0 && c == 113) // TEST-NET-3 203.0.113.0/24
 }
 
+/// IPv4 address a v6 address actually reaches through a translation prefix.
+///
+/// NAT64 (`64:ff9b::/96`) and 6to4 (`2002::/16`) both carry a real IPv4
+/// destination in their low bits, and on a network that implements them the
+/// host connects to *that* address. Returning the embedded address rather than
+/// blocking the whole prefix keeps legitimate public IPv4 reachable through a
+/// DNS64/NAT64 resolver, which is the common case on IPv6-only networks.
+fn embedded_ipv4(v6: &std::net::Ipv6Addr) -> Option<std::net::Ipv4Addr> {
+    let s = v6.segments();
+    // Well-known NAT64 prefix (RFC 6052): the IPv4 address sits in the last
+    // 32 bits.
+    if s[0] == 0x0064 && s[1] == 0xff9b && s[2] == 0 && s[3] == 0 && s[4] == 0 && s[5] == 0 {
+        return Some(std::net::Ipv4Addr::from(
+            ((s[6] as u32) << 16) | (s[7] as u32),
+        ));
+    }
+    // 6to4 (RFC 3056): 2002:<v4>::/48.
+    if s[0] == 0x2002 {
+        return Some(std::net::Ipv4Addr::from(
+            ((s[1] as u32) << 16) | (s[2] as u32),
+        ));
+    }
+    None
+}
+
 fn is_blocked_ip(ip: &IpAddr) -> bool {
     match ip {
         IpAddr::V4(v4) => is_blocked_ipv4(v4),
         IpAddr::V6(v6) => {
             v6.is_loopback()                       // ::1
                 || v6.is_unspecified()              // ::
-                // IPv4-mapped IPv6 (::ffff:127.0.0.1, ::ffff:10.x.x.x, etc.)
-                || v6.to_ipv4_mapped().is_some_and(|v4| is_blocked_ipv4(&v4))
+                // IPv4-mapped (::ffff:127.0.0.1) AND IPv4-compatible (::7f00:1).
+                // `to_ipv4` covers both ::/96 and ::ffff:0:0/96; `to_ipv4_mapped`
+                // covered only the latter, so `http://[::7f00:1]/` reached
+                // loopback.
+                || v6.to_ipv4().is_some_and(|v4| is_blocked_ipv4(&v4))
+                // Addresses reached through a v4 translation prefix.
+                || embedded_ipv4(v6).is_some_and(|v4| is_blocked_ipv4(&v4))
+                // Local-use translation prefix (RFC 8215, 64:ff9b:1::/48). It
+                // admits several RFC 6052 prefix lengths, so the embedded v4
+                // cannot be decoded unambiguously; block the whole /48 rather
+                // than guess. It is local-use by definition, never a public
+                // destination.
+                || (v6.segments()[0] == 0x0064
+                    && v6.segments()[1] == 0xff9b
+                    && v6.segments()[2] == 0x0001)
                 // IPv6 link-local (fe80::/10)
                 || (v6.segments()[0] & 0xffc0) == 0xfe80
+                // Deprecated site-local (fec0::/10), still routed on some networks.
+                || (v6.segments()[0] & 0xffc0) == 0xfec0
                 // IPv6 unique-local / ULA (fc00::/7) — private network equivalent
                 || (v6.segments()[0] & 0xfe00) == 0xfc00
                 // IPv6 multicast and special/reserved ranges.
@@ -308,9 +370,45 @@ mod tests {
     }
 
     #[test]
+    fn blocks_ipv4_compatible_and_translated_forms() {
+        // IPv4-compatible ::a.b.c.d — reaches loopback, was allowed.
+        assert!(validate_safe_url(&url("http://[::7f00:1]")).is_err());
+        // NAT64 well-known prefix carrying loopback / metadata / RFC1918.
+        assert!(validate_safe_url(&url("http://[64:ff9b::7f00:1]")).is_err());
+        assert!(validate_safe_url(&url("http://[64:ff9b::a9fe:a9fe]")).is_err());
+        assert!(validate_safe_url(&url("http://[64:ff9b::a00:1]")).is_err());
+        // 6to4 carrying a private address.
+        assert!(validate_safe_url(&url("http://[2002:a00:1::1]")).is_err());
+        // RFC 8215 local-use translation prefix, blocked wholesale.
+        assert!(validate_safe_url(&url("http://[64:ff9b:1::5db8:d822]")).is_err());
+        // Deprecated site-local.
+        assert!(validate_safe_url(&url("http://[fec0::1]")).is_err());
+        // Public IPv4 behind the same translation prefixes must stay reachable.
+        assert!(validate_safe_url(&url("http://[64:ff9b::5db8:d822]")).is_ok()); // 93.184.216.34
+        assert!(validate_safe_url(&url("http://[2002:5db8:d822::1]")).is_ok());
+        // An ordinary public IPv6 address is unaffected.
+        assert!(validate_safe_url(&url("http://[2606:4700:4700::1111]")).is_ok());
+    }
+
+    #[test]
     fn blocks_ipv6_ula() {
         assert!(validate_safe_url(&url("http://[fc00::1]")).is_err());
         assert!(validate_safe_url(&url("http://[fd00::1]")).is_err());
+    }
+
+    #[test]
+    fn host_check_covers_destinations_without_the_url_shape_rules() {
+        // Same destination verdicts as the full check.
+        assert!(validate_safe_host(&url("http://169.254.169.254/")).is_err());
+        assert!(validate_safe_host(&url("http://10.0.0.1/")).is_err());
+        assert!(validate_safe_host(&url("http://localhost/")).is_err());
+        assert!(validate_safe_host(&url("https://example.com/")).is_ok());
+        // But a long URL is a shape problem, not an SSRF: the renderer guard
+        // runs this against browser-produced subresource URLs, and signed CDN
+        // links routinely exceed the caller-facing cap.
+        let long = format!("https://example.com/{}", "a".repeat(3000));
+        assert!(validate_safe_url(&url(&long)).is_err());
+        assert!(validate_safe_host(&url(&long)).is_ok());
     }
 
     #[test]

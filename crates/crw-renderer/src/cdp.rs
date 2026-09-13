@@ -3,6 +3,7 @@ use crw_core::error::{CrwError, CrwResult};
 use crw_core::types::{CapturedNetworkResponse, FetchResult};
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::sync::LazyLock;
 use std::sync::Mutex as StdMutex;
 use std::sync::atomic::{AtomicI64, Ordering};
 use std::time::{Duration, Instant};
@@ -750,18 +751,14 @@ fn build_auth_response(request_id: &str, creds: Option<(&str, &str)>) -> serde_j
 /// suffix already applied, captured by move into this future so concurrent
 /// pool slots cannot cross-contaminate credentials.
 ///
-/// `continue_paused` controls who owns `Fetch.requestPaused`: in auth-only mode
-/// (no interception pump) this pump must plainly continue every paused request,
-/// because `Fetch.enable` is on with `[*]` patterns and nothing else would
-/// resume them — the page would hang. When the intercept pump runs alongside
-/// (auth + interception) it owns `requestPaused`, so this stays `false` to avoid
-/// two pumps double-continuing the same request.
+/// This pump answers `Fetch.authRequired` only. `Fetch.requestPaused` is owned
+/// by [`run_intercept_pump`], which now runs on every navigation, so answering
+/// paused requests here too would double-continue them.
 async fn run_auth_pump(
     conn: &CdpConnection,
     mut rx: broadcast::Receiver<CdpEvent>,
     creds: Option<(String, String)>,
     session_id: &str,
-    continue_paused: bool,
 ) {
     let cmd_timeout = Duration::from_secs(2);
     loop {
@@ -771,23 +768,6 @@ async fn run_auth_pump(
             Err(broadcast::error::RecvError::Closed) => return,
         };
         if ev.session_id.as_deref() != Some(session_id) {
-            continue;
-        }
-        if ev.method == "Fetch.requestPaused" {
-            if !continue_paused {
-                continue;
-            }
-            let Some(request_id) = ev.params.get("requestId").and_then(|v| v.as_str()) else {
-                continue;
-            };
-            let _ = conn
-                .send_recv(
-                    "Fetch.continueRequest",
-                    serde_json::json!({ "requestId": request_id }),
-                    Some(session_id),
-                    cmd_timeout,
-                )
-                .await;
             continue;
         }
         if ev.method != "Fetch.authRequired" {
@@ -815,33 +795,247 @@ async fn run_auth_pump(
     }
 }
 
-/// Drive `Fetch.requestPaused` events through the blocklist. Runs forever
-/// until cancelled (the future is dropped when the work future completes
-/// inside `tokio::select!`). Each paused request is either failed
-/// (`BlockedByClient`) or continued. Metrics are incremented per block.
+/// Why the browser may not make this request, or `None` to allow it.
 ///
-/// Serialisation: each handler awaits a CDP roundtrip (`Fetch.continueRequest`
-/// or `Fetch.failRequest`) before consuming the next event. This is fine in
-/// practice — chrome queues paused requests internally and the per-handler
-/// CDP roundtrip is sub-millisecond on a local socket. Spawning per-handler
-/// would buy parallelism but require `Arc<CdpConnection>` plumbing.
+/// The route layer validates only the URL the caller supplied. Everything the
+/// page does afterwards — server redirects, `<meta refresh>`, JS navigation,
+/// same-process iframes, XHR and `fetch` — is issued by the browser's own
+/// network stack, so an interception handler is the only point where those
+/// destinations can be checked. This is the CDP equivalent of what
+/// [`crw_core::url_safety::safe_redirect_policy`] already does for the
+/// HTTP-only tier.
+async fn outbound_block_label(req_url: &str, memo: &ResolveMemo) -> Option<&'static str> {
+    let Ok(parsed) = url::Url::parse(req_url) else {
+        // Chrome sends absolute, normalised URLs; anything we cannot parse is
+        // anomalous, so fail closed.
+        return Some(BLOCK_LABEL_POLICY);
+    };
+    // Schemes that never reach a socket. Failing them would break ordinary
+    // pages for no gain. An allowlist, not "anything that is not http(s)":
+    // `validate_safe_host` deliberately dropped the scheme rule, so this is the
+    // only scheme gate left on this path.
+    if matches!(parsed.scheme(), "data" | "blob" | "about") {
+        return None;
+    }
+    // Cheap first: literal addresses and the hostname deny list, no DNS.
+    //
+    // `validate_safe_host`, not `validate_safe_url`: the URL-shape rules
+    // (2048-char cap, scheme) belong at the route layer, where the caller chose
+    // the URL. A signed CDN subresource past the cap is not an SSRF, and
+    // failing it here would silently drop a legitimate request.
+    if !matches!(parsed.scheme(), "http" | "https")
+        || crw_core::url_safety::validate_safe_host(&parsed).is_err()
+    {
+        return Some(BLOCK_LABEL_POLICY);
+    }
+    let Some(port) = parsed.port_or_known_default() else {
+        return Some(BLOCK_LABEL_POLICY);
+    };
+    let key = format!("{}:{port}", parsed.host_str().unwrap_or_default());
+    // Per-render memo, not a process-wide cache with a TTL. One page emits many
+    // requests to a handful of hosts (a github.com navigation pauses 14 requests
+    // across 2 hosts), and re-resolving each one queues behind `RESOLVE_LIMIT`
+    // for no benefit — the browser is reusing its own cached address anyway. The
+    // rebinding window this opens is one page load, not a cache lifetime, which
+    // is why a shared TTL cache was rejected.
+    //
+    // Only allow verdicts are memoised. A denial can come from a transient
+    // resolver failure (SERVFAIL under load is the common failure mode, not a
+    // stall), and latching that would block a legitimate host for the rest of
+    // the render with no retry.
+    if memo.lock().ok().and_then(|m| m.get(&key).copied()) == Some(true) {
+        return None;
+    }
+    // Bounded end to end. `RESOLVE_LIMIT` is process-wide and FIFO-fair, so an
+    // unbounded wait here would be a hang one layer below the pump: the handler
+    // never answers its paused request and the page stalls to the nav budget.
+    // Fails closed on expiry, which costs one subresource rather than the page.
+    let resolved = tokio::time::timeout(OUTBOUND_CHECK_BUDGET, async {
+        let _permit = RESOLVE_LIMIT.acquire().await;
+        crw_core::url_safety::validate_safe_host_resolved(&parsed).await
+    })
+    .await;
+    match resolved {
+        Ok(Ok(())) => {
+            if let Ok(mut m) = memo.lock() {
+                m.insert(key, true);
+            }
+            None
+        }
+        // A resolved address inside a blocked range is a policy decision; a
+        // resolver that errored or ran out of budget is not, and the two have
+        // very different causes in production. Separate labels so a DNS
+        // brown-out is distinguishable from an actual attempt.
+        Ok(Err(_)) | Err(_) => Some(BLOCK_LABEL_UNRESOLVED),
+    }
+}
+
+/// Host verdicts already decided during one render. See [`outbound_allowed`].
+type ResolveMemo = Arc<StdMutex<HashMap<String, bool>>>;
+
+/// The destination is inside a range or on a host we refuse to reach.
+const BLOCK_LABEL_POLICY: &str = "outbound";
+/// The destination could not be proved safe: resolver error or budget expiry.
+const BLOCK_LABEL_UNRESOLVED: &str = "outbound_unresolved";
+
+/// Ceiling on one destination check, queueing included. Above
+/// `url_safety::DNS_RESOLVE_TIMEOUT` (8s) so a legitimately slow resolver — a
+/// CNAME chain needing a UDP retry, the case that bound was chosen for — can
+/// still finish, and under the navigation budget so a stalled check cannot own
+/// the page.
+const OUTBOUND_CHECK_BUDGET: Duration = Duration::from_secs(10);
+
+/// Process-wide ceiling on concurrent destination lookups.
+///
+/// Every render on every tier now pauses every request, so without a global
+/// bound a few hundred concurrent scrapes would put an unbounded number of
+/// `getaddrinfo` calls on the shared blocking pool, which HTML extraction and
+/// PDF parsing also use. Bounding here rather than per pump keeps the receiver
+/// loop free to keep draining CDP events: a pump that stops reading its
+/// broadcast channel starts dropping `Fetch.requestPaused` events, and a
+/// dropped one is never answered.
+static RESOLVE_LIMIT: LazyLock<tokio::sync::Semaphore> =
+    LazyLock::new(|| tokio::sync::Semaphore::new(256));
+
+/// Answer every `Fetch.requestPaused` event: validate the destination, apply
+/// the ad/resource blocklist when one is configured, then continue or fail
+/// (`BlockedByClient`). Runs forever until cancelled (the future is dropped
+/// when the work future completes inside `tokio::select!`).
+///
+/// `blocklist` is `None` when resource interception is configured off for this
+/// URL; the destination check still runs, because it is what keeps the browser
+/// from being driven into the operator's own network.
+///
+/// Concurrency: handlers run in a bounded `FuturesUnordered` rather than inline.
+/// The destination check can cost a DNS lookup, and the event receiver must not
+/// block on it: the broadcast ring is shared with every other CDP event, and a
+/// `Lagged` drop of a `Fetch.requestPaused` is unrecoverable — that request is
+/// never answered and hangs until the navigation budget expires. Saturation
+/// applies backpressure instead of failing requests; answering our own
+/// saturation with `failRequest` would drop real subresources and surface as a
+/// badly rendered page rather than as an error.
 async fn run_intercept_pump(
     conn: &CdpConnection,
     mut rx: broadcast::Receiver<CdpEvent>,
-    blocklist: &Blocklist,
+    blocklist: Option<&Blocklist>,
     session_id: &str,
 ) {
+    use futures::future::{BoxFuture, FutureExt};
+    use futures::stream::{FuturesUnordered, StreamExt};
+
     let cmd_timeout = Duration::from_secs(2);
+    // Boxed because two differently-shaped handlers share the set: enabling
+    // interception on a newly attached child target, and answering a paused
+    // request.
+    let mut in_flight: FuturesUnordered<BoxFuture<'_, ()>> = FuturesUnordered::new();
+    // Child sessions auto-attached under our page target (out-of-process
+    // iframes, workers). Their requests carry their own session id, so they
+    // have to be recognised as ours — and only ours: a pooled connection is
+    // shared with other concurrent scrapes, and answering their paused
+    // requests would double-continue them.
+    let mut child_sessions: std::collections::HashSet<String> = std::collections::HashSet::new();
+    let memo: ResolveMemo = Arc::new(StdMutex::new(HashMap::new()));
+
     loop {
-        let ev = match rx.recv().await {
+        // No hard in-flight cap: a cap that makes this loop stop calling
+        // `rx.recv()` is how `Fetch.requestPaused` events get dropped, and a
+        // dropped one hangs its request until the navigation budget expires.
+        // Resolver load is bounded globally by `RESOLVE_LIMIT` instead.
+        //
+        // Deliberately not `biased`: preferring the receiver would let a busy
+        // event stream starve the handlers, and a handler that never runs is a
+        // request that is never answered. Fair polling keeps both moving. An
+        // empty set yields `None`, which disables that branch.
+        let received = tokio::select! {
+            ev = rx.recv() => ev,
+            Some(()) = in_flight.next() => continue,
+        };
+        let ev = match received {
             Ok(ev) => ev,
-            Err(broadcast::error::RecvError::Lagged(_)) => continue,
+            Err(broadcast::error::RecvError::Lagged(dropped)) => {
+                // Dropped events are not equally recoverable. A missed
+                // `Fetch.requestPaused` is resumed by the cleanup
+                // `Fetch.disable`; a missed `Target.attachedToTarget` leaves
+                // that child paused for the rest of the render, because nothing
+                // else sends `Runtime.runIfWaitingForDebugger`. Neither is
+                // fixable here, so make it visible instead of silent.
+                tracing::warn!(
+                    dropped,
+                    "CDP event backlog overflowed; a paused request or child target may stall"
+                );
+                crw_core::metrics::metrics()
+                    .chrome_blocked_requests_total
+                    .with_label_values(&["event_lag"])
+                    .inc();
+                continue;
+            }
             Err(broadcast::error::RecvError::Closed) => return,
         };
+        // A child target attached under our page: enable interception on it too,
+        // otherwise its requests never pause. This is what covers an
+        // out-of-process iframe, whose navigation belongs to its own target and
+        // would otherwise render into a screenshot unchecked. Browser-scope
+        // targets (service workers) still do not attach to a page session and
+        // remain outside this; on LightPanda they are covered by
+        // `--block-private-networks` instead.
+        let attach_parent_is_ours = ev
+            .session_id
+            .as_deref()
+            .is_some_and(|s| s == session_id || child_sessions.contains(s));
+        if ev.method == "Target.attachedToTarget" && attach_parent_is_ours {
+            if let Some(child) = ev.params.get("sessionId").and_then(|v| v.as_str()) {
+                child_sessions.insert(child.to_string());
+                let child = child.to_string();
+                in_flight.push(
+                    async move {
+                        // The child is attached paused, so its FIRST request —
+                        // the one that matters, an out-of-process iframe's own
+                        // navigation — cannot outrun this. Resume it only after
+                        // interception is on, and resume it unconditionally so a
+                        // browser that rejected `Fetch.enable` is not left
+                        // frozen.
+                        let _ = conn
+                            .send_recv(
+                                "Fetch.enable",
+                                serde_json::json!({ "patterns": [{ "urlPattern": "*" }] }),
+                                Some(&child),
+                                cmd_timeout,
+                            )
+                            .await;
+                        // Auto-attach does not cascade, so ask the child to
+                        // attach ITS children too; otherwise an iframe nested
+                        // inside an out-of-process iframe never surfaces.
+                        let _ = conn
+                            .send_recv(
+                                "Target.setAutoAttach",
+                                serde_json::json!({
+                                    "autoAttach": true,
+                                    "waitForDebuggerOnStart": true,
+                                    "flatten": true,
+                                }),
+                                Some(&child),
+                                cmd_timeout,
+                            )
+                            .await;
+                        let _ = conn
+                            .send_recv(
+                                "Runtime.runIfWaitingForDebugger",
+                                serde_json::json!({}),
+                                Some(&child),
+                                cmd_timeout,
+                            )
+                            .await;
+                    }
+                    .boxed(),
+                );
+            }
+            continue;
+        }
         if ev.method != "Fetch.requestPaused" {
             continue;
         }
-        if ev.session_id.as_deref() != Some(session_id) {
+        let event_session = ev.session_id.clone().unwrap_or_default();
+        if event_session != session_id && !child_sessions.contains(&event_session) {
             continue;
         }
         let request_id = ev
@@ -863,37 +1057,52 @@ async fn run_intercept_pump(
             .get("request")
             .and_then(|r| r.get("url"))
             .and_then(|v| v.as_str())
-            .unwrap_or("");
-        if let Some(reason) = blocklist.should_block(resource_type, req_url) {
-            let label = match reason {
+            .unwrap_or("")
+            .to_string();
+
+        // Blocklist first: a blocked request never leaves the browser, so there
+        // is no destination to validate and no lookup to pay for.
+        let blocked_by_list = blocklist
+            .and_then(|list| list.should_block(resource_type, &req_url))
+            .map(|reason| match reason {
                 BlockReason::ResourceType => "resource_type",
                 BlockReason::Host => "host",
-            };
-            crw_core::metrics::metrics()
-                .chrome_blocked_requests_total
-                .with_label_values(&[label])
-                .inc();
-            let _ = conn
-                .send_recv(
-                    "Fetch.failRequest",
-                    serde_json::json!({
-                        "requestId": request_id,
-                        "errorReason": "BlockedByClient",
-                    }),
-                    Some(session_id),
-                    cmd_timeout,
-                )
-                .await;
-        } else {
-            let _ = conn
-                .send_recv(
-                    "Fetch.continueRequest",
-                    serde_json::json!({ "requestId": request_id }),
-                    Some(session_id),
-                    cmd_timeout,
-                )
-                .await;
-        }
+            });
+
+        let memo = memo.clone();
+        in_flight.push(
+            async move {
+                let block_label = match blocked_by_list {
+                    Some(label) => Some(label),
+                    None => outbound_block_label(&req_url, &memo).await,
+                };
+                let (method, params) = match block_label {
+                    Some(label) => {
+                        crw_core::metrics::metrics()
+                            .chrome_blocked_requests_total
+                            .with_label_values(&[label])
+                            .inc();
+                        (
+                            "Fetch.failRequest",
+                            serde_json::json!({
+                                "requestId": request_id,
+                                "errorReason": "BlockedByClient",
+                            }),
+                        )
+                    }
+                    None => (
+                        "Fetch.continueRequest",
+                        serde_json::json!({ "requestId": request_id }),
+                    ),
+                };
+                // Answer on the session the event arrived on, which for a child
+                // target is not ours.
+                let _ = conn
+                    .send_recv(method, params, Some(&event_session), cmd_timeout)
+                    .await;
+            }
+            .boxed(),
+        );
     }
 }
 
@@ -2044,20 +2253,26 @@ impl CdpRenderer {
             });
         let auth_active = effective_creds.is_some();
 
-        // Optionally enable request interception. Must be done before
-        // `Page.navigate` because `Fetch.enable` pauses the document request
-        // too — pump must already be consuming `Fetch.requestPaused` by then.
+        // Enable request interception. Must be done before `Page.navigate`
+        // because `Fetch.enable` pauses the document request too — the pump must
+        // already be consuming `Fetch.requestPaused` by then.
         //
-        // Patterns are ALWAYS `[*]` when we enable Fetch. Chrome rejects an
-        // empty `patterns` array together with `handleAuthRequests: true`
-        // (`-32602 Can't specify empty patterns with handleAuth set`), which
-        // silently broke every proxy that needs auth — e.g. DataImpulse — on the
-        // Chrome path. With `[*]` Chrome pauses every request via
-        // `Fetch.requestPaused`, so a consumer MUST continue them: the intercept
-        // pump (when interception is on) or the auth pump's `continue_paused`
-        // branch (auth-only). Without that consumer every request would hang.
+        // Unconditional: the pump is what validates every destination the
+        // browser reaches on its own (redirects, JS navigation, iframes, XHR),
+        // which the route-layer check cannot see. `intercept_active` now decides
+        // only whether the ad/resource blocklist runs alongside that check.
+        //
+        // Patterns are ALWAYS `[*]`. Chrome rejects an empty `patterns` array
+        // together with `handleAuthRequests: true` (`-32602 Can't specify empty
+        // patterns with handleAuth set`), which silently broke every proxy that
+        // needs auth — e.g. DataImpulse — on the Chrome path. With `[*]` the
+        // browser pauses every request, so the pump MUST answer them all or the
+        // page hangs.
+        //
+        // A failure here propagates: a tier whose destinations we cannot check
+        // must not be used, and the ladder falls through to the next one.
         let intercept_active = self.intercept_active_for(url);
-        if intercept_active || auth_active {
+        {
             let mut params = serde_json::Map::new();
             params.insert(
                 "patterns".into(),
@@ -2074,6 +2289,28 @@ impl CdpRenderer {
             )
             .await?;
         }
+
+        // Auto-attach child targets (out-of-process iframes, workers) so the
+        // pump can enable interception on them as they appear. Without this
+        // their requests never surface on our session and escape the
+        // destination check entirely. `waitForDebuggerOnStart: true` because the
+        // request that matters is the child's own first navigation, which would
+        // otherwise outrun `Fetch.enable`; the pump resumes every child it sees,
+        // pass or fail, so nothing stays frozen. Best-effort — a browser without
+        // the command keeps the previous behaviour rather than failing the
+        // render.
+        let _ = conn
+            .send_recv(
+                "Target.setAutoAttach",
+                serde_json::json!({
+                    "autoAttach": true,
+                    "waitForDebuggerOnStart": true,
+                    "flatten": true,
+                }),
+                Some(&session_id),
+                self.page_timeout,
+            )
+            .await;
 
         // Network-idle tracker fed by a sibling pump (spawned below in the
         // select!). Created before the `work` future because `work` borrows
@@ -2154,99 +2391,59 @@ impl CdpRenderer {
         // traffic settles before body innerText hits the threshold.
         let idle_pump = run_network_idle_pump(conn.subscribe(), net_tracker.clone(), &session_id);
 
-        let outcome = match (intercept_active, auth_active) {
-            (true, true) => {
-                let intercept_pump =
-                    run_intercept_pump(conn, conn.subscribe(), &self.blocklist, &session_id);
-                let auth_pump = run_auth_pump(
-                    conn,
-                    conn.subscribe(),
-                    effective_creds.clone(),
-                    &session_id,
-                    false,
-                );
-                tokio::select! {
-                    biased;
-                    res = work => res,
-                    _ = intercept_pump => Err(CrwError::RendererError(
-                        "interception pump exited unexpectedly".into(),
-                    )),
-                    _ = auth_pump => Err(CrwError::RendererError(
-                        "auth pump exited unexpectedly".into(),
-                    )),
-                    _ = cap_pump => Err(CrwError::RendererError(
-                        "network capture pump exited unexpectedly".into(),
-                    )),
-                    _ = idle_pump => Err(CrwError::RendererError(
-                        "network idle pump exited unexpectedly".into(),
-                    )),
-                }
+        // The intercept pump always runs; only the blocklist half is optional.
+        let pump_blocklist = intercept_active.then_some(&self.blocklist);
+        let intercept_pump =
+            run_intercept_pump(conn, conn.subscribe(), pump_blocklist, &session_id);
+        let outcome = if auth_active {
+            let auth_pump =
+                run_auth_pump(conn, conn.subscribe(), effective_creds.clone(), &session_id);
+            tokio::select! {
+                biased;
+                res = work => res,
+                _ = intercept_pump => Err(CrwError::RendererError(
+                    "interception pump exited unexpectedly".into(),
+                )),
+                _ = auth_pump => Err(CrwError::RendererError(
+                    "auth pump exited unexpectedly".into(),
+                )),
+                _ = cap_pump => Err(CrwError::RendererError(
+                    "network capture pump exited unexpectedly".into(),
+                )),
+                _ = idle_pump => Err(CrwError::RendererError(
+                    "network idle pump exited unexpectedly".into(),
+                )),
             }
-            (true, false) => {
-                let intercept_pump =
-                    run_intercept_pump(conn, conn.subscribe(), &self.blocklist, &session_id);
-                tokio::select! {
-                    biased;
-                    res = work => res,
-                    _ = intercept_pump => Err(CrwError::RendererError(
-                        "interception pump exited unexpectedly".into(),
-                    )),
-                    _ = cap_pump => Err(CrwError::RendererError(
-                        "network capture pump exited unexpectedly".into(),
-                    )),
-                    _ = idle_pump => Err(CrwError::RendererError(
-                        "network idle pump exited unexpectedly".into(),
-                    )),
-                }
-            }
-            (false, true) => {
-                let auth_pump = run_auth_pump(
-                    conn,
-                    conn.subscribe(),
-                    effective_creds.clone(),
-                    &session_id,
-                    true,
-                );
-                tokio::select! {
-                    biased;
-                    res = work => res,
-                    _ = auth_pump => Err(CrwError::RendererError(
-                        "auth pump exited unexpectedly".into(),
-                    )),
-                    _ = cap_pump => Err(CrwError::RendererError(
-                        "network capture pump exited unexpectedly".into(),
-                    )),
-                    _ = idle_pump => Err(CrwError::RendererError(
-                        "network idle pump exited unexpectedly".into(),
-                    )),
-                }
-            }
-            (false, false) => {
-                tokio::select! {
-                    biased;
-                    res = work => res,
-                    _ = cap_pump => Err(CrwError::RendererError(
-                        "network capture pump exited unexpectedly".into(),
-                    )),
-                    _ = idle_pump => Err(CrwError::RendererError(
-                        "network idle pump exited unexpectedly".into(),
-                    )),
-                }
+        } else {
+            tokio::select! {
+                biased;
+                res = work => res,
+                _ = intercept_pump => Err(CrwError::RendererError(
+                    "interception pump exited unexpectedly".into(),
+                )),
+                _ = cap_pump => Err(CrwError::RendererError(
+                    "network capture pump exited unexpectedly".into(),
+                )),
+                _ = idle_pump => Err(CrwError::RendererError(
+                    "network idle pump exited unexpectedly".into(),
+                )),
             }
         };
 
         // Cleanup: `Fetch.disable` auto-continues any still-paused requests
         // per CDP docs, which avoids leaks if the pump was cancelled mid-flight.
-        if intercept_active || auth_active {
-            let _ = conn
-                .send_recv(
-                    "Fetch.disable",
-                    serde_json::json!({}),
-                    Some(&session_id),
-                    Duration::from_secs(2),
-                )
-                .await;
-        }
+        // Unconditional, matching `Fetch.enable` above: pooled connections are
+        // reused across requests, so leaving Fetch enabled on a slot would make
+        // the next navigation on it pause every request with no consumer and
+        // hang until the budget expires, for the life of the slot.
+        let _ = conn
+            .send_recv(
+                "Fetch.disable",
+                serde_json::json!({}),
+                Some(&session_id),
+                Duration::from_secs(2),
+            )
+            .await;
         // Capture final URL after any redirects, before tearing down the target.
         // Best-effort: failures map to None and never propagate.
         let final_href = match outcome.as_ref() {
@@ -2434,7 +2631,10 @@ fn is_spa_text_ready(text_len: i64) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::{CdpRenderer, build_auth_response, is_content_stable, lightpanda_safe_ua};
+    use super::{
+        CdpRenderer, build_auth_response, is_content_stable, lightpanda_safe_ua,
+        outbound_block_label,
+    };
 
     #[test]
     fn auth_response_provides_credentials_when_creds_set() {
@@ -2690,6 +2890,62 @@ mod tests {
         panic!(
             "cancellation did not reap target; recorded = {:?}",
             recorded.lock().unwrap()
+        );
+    }
+
+    #[tokio::test]
+    async fn outbound_guard_rejects_internal_destinations() {
+        let memo: super::ResolveMemo = Default::default();
+        // Literal addresses the route-layer check would have rejected, arriving
+        // here because a redirect or in-page navigation produced them.
+        assert!(
+            outbound_block_label("http://169.254.169.254/latest/meta-data/", &memo)
+                .await
+                .is_some()
+        );
+        assert!(
+            outbound_block_label("http://10.0.0.1/", &memo)
+                .await
+                .is_some()
+        );
+        assert!(
+            outbound_block_label("http://192.168.1.1/admin", &memo)
+                .await
+                .is_some()
+        );
+        assert!(
+            outbound_block_label("http://[::1]:8080/", &memo)
+                .await
+                .is_some()
+        );
+        assert!(
+            outbound_block_label("http://localhost:5432/", &memo)
+                .await
+                .is_some()
+        );
+        // Unparseable is anomalous; fail closed.
+        assert!(outbound_block_label("not a url", &memo).await.is_some());
+    }
+
+    #[tokio::test]
+    async fn outbound_guard_allows_ordinary_and_non_network_requests() {
+        let memo: super::ResolveMemo = Default::default();
+        // No assertion on a real public host: that path resolves DNS and the
+        // check fails closed, so it would fail on an offline runner rather than
+        // testing anything. The reject cases above are all literal or
+        // deny-listed hosts and need no lookup.
+        //
+        // Never reaches a socket, and `validate_safe_url` would reject the
+        // scheme, so it has to short-circuit before that check.
+        assert!(
+            outbound_block_label("data:image/png;base64,iVBORw0KGgo=", &memo)
+                .await
+                .is_none()
+        );
+        assert!(
+            outbound_block_label("blob:https://example.com/1234", &memo)
+                .await
+                .is_none()
         );
     }
 }
