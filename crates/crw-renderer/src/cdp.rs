@@ -2489,10 +2489,16 @@ impl CdpRenderer {
                 Ok(Ok(html)) => (html, false),
                 Ok(Err(err)) => return Err(err),
                 Err(_) => {
+                    // Name the tier that actually ran out, for the same reason
+                    // `budget_truncated_warning()` does: this struct drives every
+                    // CDP-speaking renderer, so a hardcoded "chrome" blamed Chrome
+                    // for LightPanda's much smaller budget and sent anyone reading
+                    // the logs to the wrong tier.
                     tracing::info!(
                         url,
+                        renderer = %self.name,
                         budget_ms = nav_budget.as_millis() as u64,
-                        "chrome nav budget hit; attempting partial snapshot"
+                        "nav budget hit; attempting partial snapshot"
                     );
                     let _ = conn
                         .send_recv(
