@@ -13,9 +13,12 @@ and the project uses [Semantic Versioning](https://semver.org/).
   `/admin/breakers/reset` now sit behind the API-key auth boundary. When
   `[auth].api_keys` is set, Prometheus scrapes must send a Bearer token.
 - The Camofox tier refuses to return a page whose final URL (after redirects
-  and client-side navigation) is a private or internal address, and
-  `docker-compose.yml` sets `CAMOFOX_ALLOW_PRIVATE_NETWORK=false` so
-  camofox-browser blocks those requests inside the browser too.
+  and client-side navigation) is a private or internal address. This guards
+  what crw returns only: requests the browser makes on the way (a redirect hop,
+  subresources) still reach the network. camofox-browser's own private-network
+  check covers the URL it is asked to open, not redirects — verified live.
+- A Camofox fetch that lands on Firefox's own error page ("Problem loading
+  page") now fails as a navigation failure instead of returning that page.
 - CORS is no longer permissive. Browser callers need their origin listed in
   `server.cors_allowed_origins`; the default sends no CORS headers.
 

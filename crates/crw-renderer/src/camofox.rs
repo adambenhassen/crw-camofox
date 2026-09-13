@@ -625,9 +625,12 @@ impl PageFetcher for CamofoxRenderer {
         //    after the wait so client-side redirects have happened. The probe
         //    failing means we cannot tell where the page is, so it fails closed.
         //
-        //    This guards what crw RETURNS. Subresource requests the browser makes
-        //    along the way are only stopped by camofox-browser's own
-        //    private-network guard (`CAMOFOX_ALLOW_PRIVATE_NETWORK=false`).
+        //    This guards what crw RETURNS. Requests the browser makes along the
+        //    way (a redirect hop, subresources) still reach the network:
+        //    camofox-browser's `CAMOFOX_ALLOW_PRIVATE_NETWORK=false` only checks
+        //    the URL it is asked to open (verified live: a redirect to a compose
+        //    service was followed). Network-level egress rules are the only
+        //    complete control.
         if let Err(e) = self.check_final_url(&tab_id, deadline).await {
             self.close_tab(&tab_id).await;
             return Err(e);
