@@ -93,6 +93,15 @@ impl Clearance {
             .join("; ")
     }
 
+    /// Whether the cached `cf_clearance` applies to `host`. The cache is keyed
+    /// by registrable host, so an entry captured on a sibling subdomain with a
+    /// host-only cookie is found for `host` without holding a cookie for it.
+    pub fn covers(&self, host: &str) -> bool {
+        self.cookies
+            .iter()
+            .any(|c| c.name == CLEARANCE_COOKIE && cookie_matches_host(&c.domain, host))
+    }
+
     pub fn expired(&self) -> bool {
         Instant::now() >= self.expires_at
     }
@@ -262,6 +271,19 @@ mod tests {
         )
         .unwrap();
         assert_eq!(c.cookie_header("www.a.com"), "cf_clearance=cf_clearance-v");
+    }
+
+    #[test]
+    fn host_only_clearance_does_not_cover_a_sibling_subdomain() {
+        let c = Clearance::from_browser(
+            vec![cookie("cf_clearance", "www.a.com", -1.0)],
+            "ua".into(),
+            0.0,
+        )
+        .unwrap();
+        assert!(c.covers("www.a.com"));
+        assert!(!c.covers("a.com"));
+        assert!(!c.covers("shop.a.com"));
     }
 
     #[tokio::test]

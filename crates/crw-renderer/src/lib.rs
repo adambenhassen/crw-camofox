@@ -1087,8 +1087,8 @@ impl FallbackRenderer {
             return None;
         }
         match self.clearance.get(&host).await {
-            Some(c) => Some((host, c)),
-            None => {
+            Some(c) if c.covers(&host) => Some((host, c)),
+            _ => {
                 metrics()
                     .clearance_reuse_total
                     .with_label_values(&["miss"])
