@@ -1377,6 +1377,32 @@ mod tests {
         assert!(classify_error_page_wall(404, html).is_none());
     }
 
+    /// Bodies the renderer returns after its JS ladder fails. The ladder's own
+    /// verdict is not carried on `FetchResult`, so these must be refused here.
+    #[test]
+    fn fallback_wall_shapes_are_classified_downstream() {
+        // AWS WAF answers HTTP 202 with an empty body; the only signal is a header.
+        for ct in [Some("text/html"), None] {
+            let b = classify_block(202, ct, "", Some(""), THRESH, "https://a.example/", None)
+                .unwrap_or_else(|| panic!("empty 202 (content-type {ct:?}) must not ship"));
+            assert_eq!(b.vendor, crw_core::types::STRUCTURAL_FAILURE_VENDOR);
+        }
+        let cf = "<html><head><title>Just a moment...</title></head><body>\
+                  <script>window._cf_chl_opt={cvId:'3'};</script>\
+                  Enable JavaScript and cookies to continue</body></html>";
+        let b = classify_block(
+            403,
+            Some("text/html"),
+            cf,
+            Some("Enable JavaScript and cookies to continue"),
+            THRESH,
+            "https://a.example/",
+            None,
+        )
+        .expect("a Cloudflare challenge must not ship");
+        assert_eq!(b.vendor, "cloudflare");
+    }
+
     #[test]
     fn js_escalation_rejects_a_thin_result_that_adds_nothing() {
         // nowsecure.nl: both tiers return the same 45-byte page.
