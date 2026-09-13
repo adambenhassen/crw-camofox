@@ -911,6 +911,13 @@ mod github_api_tests {
             .respond_with(ResponseTemplate::new(200).set_body_json(json!({ "ok": true })))
             .mount(&server)
             .await;
+        // The abandoned t1 is closed, not just forgotten.
+        Mock::given(method("DELETE"))
+            .and(path("/tabs/t1"))
+            .respond_with(ResponseTemplate::new(200))
+            .expect(1)
+            .mount(&server)
+            .await;
 
         for tab in ["t1", "t2"] {
             Mock::given(method("POST"))
@@ -948,6 +955,7 @@ mod github_api_tests {
             "recovery should be transparent, got {:?}",
             second.unresponsive_engines
         );
+        server.verify().await;
     }
 
     /// A failed camofox call carries the server's own `error` message in the
