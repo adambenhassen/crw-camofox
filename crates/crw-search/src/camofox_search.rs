@@ -59,6 +59,11 @@ const RETRY_BACKOFF: Duration = Duration::from_millis(750);
 /// after a timeout (see [`CamofoxSearchClient::close_tab`]).
 const CLEANUP_BUDGET: Duration = Duration::from_secs(2);
 
+/// Per-link cap on resolving a Google redirect link. Resolution runs while the
+/// warm-tab mutex is held, so a slow answer must not stall the next search; a
+/// link that misses it keeps its redirect URL.
+const REDIRECT_RESOLVE_TIMEOUT: Duration = Duration::from_secs(3);
+
 /// JS evaluated in the Google SERP to extract result rows. Returns a JSON
 /// *string* (via `JSON.stringify`) so the camofox `/evaluate` `result` field
 /// comes back as a string we can parse. Selectors are intentionally broad and
@@ -192,6 +197,8 @@ struct GithubRepo {
 /// treat the two interchangeably.
 pub struct CamofoxSearchClient {
     http: reqwest::Client,
+    /// Never follows redirects: reads the `Location` of Google's result links.
+    redirect_http: reqwest::Client,
     base_url: String,
     api_key: Option<String>,
     /// Optional GitHub PAT for the `github` engine, which uses the GitHub REST
@@ -227,8 +234,14 @@ impl CamofoxSearchClient {
             .timeout(timeout)
             .build()
             .unwrap_or_else(|_| reqwest::Client::new());
+        let redirect_http = reqwest::Client::builder()
+            .timeout(timeout.min(REDIRECT_RESOLVE_TIMEOUT))
+            .redirect(reqwest::redirect::Policy::none())
+            .build()
+            .unwrap_or_else(|_| reqwest::Client::new());
         Self {
             http,
+            redirect_http,
             base_url,
             api_key,
             github_token,
@@ -516,6 +529,26 @@ impl CamofoxSearchClient {
                 .map_err(|e| SearchError::InvalidResponse(format!("camofox: scrape JSON: {e}")))?
         };
 
+        // Google now links every result through `/goto?url=<opaque token>`, and
+        // the real URL is nowhere else in the result markup. Resolve them all at
+        // once; a link that cannot be resolved keeps its redirect URL.
+        let mut rows = rows;
+        if matches!(engine, SearchEngine::Google) {
+            let resolved = futures::future::join_all(rows.iter().map(|r| async {
+                if is_google_redirect(&r.url) {
+                    self.resolve_redirect(&r.url).await
+                } else {
+                    None
+                }
+            }))
+            .await;
+            for (row, target) in rows.iter_mut().zip(resolved) {
+                if let Some(target) = target {
+                    row.url = target;
+                }
+            }
+        }
+
         let n = rows.len();
         let label = engine.label();
         let results = rows
@@ -542,6 +575,28 @@ impl CamofoxSearchClient {
             .collect();
 
         Ok(results)
+    }
+
+    /// The absolute http(s) `Location` a redirect link answers with, without
+    /// following it. `None` when the link does not redirect or cannot be reached.
+    async fn resolve_redirect(&self, url: &str) -> Option<String> {
+        let resp = match self.redirect_http.get(url).send().await {
+            Ok(resp) => resp,
+            Err(e) => {
+                tracing::debug!(error = %e.without_url(), "camofox: redirect link not resolved");
+                return None;
+            }
+        };
+        if !resp.status().is_redirection() {
+            return None;
+        }
+        let location = resp
+            .headers()
+            .get(reqwest::header::LOCATION)?
+            .to_str()
+            .ok()?;
+        let target = url::Url::parse(location).ok()?;
+        matches!(target.scheme(), "http" | "https").then(|| target.to_string())
     }
 
     /// Search GitHub repositories via the REST Search API. Used instead of the
@@ -613,6 +668,19 @@ impl CamofoxSearchClient {
 /// order is preserved; downstream `rerank` does the final ordering.
 /// Concise, user-facing reason for an engine failure — no internal detail, just
 /// enough to tell a timeout/block apart. Feeds `unresponsive_engines`.
+/// A Google result link that redirects to the real result (`/goto?url=` or
+/// `/url?q=`). The host is matched exactly: a scraped href is page content, and
+/// a pattern such as `google.<tld>` would send crw's own request to any domain
+/// a result can name.
+fn is_google_redirect(url: &str) -> bool {
+    let Ok(u) = url::Url::parse(url) else {
+        return false;
+    };
+    u.scheme() == "https"
+        && matches!(u.host_str(), Some("www.google.com" | "google.com"))
+        && matches!(u.path(), "/goto" | "/url")
+}
+
 fn engine_failure_reason(e: &SearchError) -> String {
     match e {
         SearchError::Timeout => "timed out".to_string(),
@@ -789,6 +857,82 @@ mod extractor_tests {
         assert_eq!(resp.unresponsive_engines.len(), 1);
         assert_eq!(resp.unresponsive_engines[0][0], "bing");
         assert_eq!(resp.unresponsive_engines[0][1], "timed out");
+    }
+}
+
+#[cfg(test)]
+mod google_redirect_tests {
+    use super::*;
+    use wiremock::matchers::{method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    #[test]
+    fn google_redirect_links_are_recognised() {
+        assert!(is_google_redirect(
+            "https://www.google.com/goto?url=CAESVwHrOzAV"
+        ));
+        assert!(is_google_redirect(
+            "https://www.google.com/url?q=https://x.dev/"
+        ));
+        assert!(!is_google_redirect("https://google.co.xyz/goto?url=x"));
+        assert!(!is_google_redirect("http://www.google.com/goto?url=x"));
+        assert!(!is_google_redirect("https://corrode.dev/blog/async/"));
+        assert!(!is_google_redirect("https://www.google.com/search?q=rust"));
+        assert!(!is_google_redirect("https://evil.example/goto?url=x"));
+        assert!(!is_google_redirect(
+            "https://www.google.evil.example/goto?url=x"
+        ));
+    }
+
+    /// Google's `/goto?url=<opaque token>` answers a plain 302 whose `Location`
+    /// is the result's real URL (measured live: corrode.dev/blog/async/).
+    #[tokio::test]
+    async fn resolve_redirect_reads_location_without_following() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/goto"))
+            .respond_with(
+                ResponseTemplate::new(302)
+                    .insert_header("location", "https://corrode.dev/blog/async/"),
+            )
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/relative"))
+            .respond_with(ResponseTemplate::new(302).insert_header("location", "/elsewhere"))
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/script"))
+            .respond_with(
+                ResponseTemplate::new(302).insert_header("location", "javascript:alert(1)"),
+            )
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/ok"))
+            .respond_with(ResponseTemplate::new(200))
+            .mount(&server)
+            .await;
+
+        let client = CamofoxSearchClient::new("http://unused", None, None, Duration::from_secs(5));
+        let base = server.uri();
+        assert_eq!(
+            client
+                .resolve_redirect(&format!("{base}/goto?url=x"))
+                .await
+                .as_deref(),
+            Some("https://corrode.dev/blog/async/")
+        );
+        assert_eq!(
+            client.resolve_redirect(&format!("{base}/relative")).await,
+            None
+        );
+        assert_eq!(
+            client.resolve_redirect(&format!("{base}/script")).await,
+            None
+        );
+        assert_eq!(client.resolve_redirect(&format!("{base}/ok")).await, None);
     }
 }
 
