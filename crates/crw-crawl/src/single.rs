@@ -345,12 +345,33 @@ async fn scrape_url_inner(
         };
         let has_escalation_target =
             escalation_target.is_some() || prior_renderer != Some("lightpanda");
+        // The renderer ladder enforces this same floor per tier; apply it one
+        // layer up so we never DISPATCH an escalation that cannot run. `deadline`
+        // is the same one the first fetch already spent, so by this point it is
+        // routinely near-exhausted, and such attempts only burn a pool slot and
+        // hide the real outcome behind a fabricated timeout.
+        let escalation_budget = deadline.remaining();
+        let has_escalation_budget = escalation_budget >= crw_renderer::MIN_TIER_BUDGET;
         let should_escalate = (md_is_byte_thin || escalate_for_quality)
             && used_low_tier
             && !js_ladder_exhausted
             && should_escalate_status
             && escalation_eligible
-            && has_escalation_target;
+            && has_escalation_target
+            && has_escalation_budget;
+        if (md_is_byte_thin || escalate_for_quality)
+            && used_low_tier
+            && should_escalate_status
+            && escalation_eligible
+            && !has_escalation_budget
+        {
+            tracing::debug!(
+                url = %req.url,
+                remaining_ms = escalation_budget.as_millis() as u64,
+                min_ms = crw_renderer::MIN_TIER_BUDGET.as_millis() as u64,
+                "skipping JS escalation: not enough deadline left to attempt it"
+            );
+        }
         if (md_is_byte_thin || escalate_for_quality)
             && used_low_tier
             && should_escalate_status
