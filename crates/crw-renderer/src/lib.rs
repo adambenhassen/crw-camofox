@@ -216,9 +216,39 @@ fn is_origin_navigation_failure(e: &CrwError) -> bool {
         // discovery) carry different messages and keep their own error.
         CrwError::RendererError(msg) => {
             let m = msg.to_ascii_lowercase();
-            m.contains("navigation failed") || m.contains("net::err_")
+            m.contains("navigation failed")
+                || m.contains("net::err_")
+                // "we could not confirm where this origin points" — the CDP
+                // destination re-check collapses NXDOMAIN and a resolver
+                // brown-out into one `Unresolved`. Absence of evidence, not
+                // evidence against the HTTP tier's independent finding. Without
+                // this a dead host exits as 500 `renderer_error` instead of 422
+                // `target_unreachable`.
+                || m.contains("outbound destination check unavailable")
         }
         _ => false,
+    }
+}
+
+/// Is this response an HTML document, or an unknown type we must assume is one?
+///
+/// The HTML structural heuristics in `antibot::classify` are only meaningful on
+/// one (`crw_crawl::single::classify_block`). The HTTP tier decodes every non-PDF
+/// response as HTML regardless of its declared type, so an `application/json` /
+/// `text/plain` body is indistinguishable from an HTML shell by body shape
+/// alone. Absent or unrecognised types stay HTML-like: a server that omits
+/// `Content-Type` on a bot-wall shell is exactly the case worth judging.
+pub fn is_html_like_content_type(content_type: Option<&str>) -> bool {
+    match content_type {
+        None => true,
+        Some(ct) => {
+            let ct = ct.trim().to_ascii_lowercase();
+            ct.is_empty()
+                || ct == "text/html"
+                || ct == "application/xhtml+xml"
+                || ct == "application/xml"
+                || ct == "text/xml"
+        }
     }
 }
 

@@ -395,7 +395,7 @@ async fn scrape_url_inner(
                 )
                 .await
             {
-                Ok(js_fetch) => {
+                Ok(mut js_fetch) => {
                     // Accept JS result even if status >= 400, as long as it produced
                     // real content. Anti-bot/UA-detection sites frequently return a
                     // 4xx code while still serving the actual page body — the status
@@ -429,6 +429,15 @@ async fn scrape_url_inner(
                             js_md_len >= retry_threshold && (http_was_thin || quality_improved);
                         if accept {
                             data = js_data;
+                            // `classify_block` below reads `fetch_result.html`, and
+                            // leaving the DISCARDED tier's shell there means a
+                            // challenge we just solved still carries `_cf_chl_opt`
+                            // into CF_STRONG_MARKERS — which runs ahead of the
+                            // markdown guard and would clear the page this
+                            // escalation just recovered. `content_type` is
+                            // deliberately NOT swapped: browser tiers leave it
+                            // `None`, and it is read later for `data.content_type`.
+                            fetch_result.html = std::mem::take(&mut js_fetch.html);
                             // Replace the original "Target returned 4xx" with the JS
                             // fetch's warning (which is None for a clean 2xx render),
                             // so a successful escalation doesn't leak the original
@@ -538,7 +547,11 @@ async fn scrape_url_inner(
     let byok_config = build_byok_llm_config(req, llm_config);
     let effective_llm = byok_config.as_ref().or(llm_config);
 
-    if formats_include_json(&req.formats) {
+    // Never send a wall or an origin error page to the model. The verdict is
+    // already stamped above and every surface turns it into a failure, so any LLM
+    // work below would be paid for with nothing to show.
+    let unusable = data.block.is_some() || data.http_error().is_some();
+    if formats_include_json(&req.formats) && !unusable {
         if let (Some(schema), Some(llm)) = (effective_schema, effective_llm) {
             let md = data.markdown.as_deref().unwrap_or("");
             match crw_extract::structured::extract_structured_with_usage(md, schema, llm, None)
@@ -572,7 +585,8 @@ async fn scrape_url_inner(
         }
     }
 
-    if formats_include_summary(&req.formats) {
+    // Same reason as the json branch above: neither is summarizable content.
+    if formats_include_summary(&req.formats) && !unusable {
         let Some(llm) = effective_llm else {
             return Err(crw_core::error::CrwError::ExtractionError(
                 "Summary format requires an LLM config. Either set [extraction.llm] in server config, or pass 'llmApiKey' in the request body.".into()
@@ -956,6 +970,13 @@ fn classify_block(
     if content_type.map(|c| c.contains("pdf")).unwrap_or(false) {
         return None;
     }
+    // Our own egress failing proxy auth is not the target blocking us. Narrow to
+    // exactly that: a 407 with no body. Everything else with an empty body stays
+    // classifiable, because a near-empty 403/503 is the canonical CloudFront and
+    // Akamai deny signature and a near-empty 429 is the canonical rate limit.
+    if status == 407 && html.is_empty() {
+        return None;
+    }
     // Modern Cloudflare Turnstile / managed challenge is frequently served with
     // HTTP 200 and a LARGE (~118KB) body (e.g. barcodelookup.com). Both
     // antibot::classify (size-capped, challenge-form-era patterns) and
@@ -1010,6 +1031,17 @@ fn classify_block(
     }
     let r = crw_extract::antibot::classify(Some(status), html);
     if !r.signal.is_blocked() {
+        return None;
+    }
+    // A non-HTML body is CONTENT, so the HTML SHAPE heuristics do not apply to it:
+    // the HTTP tier decodes every non-PDF response as HTML, so a 68-byte
+    // requirements.txt has no `<body>` and came back `structural_failure`. Only the
+    // structural verdict is suppressed; the vendor arms stay live, because a wall
+    // IS sometimes served under a data content type (DataDome answers XHR-shaped
+    // requests with an `application/json` captcha stub).
+    if r.signal == crw_extract::antibot::AntibotSignal::StructuralFailure
+        && !crw_renderer::is_html_like_content_type(content_type)
+    {
         return None;
     }
     Some(BlockOutcome {
@@ -1179,6 +1211,63 @@ mod tests {
         assert!(classify_block(200, Some("application/pdf"), "", None, THRESH).is_none());
     }
 
+    #[test]
+    fn classify_block_skips_non_html_payloads() {
+        // A 68-byte requirements.txt from raw.githubusercontent.com came back
+        // `success:false` / `anti_bot` in prod: "Near-empty content (68 bytes)
+        // with HTTP 200". It is a complete, valid file.
+        let txt = "fastapi>=0.110.0\nuvicorn>=0.29.0\npydantic>=2.6\npython-multipart\n";
+        assert!(classify_block(200, Some("text/plain"), txt, Some(txt), THRESH).is_none());
+        for ct in [
+            "text/csv",
+            "application/json",
+            "text/markdown",
+            "application/javascript",
+            "text/css",
+        ] {
+            assert!(
+                classify_block(200, Some(ct), "x", None, THRESH).is_none(),
+                "{ct} was classified as a block"
+            );
+        }
+    }
+
+    #[test]
+    fn classify_block_still_sees_a_vendor_wall_under_a_data_content_type() {
+        // Only the HTML SHAPE heuristics are suppressed for non-HTML bodies.
+        // DataDome answers XHR-shaped requests with an application/json captcha
+        // stub, and that is still a block.
+        let json = r#"{"url":"https://geo.captcha-delivery.com/captcha/?initialCid=x"}"#;
+        assert!(classify_block(200, Some("application/json"), json, None, THRESH).is_some());
+    }
+
+    #[test]
+    fn classify_block_still_sees_walls_without_a_content_type() {
+        // The guard must not blind the classifier: a wall is html or type-less.
+        let html = "<html><body>You've been blocked by network security. \
+                    Please log in to your Reddit account.</body></html>";
+        assert!(classify_block(200, None, html, None, THRESH).is_some());
+    }
+
+    #[test]
+    fn classify_block_407_is_our_proxy_not_a_target_block() {
+        // 215 records in 14 days of prod were our own DataImpulse egress failing
+        // auth, stamped `structural_failure` and poisoning the routing registry.
+        assert!(classify_block(407, Some("text/html"), "", None, THRESH).is_none());
+        // Everything else with an empty body stays classifiable: a near-empty
+        // 403/503 is the canonical CloudFront/Akamai deny signature.
+        assert!(classify_block(403, Some("text/html"), "", None, THRESH).is_some());
+    }
+
+    #[test]
+    fn classify_block_modern_cf_marker_beats_the_markdown_guard() {
+        // Why the accepted JS escalation must replace `fetch_result.html`: with
+        // the discarded tier's shell still in place, a challenge we SOLVED is
+        // stamped `cloudflare` here and `clear_body()` throws the recovery away.
+        let html = r#"<html><body><script>window._cf_chl_opt={}</script></body></html>"#;
+        let md = "x".repeat(500);
+        assert!(classify_block(200, Some("text/html"), html, Some(&md), THRESH).is_some());
+    }
     fn sample_fetch(status_code: u16, html: &str) -> FetchResult {
         FetchResult {
             url: "https://example.com".into(),
