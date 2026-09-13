@@ -51,6 +51,10 @@ const SESSION_KEY: &str = "search";
 /// stale-tab path (idle eviction / camofox restart), not the steady state.
 const RETRY_BACKOFF: Duration = Duration::from_millis(750);
 
+/// Cap on the best-effort `DELETE /tabs/{id}` sent when a tab is abandoned
+/// after a timeout (see [`CamofoxSearchClient::close_tab`]).
+const CLEANUP_BUDGET: Duration = Duration::from_secs(2);
+
 /// JS evaluated in the Google SERP to extract result rows. Returns a JSON
 /// *string* (via `JSON.stringify`) so the camofox `/evaluate` `result` field
 /// comes back as a string we can parse. Selectors are intentionally broad and
@@ -199,7 +203,7 @@ pub struct CamofoxSearchClient {
     /// mutex doubles as the search serializer: holding it for the whole `fetch`
     /// guarantees one navigation at a time on the one shared tab. `None` until
     /// the first search creates a tab, and reset to `None` when a tab goes
-    /// stale so the next search recreates it.
+    /// stale or a call on it times out, so the next search recreates it.
     tab: tokio::sync::Mutex<Option<String>>,
 }
 
@@ -306,18 +310,37 @@ impl CamofoxSearchClient {
                     // dropped and every later search repeats the same stall —
                     // the endpoint stays broken until the process restarts.
                     // A fresh tab that times out really is a slow page, and is
-                    // reported as-is: `reused_tab` is false on the retry below,
-                    // so this can recurse at most once.
+                    // reported as-is (next arm): `reused_tab` is false on the
+                    // retry below, so this can recurse at most once.
                     Err(e)
                         if is_stale_tab(&e)
                             || (reused_tab && matches!(e, SearchError::Timeout)) =>
                     {
                         // Warm tab/context died (idle eviction or camofox
                         // restart). Drop the dead id, let any in-flight relaunch
-                        // settle, then recreate and retry this engine once.
-                        *tab = None;
+                        // settle, then recreate and retry this engine once. On
+                        // the timeout path the tab may well still exist and be
+                        // busy server-side (a navigate holds its per-tab lock
+                        // for camofox's own 30 s ceiling), so close it
+                        // best-effort rather than leak it toward the tab cap.
+                        if let Some(id) = tab.take()
+                            && matches!(e, SearchError::Timeout)
+                        {
+                            self.close_tab(&id).await;
+                        }
                         tokio::time::sleep(RETRY_BACKOFF).await;
                         self.attempt(&mut tab, engine, params).await
+                    }
+                    Err(e @ SearchError::Timeout) => {
+                        // A fresh tab timed out client-side, but camofox is
+                        // still working it (see above), so reusing the id would
+                        // queue the next search behind it. Forget the tab and
+                        // close it best-effort; the next search opens a fresh
+                        // one. No retry — that would double the latency.
+                        if let Some(id) = tab.take() {
+                            self.close_tab(&id).await;
+                        }
+                        Err(e)
                     }
                     Err(e) => Err(e),
                 }
@@ -383,6 +406,17 @@ impl CamofoxSearchClient {
             .tab_id;
         *tab = Some(id.clone());
         Ok(id)
+    }
+
+    /// Best-effort close of a tab we no longer trust. Bounded by
+    /// [`CLEANUP_BUDGET`] rather than the client timeout so a wedged server
+    /// can't stall the caller further; the outcome is ignored.
+    async fn close_tab(&self, tab_id: &str) {
+        let req = self
+            .auth(self.http.delete(format!("{}/tabs/{tab_id}", self.base_url)))
+            .json(&json!({ "userId": USER_ID }))
+            .send();
+        let _ = tokio::time::timeout(CLEANUP_BUDGET, req).await;
     }
 
     async fn run_search(
@@ -596,9 +630,11 @@ async fn upstream_error(what: &str, resp: reqwest::Response) -> SearchError {
 /// reported as-is.
 ///
 /// Timeouts are deliberately *not* classified here, because the same error
-/// means different things depending on the tab: on a freshly minted tab it is a
-/// slow page, on a reused one it is the dead-tab signature. `fetch` applies
-/// that context-dependent rule at the call site.
+/// means different things depending on the tab: on a reused one it is the
+/// dead-tab signature (recreate and retry once), on a freshly minted tab it is
+/// a slow page (drop the tab, no retry). `fetch` applies that
+/// context-dependent rule at the call site and closes the abandoned tab in
+/// both cases.
 fn is_stale_tab(e: &SearchError) -> bool {
     match e {
         SearchError::Upstream { status, .. } => *status == 404 || *status >= 500,
@@ -977,5 +1013,48 @@ mod github_api_tests {
             }
             other => panic!("expected Upstream, got {other:?}"),
         }
+    }
+
+    /// A client-side timeout abandons the warm tab: it is closed (DELETE) and
+    /// the next search opens a fresh one instead of queueing behind the call
+    /// camofox is still working on.
+    #[tokio::test]
+    async fn timeout_drops_and_closes_warm_tab() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/tabs"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({ "tabId": "t1" })))
+            .expect(2)
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/tabs/t1/navigate"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_json(json!({ "ok": true }))
+                    .set_delay(Duration::from_millis(1500)),
+            )
+            .mount(&server)
+            .await;
+        Mock::given(method("DELETE"))
+            .and(path("/tabs/t1"))
+            .respond_with(ResponseTemplate::new(200))
+            .expect(2)
+            .mount(&server)
+            .await;
+
+        let client = CamofoxSearchClient::new(server.uri(), None, None, Duration::from_millis(300));
+        let params = SearxngParams {
+            q: "rust".to_string(),
+            camofox_engines: vec![SearchEngine::Bing],
+            ..Default::default()
+        };
+        for _ in 0..2 {
+            let err = client.fetch(&params).await.unwrap_err();
+            assert!(matches!(err, SearchError::Timeout), "{err:?}");
+            assert!(client.tab.lock().await.is_none(), "tab must be forgotten");
+        }
+        // Two fetches → two tab creations (no reuse) and two closes.
+        server.verify().await;
     }
 }
