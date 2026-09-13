@@ -237,17 +237,17 @@ impl CamofoxRenderer {
             Ok(Err(e)) => e,
             Err(_) => return Err(CrwError::Timeout(budget.as_millis() as u64)),
         };
-        match (e, self.tab_left_blank(tab_id, deadline).await) {
-            (e, Some(false)) => {
+        match (e, self.tab_location(tab_id, deadline).await.ok()) {
+            (e, Some(TabLocation::Loaded(_))) => {
                 // camofox's navigate route builds an ARIA snapshot of the
                 // page after the navigation resolved (and after it recorded
                 // the navigation as successful), with its own 10 s timeout
                 // and no way to opt out. On very large documents that
                 // snapshot times out and the route answers 500 (with a
                 // sanitized body, so the cause is not visible here) although
-                // the page is loaded. The tab having left about:blank is the
-                // tell that the navigation itself committed; we never use
-                // the snapshot, so carry on.
+                // the page is loaded. The tab holding a real document is the
+                // tell that the navigation itself committed; we never use the
+                // snapshot, so carry on.
                 tracing::warn!(
                     url,
                     error = %e,
@@ -255,15 +255,19 @@ impl CamofoxRenderer {
                 );
                 Ok(())
             }
+            // Firefox showed its own error page (DNS failure, refused, blocked
+            // port). `location.href` still reads as the requested URL, so this
+            // is only visible through `document.documentURI`.
+            (_, Some(TabLocation::ErrorPage(code))) => Err(navigation_failed(&code)),
             // The browser answered and the tab never left about:blank: the page
             // did not load. camofox-browser sanitizes the Firefox error
             // (NS_ERROR_UNKNOWN_HOST, connection refused) to "Internal server
             // error", so this is the only evidence. Say "navigation failed" so
             // the ladder can pair it with the HTTP tier's `TargetUnreachable` and
             // attribute a dead origin to the caller.
-            (CrwError::RendererError(msg), Some(true)) => Err(CrwError::RendererError(format!(
-                "camofox: navigation failed, page did not load: {msg}"
-            ))),
+            (CrwError::RendererError(msg), Some(TabLocation::Blank)) => {
+                Err(navigation_failed(&msg))
+            }
             (e, _) => Err(e),
         }
     }
@@ -271,18 +275,16 @@ impl CamofoxRenderer {
     /// Fail unless the tab's current document is a destination the outbound
     /// policy allows. Same rules as the CDP tiers' per-request check
     /// (`crw_core::url_safety::classify_safe_host_resolved`): no-socket schemes
-    /// pass, anything else must be http(s) to a public address.
+    /// pass, anything else must be http(s) to a public address. A Firefox error
+    /// page fails as a navigation failure: its text is not the page.
     async fn check_final_url(&self, tab_id: &str, deadline: Deadline) -> CrwResult<()> {
-        let href = self
-            .post_decode_within::<EvaluateResponse>(
-                &format!("/tabs/{tab_id}/evaluate"),
-                json!({ "userId": USER_ID, "expression": "location.href" }),
-                deadline.remaining().min(Duration::from_secs(5)),
-                deadline,
-            )
-            .await?
-            .result
-            .unwrap_or_default();
+        let href = match self.tab_location(tab_id, deadline).await? {
+            TabLocation::Loaded(href) => href,
+            TabLocation::ErrorPage(code) => return Err(navigation_failed(&code)),
+            // Still on about:blank after navigate succeeded: nothing to check,
+            // and the empty-document guard after the evaluate handles it.
+            TabLocation::Blank => return Ok(()),
+        };
         let Ok(parsed) = url::Url::parse(&href) else {
             return Err(CrwError::RendererError(
                 "camofox: could not read the page's final URL".to_string(),
@@ -327,20 +329,19 @@ impl CamofoxRenderer {
         }
     }
 
-    /// Whether the tab is still on `about:blank`, i.e. no navigation
-    /// committed. `None` when the probe itself fails or no budget remains.
-    async fn tab_left_blank(&self, tab_id: &str, deadline: Deadline) -> Option<bool> {
+    /// Where the tab is. Errors when the probe itself fails or no budget remains.
+    async fn tab_location(&self, tab_id: &str, deadline: Deadline) -> CrwResult<TabLocation> {
         let r = self
             .post_decode_within::<EvaluateResponse>(
                 &format!("/tabs/{tab_id}/evaluate"),
-                json!({ "userId": USER_ID, "expression": "location.href" }),
+                json!({ "userId": USER_ID, "expression": TAB_LOCATION_EXPR }),
                 deadline.remaining().min(Duration::from_secs(5)),
                 deadline,
             )
-            .await
-            .ok()?;
-        let href = r.result?;
-        Some(href == "about:blank" || href.is_empty())
+            .await?;
+        Ok(TabLocation::from_probe(
+            r.result.as_deref().unwrap_or_default(),
+        ))
     }
 
     /// Retrieve the document's outerHTML in slices, for pages whose HTML
@@ -525,6 +526,54 @@ async fn error_detail(resp: reqwest::Response) -> String {
     }
 }
 
+/// `location.href`, or `document.documentURI` when Firefox is showing one of its
+/// own error pages. Firefox keeps `location.href` at the requested URL on those,
+/// so the error page is only visible through `documentURI`
+/// (`about:neterror?e=dnsNotFound&u=…`).
+const TAB_LOCATION_EXPR: &str = "(/^about:(neterror|certerror|blocked)/.test(document.documentURI) \
+     ? document.documentURI : location.href)";
+
+/// What the tab is showing, from [`TAB_LOCATION_EXPR`].
+#[derive(Debug, PartialEq, Eq)]
+enum TabLocation {
+    /// No navigation committed.
+    Blank,
+    /// Firefox's own error page; carries its `e=` code (`dnsNotFound`,
+    /// `connectionFailure`, `deniedPortAccess`, …).
+    ErrorPage(String),
+    /// A real document at this URL.
+    Loaded(String),
+}
+
+impl TabLocation {
+    fn from_probe(result: &str) -> Self {
+        if result.is_empty() || result == "about:blank" {
+            return Self::Blank;
+        }
+        if let Some(query) = ["about:neterror", "about:certerror", "about:blocked"]
+            .iter()
+            .find_map(|p| result.strip_prefix(p))
+        {
+            let code = query
+                .trim_start_matches('?')
+                .split('&')
+                .find_map(|kv| kv.strip_prefix("e="))
+                .filter(|c| !c.is_empty())
+                .unwrap_or("unknown");
+            return Self::ErrorPage(code.to_string());
+        }
+        Self::Loaded(result.to_string())
+    }
+}
+
+/// The error the ladder reads as "the origin could not be loaded"
+/// (`is_origin_navigation_failure` matches "navigation failed").
+fn navigation_failed(detail: &str) -> CrwError {
+    CrwError::RendererError(format!(
+        "camofox: navigation failed, page did not load: {detail}"
+    ))
+}
+
 #[async_trait]
 impl PageFetcher for CamofoxRenderer {
     async fn fetch(
@@ -659,5 +708,32 @@ impl PageFetcher for CamofoxRenderer {
                 .unwrap_or(false),
             _ => false,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::TabLocation;
+
+    #[test]
+    fn tab_location_reads_firefox_error_pages() {
+        assert_eq!(TabLocation::from_probe("about:blank"), TabLocation::Blank);
+        assert_eq!(TabLocation::from_probe(""), TabLocation::Blank);
+        assert_eq!(
+            TabLocation::from_probe("about:neterror?e=dnsNotFound&u=https%3A//x.invalid/&c=UTF-8"),
+            TabLocation::ErrorPage("dnsNotFound".into())
+        );
+        assert_eq!(
+            TabLocation::from_probe("about:certerror?e=nssFailure2"),
+            TabLocation::ErrorPage("nssFailure2".into())
+        );
+        assert_eq!(
+            TabLocation::from_probe("about:neterror"),
+            TabLocation::ErrorPage("unknown".into())
+        );
+        assert_eq!(
+            TabLocation::from_probe("https://example.com/"),
+            TabLocation::Loaded("https://example.com/".into())
+        );
     }
 }

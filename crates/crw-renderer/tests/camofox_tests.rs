@@ -63,7 +63,10 @@ async fn navigate_snapshot_timeout(
 /// Evaluate for a tab whose navigation committed: `location.href` answers the
 /// target, anything else the rendered document.
 async fn evaluate_committed(Path(_id): Path<String>, Json(body): Json<Value>) -> Json<Value> {
-    if body["expression"].as_str() == Some("location.href") {
+    if body["expression"]
+        .as_str()
+        .is_some_and(|e| e.contains("location.href"))
+    {
         return Json(json!({
             "ok": true, "result": "https://93.184.215.14/huge", "resultType": "string", "truncated": false
         }));
@@ -73,7 +76,10 @@ async fn evaluate_committed(Path(_id): Path<String>, Json(body): Json<Value>) ->
 
 /// Evaluate for a tab whose navigation never committed (still about:blank).
 async fn evaluate_blank(Path(_id): Path<String>, Json(body): Json<Value>) -> Json<Value> {
-    if body["expression"].as_str() == Some("location.href") {
+    if body["expression"]
+        .as_str()
+        .is_some_and(|e| e.contains("location.href"))
+    {
         return Json(
             json!({ "ok": true, "result": "about:blank", "resultType": "string", "truncated": false }),
         );
@@ -137,7 +143,10 @@ async fn create_tab_flaky(Json(body): Json<Value>) -> axum::response::Response {
 const PUBLIC_FINAL_URL: &str = "https://93.184.215.14/";
 
 async fn evaluate(Path(_id): Path<String>, Json(body): Json<Value>) -> Json<Value> {
-    if body["expression"].as_str() == Some("location.href") {
+    if body["expression"]
+        .as_str()
+        .is_some_and(|e| e.contains("location.href"))
+    {
         return Json(
             json!({ "ok": true, "result": PUBLIC_FINAL_URL, "resultType": "string", "truncated": false }),
         );
@@ -168,7 +177,7 @@ fn big_html() -> &'static String {
 
 async fn evaluate_big(Path(_id): Path<String>, Json(body): Json<Value>) -> Json<Value> {
     let expr = body["expression"].as_str().unwrap_or_default();
-    if expr == "location.href" {
+    if expr.contains("location.href") {
         return Json(
             json!({ "ok": true, "result": PUBLIC_FINAL_URL, "resultType": "string", "truncated": false }),
         );
@@ -611,4 +620,63 @@ async fn spent_budget_reports_the_requested_deadline_not_zero() {
         matches!(res, Err(crw_core::error::CrwError::Timeout(1_200))),
         "expected Timeout(1200), got {res:?}"
     );
+}
+
+/// Firefox's own error page (port blocked, DNS failure, refused connection).
+/// `location.href` keeps the requested URL; `document.documentURI` is the
+/// `about:neterror` page, whose text must never ship as the scrape.
+async fn evaluate_neterror(Path(_id): Path<String>, Json(body): Json<Value>) -> Json<Value> {
+    if body["expression"]
+        .as_str()
+        .is_some_and(|e| e.contains("location.href"))
+    {
+        return Json(json!({
+            "ok": true,
+            "result": "about:neterror?e=deniedPortAccess&u=https%3A//1.1.1.1%3A9/&c=UTF-8",
+            "resultType": "string",
+            "truncated": false
+        }));
+    }
+    Json(json!({
+        "ok": true,
+        "result": "<html><head><title>Problem loading page</title></head><body>This address is restricted</body></html>",
+        "resultType": "string",
+        "truncated": false
+    }))
+}
+
+#[tokio::test]
+async fn firefox_error_page_is_a_navigation_failure_not_content() {
+    // Both shapes seen live: navigate answers 500 (sanitized) and the tab holds
+    // the error page, or navigate answers 200 and the page later lands on one.
+    for navigate_handler in [true, false] {
+        let app = Router::new()
+            .route("/tabs", post(create_tab))
+            .route("/tabs/{id}/wait", post(wait))
+            .route("/tabs/{id}/evaluate", post(evaluate_neterror))
+            .route("/tabs/{id}", delete(close_tab));
+        let app = if navigate_handler {
+            app.route("/tabs/{id}/navigate", post(navigate_snapshot_timeout))
+        } else {
+            app.route("/tabs/{id}/navigate", post(navigate))
+        };
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+        let renderer = CamofoxRenderer::new(
+            "camofox",
+            &format!("http://{addr}"),
+            None,
+            Duration::from_secs(10),
+        );
+        let err = renderer
+            .fetch("https://1.1.1.1:9/", &HashMap::new(), None, deadline())
+            .await
+            .expect_err("a Firefox error page must not be returned as the page");
+        let msg = err.to_string();
+        assert!(msg.contains("navigation failed"), "{msg}");
+        assert!(msg.contains("deniedPortAccess"), "{msg}");
+    }
 }

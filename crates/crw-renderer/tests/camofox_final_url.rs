@@ -34,7 +34,10 @@ async fn evaluate_internal_final_url(
     Path(_id): Path<String>,
     Json(body): Json<Value>,
 ) -> Json<Value> {
-    if body["expression"].as_str() == Some("location.href") {
+    if body["expression"]
+        .as_str()
+        .is_some_and(|e| e.contains("location.href"))
+    {
         return Json(json!({
             "ok": true, "result": "http://169.254.169.254/latest/meta-data/", "resultType": "string", "truncated": false
         }));
@@ -48,7 +51,10 @@ async fn evaluate_private_final_url(
     Path(_id): Path<String>,
     Json(body): Json<Value>,
 ) -> Json<Value> {
-    if body["expression"].as_str() == Some("location.href") {
+    if body["expression"]
+        .as_str()
+        .is_some_and(|e| e.contains("location.href"))
+    {
         return Json(json!({
             "ok": true, "result": "http://10.0.0.5:9377/tabs", "resultType": "string", "truncated": false
         }));
