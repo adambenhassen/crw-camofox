@@ -170,7 +170,7 @@ Fastest option. Lightweight browser engine purpose-built for scraping.
 crw-server setup
 
 # Manual start
-lightpanda serve --host 127.0.0.1 --port 9222 &
+lightpanda serve --host 127.0.0.1 --port 9222 --block-private-networks &
 ```
 
 ```toml
@@ -235,5 +235,5 @@ services:
       - CRW_RENDERER__LIGHTPANDA__WS_URL=ws://lightpanda:9222
   lightpanda:
     image: lightpanda/lightpanda:latest
-    command: ["serve", "--host", "0.0.0.0", "--port", "9222"]
+    command: ["serve", "--host", "0.0.0.0", "--port", "9222", "--block-private-networks"]
 ```

@@ -87,7 +87,7 @@ crw supports JavaScript rendering via CDP (Chrome DevTools Protocol). The fastes
 crw-server setup
 
 # Start LightPanda
-lightpanda serve --host 127.0.0.1 --port 9222 &
+lightpanda serve --host 127.0.0.1 --port 9222 --block-private-networks &
 
 # Start crw
 crw-server

@@ -99,7 +99,7 @@ ws_url = "ws://127.0.0.1:9222/"
 
     println!();
     println!("  Start the server with JS rendering:");
-    println!("    lightpanda serve --host 127.0.0.1 --port 9222 &");
+    println!("    lightpanda serve --host 127.0.0.1 --port 9222 --block-private-networks &");
     println!("    crw-server");
     println!();
 }
