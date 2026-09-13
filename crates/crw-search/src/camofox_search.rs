@@ -217,6 +217,10 @@ pub struct CamofoxSearchClient {
     /// or swapped for a fresh id when a navigate/evaluate on it times out
     /// (see [`Self::abandon_tab`]).
     tab: tokio::sync::Mutex<Option<String>>,
+    /// Tests only: an origin whose `/goto` links are resolved like Google's, so
+    /// the resolution step can be driven against a mock server.
+    #[cfg(test)]
+    redirect_origin: Option<String>,
 }
 
 impl CamofoxSearchClient {
@@ -248,6 +252,8 @@ impl CamofoxSearchClient {
             github_api_base: "https://api.github.com".to_string(),
             timeout,
             tab: tokio::sync::Mutex::new(None),
+            #[cfg(test)]
+            redirect_origin: None,
         }
     }
 
@@ -541,7 +547,7 @@ impl CamofoxSearchClient {
         let mut rows = rows;
         if matches!(engine, SearchEngine::Google) {
             let resolved = futures::future::join_all(rows.iter().map(|r| async {
-                if is_google_redirect(&r.url) {
+                if self.is_result_redirect(&r.url) {
                     self.resolve_redirect(&r.url).await
                 } else {
                     None
@@ -581,6 +587,17 @@ impl CamofoxSearchClient {
             .collect();
 
         Ok(results)
+    }
+
+    /// Whether a Google result link must be resolved to its target.
+    fn is_result_redirect(&self, url: &str) -> bool {
+        #[cfg(test)]
+        if let Some(origin) = &self.redirect_origin
+            && url.starts_with(&format!("{origin}/goto"))
+        {
+            return true;
+        }
+        is_google_redirect(url)
     }
 
     /// The absolute http(s) `Location` a redirect link answers with, without
@@ -668,12 +685,6 @@ impl CamofoxSearchClient {
     }
 }
 
-/// Merge per-engine result rows into one response, deduped by URL. A URL seen
-/// by multiple engines accumulates their `engines`/`positions` and sums their
-/// position-scores, so cross-engine agreement ranks higher. First-appearance
-/// order is preserved; downstream `rerank` does the final ordering.
-/// Concise, user-facing reason for an engine failure — no internal detail, just
-/// enough to tell a timeout/block apart. Feeds `unresponsive_engines`.
 /// A Google result link that redirects to the real result (`/goto?url=` or
 /// `/url?q=`). The host is matched exactly: a scraped href is page content, and
 /// a pattern such as `google.<tld>` would send crw's own request to any domain
@@ -687,6 +698,12 @@ fn is_google_redirect(url: &str) -> bool {
         && matches!(u.path(), "/goto" | "/url")
 }
 
+/// Merge per-engine result rows into one response, deduped by URL. A URL seen
+/// by multiple engines accumulates their `engines`/`positions` and sums their
+/// position-scores, so cross-engine agreement ranks higher. First-appearance
+/// order is preserved; downstream `rerank` does the final ordering.
+/// Concise, user-facing reason for an engine failure — no internal detail, just
+/// enough to tell a timeout/block apart. Feeds `unresponsive_engines`.
 fn engine_failure_reason(e: &SearchError) -> String {
     match e {
         SearchError::Timeout => "timed out".to_string(),
@@ -1499,5 +1516,72 @@ mod github_api_tests {
             "the retry's timed-out tab must be swapped out too"
         );
         server.verify().await;
+    }
+}
+
+#[cfg(test)]
+mod google_resolution_tests {
+    use super::*;
+    use wiremock::matchers::{method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    /// Item 4 end to end: a Google search whose result links are `/goto`
+    /// redirects comes back with the real destinations, a link that does not
+    /// redirect keeps its URL, and non-redirect rows are untouched.
+    #[tokio::test]
+    async fn google_search_returns_resolved_result_urls() {
+        let server = MockServer::start().await;
+        let base = server.uri();
+        let rows = serde_json::to_string(&json!([
+            { "url": format!("{base}/goto?url=a"), "title": "A", "content": "" },
+            { "url": format!("{base}/goto?url=dead"), "title": "Dead", "content": "" },
+            { "url": "https://direct.example/c", "title": "C", "content": "" },
+        ]))
+        .unwrap();
+        for (p, body) in [
+            ("/tabs", json!({ "tabId": "t1" })),
+            ("/tabs/t1/navigate", json!({ "ok": true })),
+            ("/tabs/t1/wait", json!({ "ok": true })),
+            ("/tabs/t1/evaluate", json!({ "result": rows })),
+        ] {
+            Mock::given(method("POST"))
+                .and(path(p))
+                .respond_with(ResponseTemplate::new(200).set_body_json(body))
+                .mount(&server)
+                .await;
+        }
+        Mock::given(method("GET"))
+            .and(path("/goto"))
+            .and(wiremock::matchers::query_param("url", "a"))
+            .respond_with(
+                ResponseTemplate::new(302).insert_header("location", "https://real.example/a"),
+            )
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/goto"))
+            .and(wiremock::matchers::query_param("url", "dead"))
+            .respond_with(ResponseTemplate::new(200))
+            .mount(&server)
+            .await;
+
+        let mut client = CamofoxSearchClient::new(&base, None, None, Duration::from_secs(5));
+        client.redirect_origin = Some(base.clone());
+        let params = SearxngParams {
+            q: "rust".to_string(),
+            camofox_engines: vec![SearchEngine::Google],
+            ..Default::default()
+        };
+        let resp = client.fetch(&params).await.expect("search ok");
+        let urls: Vec<_> = resp.results.iter().filter_map(|r| r.url.clone()).collect();
+        assert!(
+            urls.contains(&"https://real.example/a".to_string()),
+            "{urls:?}"
+        );
+        assert!(urls.contains(&format!("{base}/goto?url=dead")), "{urls:?}");
+        assert!(
+            urls.contains(&"https://direct.example/c".to_string()),
+            "{urls:?}"
+        );
     }
 }
