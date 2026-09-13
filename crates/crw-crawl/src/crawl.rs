@@ -205,9 +205,6 @@ async fn run_crawl_inner(opts: CrawlOptions<'_>) {
     let mut visited: HashSet<String> = HashSet::new();
     let mut queue: VecDeque<(String, u32)> = VecDeque::new();
     let mut results: Vec<ScrapeData> = Vec::new();
-    // Why the most recent page could not be fetched. Reported only when no
-    // page succeeded, so the crawl does not end as a success with zero pages.
-    let mut last_fetch_error: Option<String> = None;
     // How many completed pages came back a wall or an origin error page. The
     // caller bills off `completed`, so it needs this to bill `completed - blocked`
     // without walking the paginated array.
@@ -244,7 +241,7 @@ async fn run_crawl_inner(opts: CrawlOptions<'_>) {
         let mut fetch_result = match renderer
             .fetch(
                 &url,
-                &Default::default(),
+                &req.headers,
                 effective_render_js,
                 req.wait_for,
                 pinned_renderer,
@@ -255,26 +252,65 @@ async fn run_crawl_inner(opts: CrawlOptions<'_>) {
             Ok(r) => r,
             Err(e) => {
                 tracing::warn!(url, error = %e, "Crawl: failed to fetch page");
-                last_fetch_error = Some(e.to_string());
+                results.push(ScrapeData {
+                    metadata: crw_core::types::PageMetadata {
+                        source_url: url.clone(),
+                        ..Default::default()
+                    },
+                    error: Some(e.to_string()),
+                    block: Some(crw_core::types::BlockOutcome {
+                        vendor: crw_core::types::HTTP_ERROR_VENDOR.to_string(),
+                        reason: e.to_string(),
+                    }),
+                    ..Default::default()
+                });
+                blocked += 1;
+                let _ = state_tx.send(CrawlState {
+                    id,
+                    success: true,
+                    status: CrawlStatus::InProgress,
+                    total: visited.len() as u32,
+                    completed: results.len() as u32,
+                    blocked,
+                    data: Vec::new(),
+                    error: None,
+                });
                 continue;
             }
         };
 
         // The CDN answered for a dead origin, so this page has no content and no
-        // links worth following — its body is the CDN's error page. Skipped like
-        // any other failed fetch (the `continue` above) rather than counted as a
-        // crawled page: a crawl of a site whose origin is down was reporting
-        // `completed: 1` with Cloudflare's apology as the page.
+        // links worth following — its body is the CDN's error page.
         if crate::single::is_cdn_origin_error(fetch_result.status_code) {
             tracing::warn!(
                 url,
                 status = fetch_result.status_code,
                 "Crawl: CDN could not reach the origin"
             );
-            last_fetch_error = Some(format!(
-                "the site's own server did not respond (HTTP {} from its CDN)",
-                fetch_result.status_code
-            ));
+            results.push(ScrapeData {
+                metadata: crw_core::types::PageMetadata {
+                    source_url: url.clone(),
+                    status_code: fetch_result.status_code,
+                    ..Default::default()
+                },
+                error: Some("CDN could not reach origin".to_string()),
+                block: Some(crw_core::types::BlockOutcome {
+                    vendor: crw_core::types::HTTP_ERROR_VENDOR.to_string(),
+                    reason: "CDN origin error".to_string(),
+                }),
+                ..Default::default()
+            });
+            blocked += 1;
+            let _ = state_tx.send(CrawlState {
+                id,
+                success: true,
+                status: CrawlStatus::InProgress,
+                total: visited.len() as u32,
+                completed: results.len() as u32,
+                blocked,
+                data: Vec::new(),
+                error: None,
+            });
             continue;
         }
 
@@ -456,13 +492,6 @@ async fn run_crawl_inner(opts: CrawlOptions<'_>) {
             data: vec![],
             error: None,
         });
-    }
-
-    if results.is_empty()
-        && let Some(error) = last_fetch_error
-    {
-        send_failed(id, &state_tx, error);
-        return;
     }
 
     let _ = state_tx.send(CrawlState {

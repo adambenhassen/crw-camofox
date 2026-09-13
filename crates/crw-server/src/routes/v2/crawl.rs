@@ -115,6 +115,7 @@ pub async fn start_crawl(
 
     let opts = scrape_opts_to_internal(&v2.scrape_options)?;
     let req = CrawlRequest {
+        headers: Default::default(),
         url: v2.url.clone(),
         max_depth: v2.max_discovery_depth,
         max_pages: v2.limit,

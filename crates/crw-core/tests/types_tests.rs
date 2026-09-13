@@ -160,6 +160,7 @@ fn scrape_data_skip_serializing_none() {
         warnings: Vec::new(),
         render_decision: None,
         credit_cost: 0,
+        error: None,
         metadata: PageMetadata {
             title: None,
             description: None,
@@ -273,6 +274,7 @@ fn scrape_data_serializes_debug_extraction_as_camel_case() {
         warnings: Vec::new(),
         render_decision: None,
         credit_cost: 0,
+        error: None,
         metadata: PageMetadata {
             title: None,
             description: None,

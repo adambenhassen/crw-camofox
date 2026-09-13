@@ -916,6 +916,7 @@ pub fn extract(opts: ExtractOptions<'_>) -> CrwResult<ScrapeData> {
         warnings,
         render_decision,
         credit_cost,
+        error: None,
         metadata: PageMetadata {
             title: meta.title,
             description: meta.description,

@@ -130,6 +130,7 @@ pub async fn run(mut args: CrawlArgs) -> Result<(), CmdError> {
     };
 
     let crawl_req = CrawlRequest {
+        headers: Default::default(),
         url: args.url.clone(),
         max_depth: Some(args.depth),
         max_pages: Some(args.limit),

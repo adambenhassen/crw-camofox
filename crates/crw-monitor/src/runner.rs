@@ -367,6 +367,7 @@ impl EngineSource {
         use crw_crawl::crawl::{CrawlOptions, run_crawl};
 
         let req = CrawlRequest {
+            headers: Default::default(),
             url: url.to_string(),
             max_depth: None,
             max_pages,

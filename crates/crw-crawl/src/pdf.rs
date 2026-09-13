@@ -539,6 +539,7 @@ fn build_scrape_data(
         // Per-page billing: 1 credit per page, floor 1. The SaaS settles
         // against this; opencore just reports it.
         credit_cost: extract.page_count.max(1) as u32,
+        error: None,
         metadata: PageMetadata {
             title: extract.title,
             description: None,

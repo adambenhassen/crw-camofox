@@ -1,6 +1,6 @@
-//! Crawl outcomes a caller bills from: a crawl that could not fetch a single
-//! page ends Failed with a reason (not `success:true, completed:0, error:None`,
-//! which reads as "the site has no pages"), and a walled page is counted
+//! Crawl outcomes a caller bills from: a page that could not be fetched is
+//! returned with its reason and counted `blocked` (dropping it made a crawl of a
+//! dead site read as "the site has no pages"), and a walled page is counted
 //! `blocked` with its challenge shell cleared.
 //!
 //! Own test binary because it sets `CRW_ALLOW_LOOPBACK_FOR_TESTS`, which is
@@ -15,7 +15,7 @@ use wiremock::matchers::{method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
 #[tokio::test]
-async fn crawl_whose_seed_hits_a_dead_origin_fails() {
+async fn crawl_reports_a_dead_origin_page_instead_of_dropping_it() {
     // SAFETY: one binary per tests/*.rs, set before any fetcher is built.
     unsafe { std::env::set_var("CRW_ALLOW_LOOPBACK_FOR_TESTS", "1") };
 
@@ -50,16 +50,18 @@ async fn crawl_whose_seed_hits_a_dead_origin_fails() {
         }
     }
     let s = last.expect("crawl finished");
-    assert!(
-        matches!(s.status, CrawlStatus::Failed) && !s.success,
-        "got status {:?} success {}",
-        s.status,
-        s.success
+    // The page is reported, not dropped: one completed document the caller does
+    // not pay for, carrying the reason.
+    assert_eq!((s.completed, s.blocked), (1, 1), "{s:?}");
+    let page = &s.data[0];
+    assert_eq!(page.metadata.status_code, 522);
+    assert_eq!(
+        page.block.as_ref().map(|b| b.vendor.as_str()),
+        Some(crw_core::types::HTTP_ERROR_VENDOR)
     );
     assert!(
-        s.error.as_deref().is_some_and(|e| e.contains("522")),
-        "the failure must name the cause, got {:?}",
-        s.error
+        page.error.is_some(),
+        "the failure must carry a reason: {page:?}"
     );
 }
 
