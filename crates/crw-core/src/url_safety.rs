@@ -106,6 +106,55 @@ pub async fn validate_safe_host_resolved(url: &url::Url) -> Result<(), String> {
     resolve_and_validate(url).await
 }
 
+/// Why a destination was refused.
+///
+/// The two cases look identical to the caller and are opposite in meaning: one
+/// is a destination we refuse to reach, the other is us failing to find out.
+/// Conflating them reports a blocked internal address as our own outage, and a
+/// resolver brown-out as the caller's unreachable target.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum HostRejection {
+    /// The destination resolved to, or literally is, an address we refuse.
+    Policy(String),
+    /// We could not establish where the destination points.
+    Unresolved(String),
+}
+
+/// [`validate_safe_host_resolved`], with the reason kept apart.
+pub async fn classify_safe_host_resolved(url: &url::Url) -> Result<(), HostRejection> {
+    validate_safe_host(url).map_err(HostRejection::Policy)?;
+
+    let test_allow_loopback = std::env::var("CRW_ALLOW_LOOPBACK_FOR_TESTS").as_deref() == Ok("1");
+    if test_allow_loopback {
+        return Ok(());
+    }
+    let host = url
+        .host_str()
+        .ok_or_else(|| HostRejection::Policy("URL has no host".to_string()))?;
+    let stripped = host.trim_start_matches('[').trim_end_matches(']');
+    if stripped.parse::<IpAddr>().is_ok() {
+        return Ok(());
+    }
+    let port = url
+        .port_or_known_default()
+        .ok_or_else(|| HostRejection::Unresolved("URL has no resolvable port".to_string()))?;
+    let addrs = tokio::time::timeout(
+        DNS_RESOLVE_TIMEOUT,
+        tokio::net::lookup_host((stripped, port)),
+    )
+    .await
+    .map_err(|_| HostRejection::Unresolved("DNS resolution timed out".to_string()))?
+    .map_err(|_| HostRejection::Unresolved("DNS resolution failed".to_string()))?;
+    // An answer with no addresses is a failure to find out, not a policy call.
+    let ips: Vec<IpAddr> = addrs.map(|addr| addr.ip()).collect();
+    if ips.is_empty() {
+        return Err(HostRejection::Unresolved(
+            "DNS resolution returned no addresses".into(),
+        ));
+    }
+    validate_resolved_ips(ips).map_err(HostRejection::Policy)
+}
+
 async fn resolve_and_validate(url: &url::Url) -> Result<(), String> {
     let test_allow_loopback = std::env::var("CRW_ALLOW_LOOPBACK_FOR_TESTS").as_deref() == Ok("1");
     if test_allow_loopback {
@@ -394,6 +443,24 @@ mod tests {
     fn blocks_ipv6_ula() {
         assert!(validate_safe_url(&url("http://[fc00::1]")).is_err());
         assert!(validate_safe_url(&url("http://[fd00::1]")).is_err());
+    }
+
+    #[tokio::test]
+    async fn rejection_reason_separates_policy_from_resolver_failure() {
+        // A literal blocked address is a policy call.
+        assert!(matches!(
+            classify_safe_host_resolved(&url("http://169.254.169.254/")).await,
+            Err(HostRejection::Policy(_))
+        ));
+        assert!(matches!(
+            classify_safe_host_resolved(&url("http://localhost/")).await,
+            Err(HostRejection::Policy(_))
+        ));
+        // A host that cannot be resolved is not.
+        assert!(matches!(
+            classify_safe_host_resolved(&url("https://nonexistent.invalid/")).await,
+            Err(HostRejection::Unresolved(_))
+        ));
     }
 
     #[test]

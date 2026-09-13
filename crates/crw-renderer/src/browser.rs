@@ -297,8 +297,11 @@ fn lightpanda_download_url() -> Option<String> {
 /// stricter setting costs no recall, while this flag is the only control
 /// covering worker targets, which never reach the CDP pump. ULA and v6
 /// link-local are listed explicitly rather than assumed to be in LightPanda's
-/// private group.
-const LIGHTPANDA_EXTRA_BLOCK_CIDRS: &str = "0.0.0.0/8,100.64.0.0/10,224.0.0.0/4,240.0.0.0/4,\
+/// private group, and so are the IPv4 ranges that matter most (RFC1918,
+/// loopback, link-local): this flag is the only control on the paths the CDP
+/// pump cannot see, so it should not rest on an assumption about what upstream's
+/// private group covers.
+const LIGHTPANDA_EXTRA_BLOCK_CIDRS: &str = "0.0.0.0/8,10.0.0.0/8,127.0.0.0/8,169.254.0.0/16,172.16.0.0/12,192.168.0.0/16,100.64.0.0/10,224.0.0.0/4,240.0.0.0/4,\
 192.0.0.0/24,192.0.2.0/24,198.18.0.0/15,198.51.100.0/24,203.0.113.0/24,\
 fc00::/7,fe80::/10,fec0::/10,ff00::/8,::/96,64:ff9b:1::/48,2002::/16";
 

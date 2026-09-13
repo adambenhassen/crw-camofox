@@ -855,37 +855,40 @@ async fn outbound_block_label(req_url: &str, ctx: &OutboundCtx) -> Option<&'stat
     // verdict that arrives after `Page.navigate` has already timed out cannot
     // help anyone: on the LightPanda tier that ceiling is 2.5s, so a longer
     // budget only converts renders that would have succeeded into failures.
-    let resolved = tokio::time::timeout(ctx.budget, async {
+    let classified = tokio::time::timeout(ctx.budget, async {
         // Two gates: a per-render one so a single page with hundreds of unique
         // hosts cannot occupy the whole process-wide pool and force fail-closed
         // denials in every other concurrent render, and the global one that
         // bounds total resolver load.
         let _render_permit = ctx.render_limit.acquire().await;
         let _permit = RESOLVE_LIMIT.acquire().await;
-        crw_core::url_safety::validate_safe_host_resolved(&parsed).await
+        crw_core::url_safety::classify_safe_host_resolved(&parsed).await
     })
     .await;
-    match resolved {
+    match classified {
         Ok(Ok(())) => {
             if let Ok(mut m) = ctx.memo.lock() {
                 m.insert(key, true);
             }
             None
         }
-        // A resolved address inside a blocked range is a policy decision; a
-        // resolver that errored or ran out of budget is not, and the two have
-        // very different causes in production. Separate labels so a DNS
-        // brown-out is distinguishable from an actual attempt.
-        Ok(Err(_)) | Err(_) => {
-            // Remember that WE could not answer, so the caller-facing error is
-            // not laundered into an origin failure. Both tiers share one
-            // resolver, so a brown-out otherwise reads as "the target is
-            // unreachable", gets a 422 and a refund, and never trips the 5xx
-            // watchdog.
-            // Scoped to the navigated origin. A parked ad or analytics host that
-            // no longer resolves is common, and letting it relabel the render
-            // would deny a refund for an origin the caller really could not
-            // reach, and page us for something that was never ours.
+        // A destination that resolved into a blocked range is a policy call and
+        // stays labelled as one. Reporting it as "we could not check" would hide
+        // the thing this guard exists to surface — a rebinding attempt is public
+        // at the route layer and internal by the time the browser asks — and
+        // would route it into the caller-refund path below.
+        Ok(Err(crw_core::url_safety::HostRejection::Policy(_))) => Some(BLOCK_LABEL_POLICY),
+        // We could not establish where this points: resolver error, or the check
+        // ran out of budget. That is our failure, not the caller's, so record it
+        // and let the caller-facing error say so rather than blaming the origin:
+        // both tiers share one resolver, so a brown-out otherwise reads as "the
+        // target is unreachable", gets a 422 and a refund, and never trips the
+        // 5xx watchdog.
+        //
+        // Scoped to the navigated origin. A parked ad or analytics host that no
+        // longer resolves is common, and letting it relabel the render would
+        // deny a refund for an origin the caller really could not reach.
+        Ok(Err(crw_core::url_safety::HostRejection::Unresolved(_))) | Err(_) => {
             if parsed.host_str().is_some_and(|h| h == ctx.doc_host) {
                 ctx.unresolved
                     .store(true, std::sync::atomic::Ordering::Relaxed);
@@ -1059,7 +1062,7 @@ async fn run_intercept_pump(
                                 .inc();
                             tracing::warn!(
                                 target_id = %child_target,
-                                "could not intercept a child target; closing it rather than                                  running it unvalidated"
+                                "could not intercept a child target; closing it"
                             );
                             let closed = !child_target.is_empty()
                                 && conn
@@ -2397,7 +2400,7 @@ impl CdpRenderer {
         // destination check entirely. `waitForDebuggerOnStart: true` because the
         // request that matters is the child's own first navigation, which would
         // otherwise outrun `Fetch.enable`; the pump resumes every child it sees,
-        // pass or fail, so nothing stays frozen. Best-effort — a browser without
+        // and a child it cannot intercept is closed rather than resumed. Best-effort — a browser without
         // the command keeps the previous behaviour rather than failing the
         // render.
         let _ = conn
