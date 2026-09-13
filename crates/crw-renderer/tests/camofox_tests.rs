@@ -159,6 +159,92 @@ async fn evaluate(Path(_id): Path<String>, Json(body): Json<Value>) -> Json<Valu
     }))
 }
 
+/// Shared per-mock state for the challenge tests: how many challenge probes
+/// have been answered, how many should say "still challenged" before
+/// clearing, which probe (if any) fails once with a 500, and the title a
+/// challenged probe reports.
+#[derive(Clone)]
+struct ChallengeState {
+    probes: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+    challenged_for: usize,
+    fail_probe: Option<usize>,
+    title: &'static str,
+}
+
+const CHALLENGE_HTML: &str = "<html><head><title>Just a moment...</title></head><body><script src=\"/cdn-cgi/challenge-platform/h/b/orchestrate/chl_page/v1\"></script></body></html>";
+
+/// Evaluate that answers the challenge probe from `ChallengeState`, the
+/// location and status probes like the plain mock, and the outerHTML evaluate
+/// with the challenge page until it has cleared.
+async fn evaluate_challenge(
+    axum::extract::State(st): axum::extract::State<ChallengeState>,
+    Path(_id): Path<String>,
+    Json(body): Json<Value>,
+) -> axum::response::Response {
+    use std::sync::atomic::Ordering;
+    let expr = body["expression"].as_str().unwrap_or_default();
+    let ok = |result: String| {
+        Json(json!({ "ok": true, "result": result, "resultType": "string", "truncated": false }))
+            .into_response()
+    };
+    if expr.contains("location.href") {
+        return ok(PUBLIC_FINAL_URL.to_string());
+    }
+    if expr.contains("document.title") {
+        let n = st.probes.fetch_add(1, Ordering::SeqCst);
+        if st.fail_probe == Some(n) {
+            // The challenge clears by reloading the tab; an evaluate that lands
+            // in that window fails.
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({ "error": "Execution context was destroyed" })),
+            )
+                .into_response();
+        }
+        let challenged = n < st.challenged_for;
+        let probe = if challenged {
+            json!({ "t": st.title, "m": true })
+        } else {
+            json!({ "t": "Real page", "m": false })
+        };
+        return ok(probe.to_string());
+    }
+    let cleared = st.probes.load(Ordering::SeqCst) > st.challenged_for;
+    ok(if cleared {
+        RENDERED_HTML
+    } else {
+        CHALLENGE_HTML
+    }
+    .to_string())
+}
+
+async fn spawn_challenge_mock(
+    challenged_for: usize,
+    fail_probe: Option<usize>,
+    title: &'static str,
+) -> (String, ChallengeState) {
+    let st = ChallengeState {
+        probes: std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+        challenged_for,
+        fail_probe,
+        title,
+    };
+    let app = Router::new()
+        .route("/tabs", post(create_tab))
+        .route("/tabs/{id}/navigate", post(navigate))
+        .route("/tabs/{id}/wait", post(wait))
+        .route("/tabs/{id}/evaluate", post(evaluate_challenge))
+        .route("/tabs/{id}", delete(close_tab))
+        .route("/health", get(health))
+        .with_state(st.clone());
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        axum::serve(listener, app).await.unwrap();
+    });
+    (format!("http://{addr}"), st)
+}
+
 /// A document larger than camofox's 1 MiB single-result cap: the plain
 /// outerHTML evaluate answers with the truncation placeholder, and the
 /// renderer must fall back to slicing. ASCII only, so byte, char and UTF-16
@@ -183,6 +269,11 @@ async fn evaluate_big(Path(_id): Path<String>, Json(body): Json<Value>) -> Json<
         );
     }
     let doc = big_html();
+    if expr.contains("document.title") {
+        return Json(
+            json!({ "ok": true, "result": r#"{"t":"big","m":false}"#, "resultType": "string", "truncated": false }),
+        );
+    }
     if expr == "document.documentElement.outerHTML" {
         return Json(json!({
             "ok": true,
@@ -682,4 +773,113 @@ async fn firefox_error_page_is_a_navigation_failure_not_content() {
         assert!(msg.contains("navigation failed"), "{msg}");
         assert!(msg.contains("deniedPortAccess"), "{msg}");
     }
+}
+
+fn probes(st: &ChallengeState) -> usize {
+    st.probes.load(std::sync::atomic::Ordering::SeqCst)
+}
+
+#[tokio::test]
+async fn challenge_clears_after_n_polls() {
+    let (base, st) = spawn_challenge_mock(2, None, "Just a moment...").await;
+    let renderer = CamofoxRenderer::new("camofox", &base, None, Duration::from_secs(10))
+        .with_challenge_poll_interval(Duration::from_millis(50));
+
+    let result = renderer
+        .fetch("https://example.com", &HashMap::new(), None, deadline())
+        .await
+        .expect("fetch succeeds once the challenge clears");
+
+    assert!(
+        result.html.contains("camofox rendered"),
+        "got: {}",
+        result.html
+    );
+    assert_eq!(probes(&st), 3, "two challenged probes then one clear probe");
+}
+
+#[tokio::test]
+async fn challenge_loop_stops_at_deadline() {
+    let (base, _st) = spawn_challenge_mock(usize::MAX, None, "Just a moment...").await;
+    let renderer = CamofoxRenderer::new("camofox", &base, None, Duration::from_secs(10))
+        .with_challenge_poll_interval(Duration::from_millis(50));
+
+    let started = std::time::Instant::now();
+    let result = renderer
+        .fetch(
+            "https://example.com",
+            &HashMap::new(),
+            None,
+            Deadline::now_plus(Duration::from_secs(3)),
+        )
+        .await
+        .expect("a stuck challenge still yields the on-screen html");
+
+    assert!(
+        started.elapsed() < Duration::from_millis(3_500),
+        "loop must not outlive the deadline, took {:?}",
+        started.elapsed()
+    );
+    assert!(
+        result.html.contains("challenge-platform/h/"),
+        "got: {}",
+        result.html
+    );
+}
+
+#[tokio::test]
+async fn challenge_loop_disabled_when_wait_is_zero() {
+    let (base, st) = spawn_challenge_mock(usize::MAX, None, "Just a moment...").await;
+    let renderer = CamofoxRenderer::new("camofox", &base, None, Duration::from_secs(10))
+        .with_challenge_wait(Duration::ZERO);
+
+    let result = renderer
+        .fetch("https://example.com", &HashMap::new(), None, deadline())
+        .await
+        .expect("fetch succeeds");
+
+    assert_eq!(probes(&st), 0, "no probe when disabled");
+    assert!(result.html.contains("challenge-platform/h/"));
+}
+
+/// A hard Cloudflare block never clears, so polling it only burns the budget.
+/// Counted by probes, not wall clock.
+#[tokio::test]
+async fn attention_required_wall_is_not_polled() {
+    let (base, st) =
+        spawn_challenge_mock(usize::MAX, None, "Attention Required! | Cloudflare").await;
+    let renderer = CamofoxRenderer::new("camofox", &base, None, Duration::from_secs(10))
+        .with_challenge_poll_interval(Duration::from_millis(50));
+
+    renderer
+        .fetch("https://example.com", &HashMap::new(), None, deadline())
+        .await
+        .expect("fetch returns the wall for the ladder to classify");
+
+    assert_eq!(
+        probes(&st),
+        1,
+        "a terminal wall is probed once, never polled"
+    );
+}
+
+/// The challenge clears by reloading the tab, and an evaluate landing in that
+/// window fails. One failure must not end the wait.
+#[tokio::test]
+async fn one_failed_probe_does_not_end_the_wait() {
+    let (base, st) = spawn_challenge_mock(2, Some(1), "Just a moment...").await;
+    let renderer = CamofoxRenderer::new("camofox", &base, None, Duration::from_secs(10))
+        .with_challenge_poll_interval(Duration::from_millis(50));
+
+    let result = renderer
+        .fetch("https://example.com", &HashMap::new(), None, deadline())
+        .await
+        .expect("fetch succeeds");
+
+    assert!(
+        result.html.contains("camofox rendered"),
+        "got: {}",
+        result.html
+    );
+    assert!(probes(&st) >= 3, "the loop kept probing after the failure");
 }

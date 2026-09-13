@@ -51,6 +51,62 @@ const CLEANUP_BUDGET: Duration = Duration::from_secs(3);
 const CREATE_TAB_ATTEMPTS: u32 = 4;
 const CREATE_TAB_BACKOFF: Duration = Duration::from_millis(500);
 
+/// Default cap on the passive Cloudflare-challenge wait. Mirrors
+/// `CamofoxEndpoint::challenge_wait_ms`'s default.
+const DEFAULT_CHALLENGE_WAIT: Duration = Duration::from_secs(20);
+
+/// Interval between challenge probes while the interstitial is on screen.
+const CHALLENGE_POLL_INTERVAL: Duration = Duration::from_secs(2);
+
+/// Budget always held back from the challenge loop so the snapshot that
+/// follows (final-URL check, status probe, outerHTML evaluate) still runs.
+const MIN_EVAL_BUDGET: Duration = Duration::from_secs(2);
+
+/// One cheap DOM probe, computed in the page so no markup crosses the wire:
+/// the title and whether the managed challenge's own script is loaded. The
+/// marker is `challenge-platform/h/`, never the bare
+/// `/cdn-cgi/challenge-platform/` directory, whose telemetry loader Cloudflare
+/// also injects into cleared pages (a false positive there costs the whole
+/// wait). Measured live: a managed challenge carries the title and the script
+/// but none of the old `#challenge-*` element ids.
+const CHALLENGE_PROBE_EXPR: &str = "JSON.stringify({t:document.title,m:document.documentElement.outerHTML.includes('challenge-platform/h/')})";
+
+/// Parsed [`CHALLENGE_PROBE_EXPR`] result.
+#[derive(Deserialize)]
+struct ChallengeProbe {
+    #[serde(default)]
+    t: String,
+    #[serde(default)]
+    m: bool,
+}
+
+/// What a challenge probe says is on screen.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum ChallengeState {
+    /// A managed challenge that may clear if the tab is left alone.
+    Challenge,
+    /// Cloudflare's hard block ("Attention Required!"). It never clears, so it
+    /// is never polled.
+    Wall,
+    /// Anything else, including an unparseable probe (an older server, a page
+    /// that threw): proceed as before the loop existed.
+    Clear,
+}
+
+pub(crate) fn probe_challenge_state(raw: &str) -> ChallengeState {
+    let Ok(p) = serde_json::from_str::<ChallengeProbe>(raw) else {
+        return ChallengeState::Clear;
+    };
+    let title = p.t.trim();
+    if title.starts_with("Attention Required!") {
+        ChallengeState::Wall
+    } else if p.m || title.eq_ignore_ascii_case("just a moment...") {
+        ChallengeState::Challenge
+    } else {
+        ChallengeState::Clear
+    }
+}
+
 /// Renderer backed by a camofox-browser REST endpoint.
 pub struct CamofoxRenderer {
     name: String,
@@ -64,6 +120,10 @@ pub struct CamofoxRenderer {
     /// create call costs nothing in steady state; navigation itself runs
     /// concurrently.
     create_lock: tokio::sync::Mutex<()>,
+    /// Cap on the passive challenge wait; `ZERO` disables the loop.
+    challenge_wait: Duration,
+    /// Sleep between challenge probes ([`CHALLENGE_POLL_INTERVAL`]).
+    challenge_poll_interval: Duration,
 }
 
 /// `POST /tabs` response — we only need the tab id.
@@ -129,6 +189,123 @@ impl CamofoxRenderer {
             api_key,
             client,
             create_lock: tokio::sync::Mutex::new(()),
+            challenge_wait: DEFAULT_CHALLENGE_WAIT,
+            challenge_poll_interval: CHALLENGE_POLL_INTERVAL,
+        }
+    }
+
+    /// Override the passive challenge wait cap (config `challenge_wait_ms`).
+    pub fn with_challenge_wait(mut self, wait: Duration) -> Self {
+        self.challenge_wait = wait;
+        self
+    }
+
+    /// Override the sleep between challenge probes. For tests.
+    #[doc(hidden)]
+    pub fn with_challenge_poll_interval(mut self, interval: Duration) -> Self {
+        self.challenge_poll_interval = interval;
+        self
+    }
+
+    /// Wait, on the open tab, for a Cloudflare managed challenge to clear.
+    ///
+    /// Probes the DOM every `challenge_poll_interval` for up to
+    /// `challenge_wait`, always leaving [`MIN_EVAL_BUDGET`] of the deadline for
+    /// the snapshot that follows. Never fails the fetch: on give-up the caller
+    /// snapshots whatever is on screen, exactly as before this loop existed,
+    /// and the ladder's post-render check classifies it. One failed probe in a
+    /// row is tolerated, because the challenge clears by reloading the tab and
+    /// an evaluate in that window fails; a second ends the wait.
+    async fn wait_out_challenge(&self, tab_id: &str, url: &str, deadline: Deadline) {
+        if self.challenge_wait.is_zero() {
+            return;
+        }
+        let path = format!("/tabs/{tab_id}/evaluate");
+        let body = json!({ "userId": USER_ID, "expression": CHALLENGE_PROBE_EXPR });
+        let started = Instant::now();
+        let mut polls = 0u32;
+        let mut failed_in_a_row = 0u32;
+        loop {
+            let left_for_loop = self
+                .challenge_wait
+                .saturating_sub(started.elapsed())
+                .min(deadline.remaining().saturating_sub(MIN_EVAL_BUDGET));
+            if left_for_loop.is_zero() {
+                break;
+            }
+            let state = match self
+                .post_decode_within::<EvaluateResponse>(
+                    &path,
+                    body.clone(),
+                    left_for_loop,
+                    deadline,
+                )
+                .await
+            {
+                Ok(r) => {
+                    failed_in_a_row = 0;
+                    probe_challenge_state(r.result.as_deref().unwrap_or_default())
+                }
+                Err(e) => {
+                    failed_in_a_row += 1;
+                    if failed_in_a_row >= 2 {
+                        tracing::debug!(url, error = %e, "camofox: challenge probe failed twice; ending the wait");
+                        break;
+                    }
+                    tracing::debug!(url, error = %e, "camofox: challenge probe failed; retrying once");
+                    ChallengeState::Challenge
+                }
+            };
+            match state {
+                ChallengeState::Clear => {
+                    if polls > 0 {
+                        tracing::info!(
+                            url,
+                            polls,
+                            elapsed_ms = started.elapsed().as_millis() as u64,
+                            "camofox: challenge cleared"
+                        );
+                        crw_core::metrics::metrics()
+                            .render_route_decision_total
+                            .with_label_values(&["camofox", "challengeCleared"])
+                            .inc();
+                    }
+                    return;
+                }
+                ChallengeState::Wall => {
+                    tracing::debug!(url, "camofox: Cloudflare block page on screen; not waiting");
+                    return;
+                }
+                ChallengeState::Challenge => {}
+            }
+            if polls == 0 {
+                tracing::info!(
+                    url,
+                    "camofox: Cloudflare challenge on screen, waiting for it to clear"
+                );
+            }
+            polls += 1;
+            let sleep = self.challenge_poll_interval.min(
+                self.challenge_wait
+                    .saturating_sub(started.elapsed())
+                    .min(deadline.remaining().saturating_sub(MIN_EVAL_BUDGET)),
+            );
+            if sleep.is_zero() {
+                break;
+            }
+            tokio::time::sleep(sleep).await;
+        }
+        if polls > 0 {
+            tracing::warn!(
+                url,
+                polls,
+                elapsed_ms = started.elapsed().as_millis() as u64,
+                "camofox: challenge did not clear within budget"
+            );
+            crw_core::metrics::metrics()
+                .render_route_decision_total
+                .with_label_values(&["camofox", "challengeStuck"])
+                .inc();
         }
     }
 
@@ -652,6 +829,12 @@ impl PageFetcher for CamofoxRenderer {
             )
             .await;
 
+        // 2b. If the page is a Cloudflare managed challenge, give Camoufox a
+        //     bounded chance to clear it before snapshotting. Before the
+        //     final-URL check and the status probe, because clearing reloads
+        //     the tab.
+        self.wait_out_challenge(&tab_id, url, deadline).await;
+
         // 3. Refuse to return a page that ended up somewhere internal. The route
         //    layer checked the URL the caller gave, but a redirect or a JS
         //    navigation inside the browser can land on the metadata endpoint or
@@ -753,7 +936,25 @@ impl PageFetcher for CamofoxRenderer {
 
 #[cfg(test)]
 mod tests {
-    use super::{TabLocation, parse_nav_status};
+    use super::{ChallengeState, TabLocation, parse_nav_status, probe_challenge_state};
+
+    #[test]
+    fn probe_reads_title_and_marker() {
+        use ChallengeState::*;
+        assert_eq!(
+            probe_challenge_state(r#"{"t":"Just a moment...","m":false}"#),
+            Challenge
+        );
+        assert_eq!(probe_challenge_state(r#"{"t":"Site","m":true}"#), Challenge);
+        assert_eq!(probe_challenge_state(r#"{"t":"Site","m":false}"#), Clear);
+        // The hard block wins over the marker: it never clears.
+        assert_eq!(
+            probe_challenge_state(r#"{"t":"Attention Required! | Cloudflare","m":true}"#),
+            Wall
+        );
+        assert_eq!(probe_challenge_state("<html>not json</html>"), Clear);
+        assert_eq!(probe_challenge_state(""), Clear);
+    }
 
     #[test]
     fn nav_status_reads_the_document_status() {
