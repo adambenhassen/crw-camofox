@@ -264,6 +264,7 @@ impl CamofoxRenderer {
                 &format!("/tabs/{tab_id}/evaluate"),
                 json!({ "userId": USER_ID, "expression": "location.href" }),
                 deadline.remaining().min(Duration::from_secs(5)),
+                deadline,
             )
             .await
             .ok()?;
@@ -283,6 +284,7 @@ impl CamofoxRenderer {
                 &path,
                 json!({ "userId": USER_ID, "expression": OUTER_HTML_LEN_EXPR }),
                 deadline.remaining(),
+                deadline,
             )
             .await?
             .result
@@ -314,6 +316,7 @@ impl CamofoxRenderer {
                     &path,
                     json!({ "userId": USER_ID, "expression": expr }),
                     deadline.remaining(),
+                    deadline,
                 )
                 .await?;
             if r.truncated || r.result.as_deref().is_some_and(is_truncation_placeholder) {
@@ -367,9 +370,11 @@ impl CamofoxRenderer {
         path: &str,
         body: serde_json::Value,
         budget: Duration,
+        deadline: Deadline,
     ) -> CrwResult<()> {
         if budget.is_zero() {
-            return Err(CrwError::Timeout(0));
+            // Report the caller's budget, not 0: nothing was awaited here.
+            return Err(CrwError::Timeout(deadline.requested_ms()));
         }
         match tokio::time::timeout(budget, self.post_json(path, body)).await {
             Ok(r) => r.map(|_| ()),
@@ -386,9 +391,11 @@ impl CamofoxRenderer {
         path: &str,
         body: serde_json::Value,
         budget: Duration,
+        deadline: Deadline,
     ) -> CrwResult<T> {
         if budget.is_zero() {
-            return Err(CrwError::Timeout(0));
+            // Report the caller's budget, not 0: nothing was awaited here.
+            return Err(CrwError::Timeout(deadline.requested_ms()));
         }
         let fut = async {
             let resp = self.post_json(path, body).await?;
@@ -487,6 +494,7 @@ impl PageFetcher for CamofoxRenderer {
                 &format!("/tabs/{tab_id}/wait"),
                 json!({ "userId": USER_ID, "timeout": wait_ms }),
                 deadline.remaining(),
+                deadline,
             )
             .await;
 
@@ -499,6 +507,7 @@ impl PageFetcher for CamofoxRenderer {
                 &format!("/tabs/{tab_id}/evaluate"),
                 json!({ "userId": USER_ID, "expression": OUTER_HTML_EXPR }),
                 deadline.remaining(),
+                deadline,
             )
             .await
         {

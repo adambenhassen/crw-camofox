@@ -544,3 +544,47 @@ async fn fetch_fails_when_navigate_failed_and_tab_stayed_blank() {
         .expect_err("a navigate failure with the tab still blank is a real failure");
     assert!(err.to_string().contains("navigate returned 500"), "{err}");
 }
+
+/// A `/wait` that outlives the request deadline, so the evaluate after it finds
+/// no budget left.
+async fn wait_stalls(Path(_id): Path<String>, Json(_body): Json<Value>) -> Json<Value> {
+    tokio::time::sleep(Duration::from_secs(5)).await;
+    Json(json!({ "ok": true }))
+}
+
+#[tokio::test]
+async fn spent_budget_reports_the_requested_deadline_not_zero() {
+    // The wait eats the whole deadline, so the evaluate sees a zero budget. It
+    // must report the budget the caller gave (1200ms), not `Timeout(0)`, which
+    // reads as "timed out after 0ms" to a caller who allowed 1.2s.
+    let app = Router::new()
+        .route("/tabs", post(create_tab))
+        .route("/tabs/{id}/navigate", post(navigate))
+        .route("/tabs/{id}/wait", post(wait_stalls))
+        .route("/tabs/{id}/evaluate", post(evaluate))
+        .route("/tabs/{id}", delete(close_tab));
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        axum::serve(listener, app).await.unwrap();
+    });
+    let renderer = CamofoxRenderer::new(
+        "camofox",
+        &format!("http://{addr}"),
+        None,
+        Duration::from_secs(10),
+    );
+
+    let res = renderer
+        .fetch(
+            "https://example.com",
+            &HashMap::new(),
+            None,
+            Deadline::from_request_ms(1_200),
+        )
+        .await;
+    assert!(
+        matches!(res, Err(crw_core::error::CrwError::Timeout(1_200))),
+        "expected Timeout(1200), got {res:?}"
+    );
+}
