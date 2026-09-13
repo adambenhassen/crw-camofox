@@ -1501,6 +1501,26 @@ mod tests {
         assert_eq!(slot.truncated, None);
     }
 
+    /// C14: a scout row whose URL the answer pool already holds is dropped
+    /// before it is scraped; new URLs, and grouped data, pass through.
+    #[test]
+    fn drop_known_urls_skips_rows_already_in_the_pool() {
+        let pool = SearchData::Flat(vec![bare_result("https://example.com/a")]);
+        let rows = vec![
+            bare_result("https://example.com/a"),
+            bare_result("https://example.com/b"),
+        ];
+        let kept: Vec<_> = drop_known_urls(&pool, rows)
+            .into_iter()
+            .map(|r| r.url)
+            .collect();
+        assert_eq!(kept, vec!["https://example.com/b".to_string()]);
+
+        let grouped = SearchData::Grouped(Default::default());
+        let rows = vec![bare_result("https://example.com/a")];
+        assert_eq!(drop_known_urls(&grouped, rows).len(), 1);
+    }
+
     fn bare_result(url: &str) -> SearchResult {
         serde_json::from_value(serde_json::json!({
             "url": url, "title": "t", "description": "d", "position": 1
