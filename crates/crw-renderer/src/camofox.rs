@@ -77,6 +77,31 @@ struct CreateTabResponse {
 #[derive(Deserialize)]
 struct EvaluateResponse {
     result: Option<String>,
+    /// camofox caps one evaluate result at 1 MiB of serialized value and, over
+    /// that, replaces it with a `[Truncated: …]` placeholder string and sets
+    /// this flag. Absent on older servers, hence the default.
+    #[serde(default)]
+    truncated: bool,
+}
+
+/// Slice size for chunked document retrieval (UTF-16 units, JS `slice`
+/// semantics). Kept well under camofox's 1 MiB serialized-result cap so a
+/// slice never trips it even with heavy JSON escaping; halved on the spot
+/// if one does.
+const HTML_CHUNK_UNITS: usize = 256 * 1024;
+
+/// Upper bound on chunked retrieval. Documents beyond this are cut, with a
+/// warning; nothing downstream wants more than that from one page.
+const MAX_CHUNKED_HTML_UNITS: usize = 16 * 1024 * 1024;
+
+/// JS length of the document's outerHTML, as a string so the result is
+/// always the `String` the response type expects.
+const OUTER_HTML_LEN_EXPR: &str = "String(document.documentElement.outerHTML.length)";
+
+/// Whether an evaluate result is camofox's truncation placeholder, for
+/// servers that predate the `truncated` flag.
+fn is_truncation_placeholder(result: &str) -> bool {
+    result.starts_with("[Truncated: result was ")
 }
 
 /// `GET /health` response.
@@ -201,6 +226,73 @@ impl CamofoxRenderer {
             Ok(r) => r,
             Err(_) => Err(CrwError::Timeout(budget.as_millis() as u64)),
         }
+    }
+
+    /// Retrieve the document's outerHTML in slices, for pages whose HTML
+    /// exceeds camofox's single-result cap. Slices are taken by UTF-16 offset
+    /// (JS string semantics); the expression never ends a slice on a lone
+    /// high surrogate, and the next offset advances by the received slice's
+    /// UTF-16 length, so multibyte characters are never split.
+    async fn evaluate_html_chunked(&self, tab_id: &str, deadline: Deadline) -> CrwResult<String> {
+        let path = format!("/tabs/{tab_id}/evaluate");
+        let total: usize = self
+            .post_decode_within::<EvaluateResponse>(
+                &path,
+                json!({ "userId": USER_ID, "expression": OUTER_HTML_LEN_EXPR }),
+                deadline.remaining(),
+            )
+            .await?
+            .result
+            .unwrap_or_default()
+            .trim()
+            .parse()
+            .map_err(|e| CrwError::RendererError(format!("camofox: bad document length: {e}")))?;
+        let end = total.min(MAX_CHUNKED_HTML_UNITS);
+        if total > end {
+            tracing::warn!(
+                tab_id,
+                total_units = total,
+                cap_units = end,
+                "camofox: document exceeds the chunked retrieval cap; cutting"
+            );
+        }
+        let mut html = String::with_capacity(end);
+        let mut start = 0usize;
+        let mut chunk = HTML_CHUNK_UNITS;
+        while start < end {
+            let stop = (start + chunk).min(end);
+            let expr = format!(
+                "(function(s,a,b){{if(b<s.length){{var c=s.charCodeAt(b-1);\
+                 if(c>=0xD800&&c<=0xDBFF)b--;}}return s.slice(a,b);}})\
+                 (document.documentElement.outerHTML,{start},{stop})"
+            );
+            let r = self
+                .post_decode_within::<EvaluateResponse>(
+                    &path,
+                    json!({ "userId": USER_ID, "expression": expr }),
+                    deadline.remaining(),
+                )
+                .await?;
+            if r.truncated || r.result.as_deref().is_some_and(is_truncation_placeholder) {
+                if chunk <= 4096 {
+                    return Err(CrwError::RendererError(
+                        "camofox: evaluate slice truncated even at the minimum chunk size".into(),
+                    ));
+                }
+                chunk /= 2;
+                continue;
+            }
+            let piece = r.result.unwrap_or_default();
+            let advanced: usize = piece.chars().map(char::len_utf16).sum();
+            if advanced == 0 {
+                // The document shrank under us (navigation, script rewrite);
+                // return what we have rather than spin.
+                break;
+            }
+            html.push_str(&piece);
+            start += advanced;
+        }
+        Ok(html)
     }
 
     /// Best-effort `DELETE /tabs/{id}` — never fails the caller. Uses a fixed
@@ -353,18 +445,28 @@ impl PageFetcher for CamofoxRenderer {
             .await;
 
         // 3. Evaluate the rendered DOM, send + body decode bounded by the budget.
-        let html = self
+        //    A document larger than camofox's 1 MiB result cap comes back as a
+        //    placeholder; fetch those in slices instead of treating the
+        //    placeholder as the page.
+        let html = match self
             .post_decode_within::<EvaluateResponse>(
                 &format!("/tabs/{tab_id}/evaluate"),
                 json!({ "userId": USER_ID, "expression": OUTER_HTML_EXPR }),
                 deadline.remaining(),
             )
-            .await;
+            .await
+        {
+            Ok(r) if r.truncated || r.result.as_deref().is_some_and(is_truncation_placeholder) => {
+                self.evaluate_html_chunked(&tab_id, deadline).await
+            }
+            Ok(r) => Ok(r.result.unwrap_or_default()),
+            Err(e) => Err(e),
+        };
 
         // 4. Best-effort close — never fail the fetch on cleanup.
         self.close_tab(&tab_id).await;
 
-        let html = html?.result.unwrap_or_default();
+        let html = html?;
         if html.is_empty() {
             return Err(CrwError::RendererError(
                 "camofox: evaluate returned empty document".to_string(),

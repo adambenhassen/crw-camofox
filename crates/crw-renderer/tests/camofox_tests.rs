@@ -105,6 +105,50 @@ async fn evaluate(Path(_id): Path<String>, Json(_body): Json<Value>) -> Json<Val
     }))
 }
 
+/// A document larger than camofox's 1 MiB single-result cap: the plain
+/// outerHTML evaluate answers with the truncation placeholder, and the
+/// renderer must fall back to slicing. ASCII only, so byte, char and UTF-16
+/// offsets coincide in the mock.
+fn big_html() -> &'static String {
+    static BIG: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    BIG.get_or_init(|| {
+        let mut s = String::from("<html><body>");
+        while s.len() < 700_000 {
+            s.push_str("<p>chunked-render-payload-0123456789</p>");
+        }
+        s.push_str("<h1>the end</h1></body></html>");
+        s
+    })
+}
+
+async fn evaluate_big(Path(_id): Path<String>, Json(body): Json<Value>) -> Json<Value> {
+    let expr = body["expression"].as_str().unwrap_or_default();
+    let doc = big_html();
+    if expr == "document.documentElement.outerHTML" {
+        return Json(json!({
+            "ok": true,
+            "result": format!("[Truncated: result was {} bytes, max 1048576]", doc.len() + 2),
+            "resultType": "string",
+            "truncated": true,
+        }));
+    }
+    if expr.contains("outerHTML.length") {
+        return Json(
+            json!({ "ok": true, "result": doc.len().to_string(), "resultType": "string", "truncated": false }),
+        );
+    }
+    // `(function(s,a,b){...})(document.documentElement.outerHTML,A,B)`
+    let args = expr
+        .rsplit_once("outerHTML,")
+        .map(|(_, tail)| tail.trim_end_matches(')'))
+        .unwrap();
+    let (a, b) = args.split_once(',').unwrap();
+    let (a, b): (usize, usize) = (a.parse().unwrap(), b.parse().unwrap());
+    Json(
+        json!({ "ok": true, "result": &doc[a..b.min(doc.len())], "resultType": "string", "truncated": false }),
+    )
+}
+
 async fn close_tab(Path(_id): Path<String>, Json(_body): Json<Value>) -> Json<Value> {
     Json(json!({ "ok": true }))
 }
@@ -378,4 +422,33 @@ async fn render_js_true_escalates_when_http_tier_fails() {
         .expect("HTTP-tier timeout must escalate to the pinned renderer");
     assert_eq!(result.rendered_with.as_deref(), Some("camofox"));
     assert!(result.html.contains("camofox rendered"));
+}
+
+#[tokio::test]
+async fn fetch_reassembles_document_over_camofox_result_cap() {
+    let app = Router::new()
+        .route("/tabs", post(create_tab))
+        .route("/tabs/{id}/navigate", post(navigate))
+        .route("/tabs/{id}/wait", post(wait))
+        .route("/tabs/{id}/evaluate", post(evaluate_big))
+        .route("/tabs/{id}", delete(close_tab));
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        axum::serve(listener, app).await.unwrap();
+    });
+    let base = format!("http://{addr}");
+    let renderer = CamofoxRenderer::new("camofox", &base, None, Duration::from_secs(10));
+
+    let result = renderer
+        .fetch("https://example.com/big", &HashMap::new(), None, deadline())
+        .await
+        .expect("a document over the evaluate cap must be fetched in slices");
+    assert_eq!(
+        result.html.len(),
+        big_html().len(),
+        "reassembled document must be complete"
+    );
+    assert_eq!(&result.html, big_html());
+    assert!(result.html.ends_with("<h1>the end</h1></body></html>"));
 }
