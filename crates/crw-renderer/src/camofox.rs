@@ -223,9 +223,42 @@ impl CamofoxRenderer {
             )))
         };
         match tokio::time::timeout(budget, fut).await {
-            Ok(r) => r,
+            Ok(Ok(())) => Ok(()),
+            Ok(Err(e)) if self.tab_left_blank(tab_id, deadline).await == Some(false) => {
+                // camofox's navigate route builds an ARIA snapshot of the
+                // page after the navigation resolved (and after it recorded
+                // the navigation as successful), with its own 10 s timeout
+                // and no way to opt out. On very large documents that
+                // snapshot times out and the route answers 500 (with a
+                // sanitized body, so the cause is not visible here) although
+                // the page is loaded. The tab having left about:blank is the
+                // tell that the navigation itself committed; we never use
+                // the snapshot, so carry on.
+                tracing::warn!(
+                    url,
+                    error = %e,
+                    "camofox: navigate reported failure but the page committed; continuing"
+                );
+                Ok(())
+            }
+            Ok(Err(e)) => Err(e),
             Err(_) => Err(CrwError::Timeout(budget.as_millis() as u64)),
         }
+    }
+
+    /// Whether the tab is still on `about:blank`, i.e. no navigation
+    /// committed. `None` when the probe itself fails or no budget remains.
+    async fn tab_left_blank(&self, tab_id: &str, deadline: Deadline) -> Option<bool> {
+        let r = self
+            .post_decode_within::<EvaluateResponse>(
+                &format!("/tabs/{tab_id}/evaluate"),
+                json!({ "userId": USER_ID, "expression": "location.href" }),
+                deadline.remaining().min(Duration::from_secs(5)),
+            )
+            .await
+            .ok()?;
+        let href = r.result?;
+        Some(href == "about:blank" || href.is_empty())
     }
 
     /// Retrieve the document's outerHTML in slices, for pages whose HTML

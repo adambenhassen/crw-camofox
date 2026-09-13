@@ -47,6 +47,42 @@ async fn navigate(Path(_id): Path<String>, Json(body): Json<Value>) -> impl Into
     )
 }
 
+/// camofox's navigate on a huge page: the navigation itself succeeded, but the
+/// route's post-navigation ARIA snapshot timed out and it answers 500 with a
+/// sanitized body.
+async fn navigate_snapshot_timeout(
+    Path(_id): Path<String>,
+    Json(_body): Json<Value>,
+) -> impl IntoResponse {
+    (
+        StatusCode::INTERNAL_SERVER_ERROR,
+        Json(json!({ "error": "Internal server error" })),
+    )
+}
+
+/// Evaluate for a tab whose navigation committed: `location.href` answers the
+/// target, anything else the rendered document.
+async fn evaluate_committed(Path(_id): Path<String>, Json(body): Json<Value>) -> Json<Value> {
+    if body["expression"].as_str() == Some("location.href") {
+        return Json(json!({
+            "ok": true, "result": "https://example.com/huge", "resultType": "string", "truncated": false
+        }));
+    }
+    Json(json!({ "ok": true, "result": RENDERED_HTML, "resultType": "string", "truncated": false }))
+}
+
+/// Evaluate for a tab whose navigation never committed (still about:blank).
+async fn evaluate_blank(Path(_id): Path<String>, Json(body): Json<Value>) -> Json<Value> {
+    if body["expression"].as_str() == Some("location.href") {
+        return Json(
+            json!({ "ok": true, "result": "about:blank", "resultType": "string", "truncated": false }),
+        );
+    }
+    Json(json!({
+        "ok": true, "result": "<html><head></head><body></body></html>", "resultType": "string", "truncated": false
+    }))
+}
+
 async fn wait(Path(_id): Path<String>, Json(_body): Json<Value>) -> Json<Value> {
     Json(json!({ "ok": true }))
 }
@@ -451,4 +487,60 @@ async fn fetch_reassembles_document_over_camofox_result_cap() {
     );
     assert_eq!(&result.html, big_html());
     assert!(result.html.ends_with("<h1>the end</h1></body></html>"));
+}
+
+#[tokio::test]
+async fn fetch_continues_when_only_the_post_navigation_snapshot_failed() {
+    let app = Router::new()
+        .route("/tabs", post(create_tab))
+        .route("/tabs/{id}/navigate", post(navigate_snapshot_timeout))
+        .route("/tabs/{id}/wait", post(wait))
+        .route("/tabs/{id}/evaluate", post(evaluate_committed))
+        .route("/tabs/{id}", delete(close_tab));
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        axum::serve(listener, app).await.unwrap();
+    });
+    let base = format!("http://{addr}");
+    let renderer = CamofoxRenderer::new("camofox", &base, None, Duration::from_secs(5));
+
+    let result = renderer
+        .fetch(
+            "https://example.com/huge",
+            &HashMap::new(),
+            None,
+            deadline(),
+        )
+        .await
+        .expect("a navigate failure after the page committed must not fail the render");
+    assert!(result.html.contains("camofox rendered"));
+}
+
+#[tokio::test]
+async fn fetch_fails_when_navigate_failed_and_tab_stayed_blank() {
+    let app = Router::new()
+        .route("/tabs", post(create_tab))
+        .route("/tabs/{id}/navigate", post(navigate_snapshot_timeout))
+        .route("/tabs/{id}/wait", post(wait))
+        .route("/tabs/{id}/evaluate", post(evaluate_blank))
+        .route("/tabs/{id}", delete(close_tab));
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        axum::serve(listener, app).await.unwrap();
+    });
+    let base = format!("http://{addr}");
+    let renderer = CamofoxRenderer::new("camofox", &base, None, Duration::from_secs(5));
+
+    let err = renderer
+        .fetch(
+            "https://example.com/dead",
+            &HashMap::new(),
+            None,
+            deadline(),
+        )
+        .await
+        .expect_err("a navigate failure with the tab still blank is a real failure");
+    assert!(err.to_string().contains("navigate returned 500"), "{err}");
 }
