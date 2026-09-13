@@ -56,6 +56,15 @@ async fn create_tab_profile_mismatch(Json(_body): Json<Value>) -> impl IntoRespo
     )
 }
 
+/// A `/tabs` handler failing through a proxy: non-JSON body that must not be
+/// echoed into the renderer error.
+async fn create_tab_html_error(Json(_body): Json<Value>) -> impl IntoResponse {
+    (
+        StatusCode::BAD_GATEWAY,
+        "<html><body>Bad Gateway at /internal/x</body></html>",
+    )
+}
+
 async fn evaluate(Path(_id): Path<String>, Json(_body): Json<Value>) -> Json<Value> {
     Json(json!({
         "ok": true,
@@ -209,4 +218,27 @@ async fn fetch_error_carries_camofox_message() {
         msg.contains("was created with Camoufox 135.0.1-beta.24"),
         "{msg}"
     );
+}
+
+#[tokio::test]
+async fn fetch_error_omits_non_json_body() {
+    let app = Router::new().route("/tabs", post(create_tab_html_error));
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        axum::serve(listener, app).await.unwrap();
+    });
+    let base = format!("http://{addr}");
+    let renderer = CamofoxRenderer::new("camofox", &base, None, Duration::from_secs(5));
+
+    let err = renderer
+        .fetch("https://example.com", &HashMap::new(), None, deadline())
+        .await
+        .expect_err("502 from /tabs must fail the fetch");
+    let msg = err.to_string();
+    assert!(
+        msg.ends_with("camofox /tabs returned 502 Bad Gateway"),
+        "{msg}"
+    );
+    assert!(!msg.contains("<html"), "{msg}");
 }

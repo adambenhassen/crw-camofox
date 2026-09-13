@@ -206,8 +206,9 @@ pub struct CamofoxSearchClient {
     /// The single warm tab id, lazily created and reused across queries. The
     /// mutex doubles as the search serializer: holding it for the whole `fetch`
     /// guarantees one navigation at a time on the one shared tab. `None` until
-    /// the first search creates a tab, and reset to `None` when a tab goes
-    /// stale or a call on it times out, so the next search recreates it.
+    /// the first search creates a tab; reset to `None` when a tab goes stale,
+    /// or swapped for a fresh id when a navigate/evaluate on it times out
+    /// (see [`Self::abandon_tab`]).
     tab: tokio::sync::Mutex<Option<String>>,
 }
 
@@ -359,6 +360,9 @@ impl CamofoxSearchClient {
                     all.extend(rows);
                 }
                 Err(e) => {
+                    // The API response gets only the stripped reason; the full
+                    // error (with camofox's message) is only visible here.
+                    tracing::warn!(engine = label, error = %e, "camofox: engine failed");
                     unresponsive.push(serde_json::json!([label, engine_failure_reason(&e)]));
                     last_err = Some(e);
                 }
@@ -422,15 +426,35 @@ impl CamofoxSearchClient {
         self.close_tab(&old).await;
     }
 
-    /// Best-effort close of a tab we no longer trust. Bounded by
-    /// [`CLEANUP_BUDGET`] rather than the client timeout so a wedged server
-    /// can't stall the caller further; the outcome is ignored.
+    /// Best-effort close of a tab we no longer trust. Additionally bounded by
+    /// [`CLEANUP_BUDGET`] so a wedged server can't stall the caller for the
+    /// full client timeout. Nothing is propagated, but a rejected or failed
+    /// close is logged: each one is a tab left running toward camofox's tab
+    /// cap, which otherwise only shows up later as `create tab failed`. A 404
+    /// is fine — the tab was already evicted.
     async fn close_tab(&self, tab_id: &str) {
         let req = self
             .auth(self.http.delete(format!("{}/tabs/{tab_id}", self.base_url)))
             .json(&json!({ "userId": USER_ID }))
             .send();
-        let _ = tokio::time::timeout(CLEANUP_BUDGET, req).await;
+        match tokio::time::timeout(CLEANUP_BUDGET, req).await {
+            Ok(Ok(resp)) if resp.status().is_success() || resp.status() == 404 => {}
+            Ok(Ok(resp)) => tracing::warn!(
+                tab_id,
+                status = resp.status().as_u16(),
+                "camofox: close of abandoned tab rejected; tab may leak"
+            ),
+            Ok(Err(e)) => tracing::warn!(
+                tab_id,
+                error = %e.without_url(),
+                "camofox: close of abandoned tab failed; tab may leak"
+            ),
+            Err(_) => tracing::warn!(
+                tab_id,
+                budget_ms = CLEANUP_BUDGET.as_millis() as u64,
+                "camofox: close of abandoned tab timed out; tab may leak"
+            ),
+        }
     }
 
     async fn run_search(
@@ -613,24 +637,35 @@ fn merge_results(
     }
 }
 
-/// Cap on how much of a failed camofox response body is carried into the error.
+/// Cap on how much of camofox's `error` message is carried into the error.
+/// The route layer trims `Upstream.body` again (to 200 chars) before it reaches
+/// an HTTP client; this cap only bounds what lands in logs.
 const UPSTREAM_BODY_CAP: usize = 300;
 
-/// Turn a non-2xx camofox response into an `Upstream` error that carries the
-/// server's own message. camofox puts the real cause in the body
-/// (`{"error":"Profile for user \"crw-search\" was created with Camoufox 135…"}`);
-/// a fixed label in its place hid that behind a bare `HTTP 500` and cost a
-/// diagnosis round-trip. `what` names the step (`create tab`, `navigate`).
+/// Turn a non-2xx camofox response into an `Upstream` error carrying camofox's
+/// own `error` message (e.g. a profile/Camoufox version mismatch), so the
+/// cause is visible instead of a bare status. Only that JSON field passes
+/// through: a non-JSON body (a proxy's HTML error page, a crash trace) is
+/// logged, not surfaced, since `Upstream.body` reaches API responses. `what`
+/// names the step (`create tab`, `navigate`).
 async fn upstream_error(what: &str, resp: reqwest::Response) -> SearchError {
     let status = resp.status().as_u16();
-    let raw = read_capped(resp, MAX_ERROR_BODY_BYTES)
-        .await
-        .map(|b| String::from_utf8_lossy(&b).into_owned())
-        .unwrap_or_default();
+    let raw = match read_capped(resp, MAX_ERROR_BODY_BYTES).await {
+        Ok(b) => String::from_utf8_lossy(&b).into_owned(),
+        Err(e) => {
+            tracing::debug!(status, step = what, error = %e, "camofox: error body unreadable");
+            String::new()
+        }
+    };
     let detail = serde_json::from_str::<serde_json::Value>(&raw)
         .ok()
         .and_then(|v| v.get("error")?.as_str().map(str::to_string))
-        .unwrap_or(raw);
+        .unwrap_or_else(|| {
+            if !raw.trim().is_empty() {
+                tracing::debug!(status, step = what, body = %raw.trim(), "camofox: non-JSON error body");
+            }
+            String::new()
+        });
     let detail: String = detail.trim().chars().take(UPSTREAM_BODY_CAP).collect();
     let body = if detail.is_empty() {
         format!("camofox: {what} failed")
@@ -1009,7 +1044,93 @@ mod github_api_tests {
         }
     }
 
-    /// A non-JSON (or empty) error body degrades to the bare step label.
+    /// A non-JSON error body (a proxy's HTML page, a crash trace) stays out of
+    /// the message — `Upstream.body` reaches API responses — so the error
+    /// degrades to the bare step label.
+    #[tokio::test]
+    async fn navigate_error_with_non_json_body_keeps_label() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/tabs"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({ "tabId": "t1" })))
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/tabs/t1/navigate"))
+            .respond_with(
+                ResponseTemplate::new(502)
+                    .set_body_string("<html><body>Bad Gateway at /internal/x</body></html>"),
+            )
+            .mount(&server)
+            .await;
+
+        let client = CamofoxSearchClient::new(server.uri(), None, None, Duration::from_secs(5));
+        let params = SearxngParams {
+            q: "rust".to_string(),
+            camofox_engines: vec![SearchEngine::Bing],
+            ..Default::default()
+        };
+        match client.fetch(&params).await.unwrap_err() {
+            SearchError::Upstream { status, body } => {
+                assert_eq!(status, 502);
+                assert_eq!(body, "camofox: navigate failed");
+            }
+            other => panic!("expected Upstream, got {other:?}"),
+        }
+    }
+
+    /// A stale tab signalled by a 5xx is recreated and retried, and — unlike
+    /// the timeout path — not DELETEd: the server already dropped it.
+    #[tokio::test]
+    async fn stale_5xx_recreates_tab_without_delete() {
+        let server = MockServer::start().await;
+        let rows = r#"[{"url":"https://rust-lang.org","title":"Rust","content":"lang"}]"#;
+        mount_tab_sequence(&server, &["t1", "t2"]).await;
+        Mock::given(method("POST"))
+            .and(path("/tabs/t1/navigate"))
+            .respond_with(
+                ResponseTemplate::new(500).set_body_json(json!({ "error": "window is null" })),
+            )
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/tabs/t2/navigate"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({ "ok": true })))
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/tabs/t2/wait"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({ "ok": true })))
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/tabs/t2/evaluate"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({ "result": rows })))
+            .mount(&server)
+            .await;
+        Mock::given(method("DELETE"))
+            .and(path("/tabs/t1"))
+            .respond_with(ResponseTemplate::new(200))
+            .expect(0)
+            .mount(&server)
+            .await;
+
+        let client = CamofoxSearchClient::new(server.uri(), None, None, Duration::from_secs(5));
+        let params = SearxngParams {
+            q: "rust".to_string(),
+            camofox_engines: vec![SearchEngine::Bing],
+            ..Default::default()
+        };
+        let resp = client
+            .fetch(&params)
+            .await
+            .expect("5xx stale tab recovers on a fresh tab");
+        assert_eq!(resp.results.len(), 1);
+        assert_eq!(client.tab.lock().await.as_deref(), Some("t2"));
+        server.verify().await;
+    }
+
+    /// An empty error body degrades to the bare step label.
     #[tokio::test]
     async fn navigate_error_without_body_keeps_label() {
         let server = MockServer::start().await;

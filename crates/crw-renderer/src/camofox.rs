@@ -158,18 +158,32 @@ impl CamofoxRenderer {
     }
 }
 
-/// Cap on how much of a failed camofox response body is carried into the error.
+/// Cap on how much of camofox's `error` message is carried into the error.
 const ERROR_BODY_CAP: usize = 300;
 
 /// `: <message>` from a failed camofox response, or `""` when there is none.
-/// camofox reports the real cause in the body (`{"error":"Profile for user
-/// \"crw\" was created with Camoufox 135…"}`); a bare status hid it.
+/// camofox reports the real cause in the body's `error` field (e.g. a
+/// profile/Camoufox version mismatch); only that field passes through, a
+/// non-JSON body (a proxy's HTML page) is logged, not surfaced, since renderer
+/// errors reach API responses.
 async fn error_detail(resp: reqwest::Response) -> String {
-    let raw = resp.text().await.unwrap_or_default();
+    let status = resp.status().as_u16();
+    let raw = match resp.text().await {
+        Ok(t) => t,
+        Err(e) => {
+            tracing::debug!(status, error = %e, "camofox: error body unreadable");
+            String::new()
+        }
+    };
     let msg = serde_json::from_str::<serde_json::Value>(&raw)
         .ok()
         .and_then(|v| v.get("error")?.as_str().map(str::to_string))
-        .unwrap_or(raw);
+        .unwrap_or_else(|| {
+            if !raw.trim().is_empty() {
+                tracing::debug!(status, body = %raw.trim(), "camofox: non-JSON error body");
+            }
+            String::new()
+        });
     let msg: String = msg.trim().chars().take(ERROR_BODY_CAP).collect();
     if msg.is_empty() {
         String::new()
