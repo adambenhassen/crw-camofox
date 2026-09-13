@@ -638,23 +638,40 @@ impl BreakerRegistry {
         global_outcome: Option<BreakerOutcome>,
         host_outcome: Option<BreakerOutcome>,
     ) {
-        if let Some(outcome) = global_outcome {
-            if let Some(reason) = outcome.ignored_reason() {
-                metrics()
-                    .breaker_ignored_total
-                    .with_label_values(&[renderer.as_str(), reason])
-                    .inc();
+        // A tier we are NOT recording to must still have its probe released.
+        //
+        // `try_acquire` increments `admitted` when the breaker is HalfOpen, and
+        // only `record_outcome` or `cancel_probe` ever moves that counter. A
+        // caller that acquires a permit and then passes `None` for that tier
+        // leaves the slot held: `admitted` saturates at `max_probes`,
+        // `try_acquire` returns Rejected for EVERY host, and only
+        // `lazy_evaluate`'s 30s eval_timeout breaks the deadlock.
+        //
+        // `cancel_probe` is a no-op on Closed and Open, so this is free for the
+        // host-only callers that were already correct.
+        match global_outcome {
+            Some(outcome) => {
+                if let Some(reason) = outcome.ignored_reason() {
+                    metrics()
+                        .breaker_ignored_total
+                        .with_label_values(&[renderer.as_str(), reason])
+                        .inc();
+                }
+                let g_tripped = self.global_for(renderer).record_outcome(outcome);
+                if g_tripped {
+                    self.emit_breaker_opened(renderer, "global", host);
+                }
             }
-            let g_tripped = self.global_for(renderer).record_outcome(outcome);
-            if g_tripped {
-                self.emit_breaker_opened(renderer, "global", host);
-            }
+            None => self.global_for(renderer).cancel_probe(),
         }
-        if let Some(outcome) = host_outcome {
-            let h_tripped = self.host_for(host, renderer).await.record_outcome(outcome);
-            if h_tripped {
-                self.emit_breaker_opened(renderer, "host", host);
+        match host_outcome {
+            Some(outcome) => {
+                let h_tripped = self.host_for(host, renderer).await.record_outcome(outcome);
+                if h_tripped {
+                    self.emit_breaker_opened(renderer, "host", host);
+                }
             }
+            None => self.host_for(host, renderer).await.cancel_probe(),
         }
     }
 
@@ -1102,5 +1119,99 @@ mod tests {
         let reg = BreakerRegistry::with_defaults();
         // Must not panic: global_for iterates a fixed 4-element array now.
         let _ = reg.global_for(RendererKind::ChromeProxy);
+    }
+
+    /// A tier handed `None` must have its probe RELEASED, not left held.
+    ///
+    /// `try_acquire` increments `admitted` on HalfOpen and only `record_outcome`
+    /// or `cancel_probe` moves it back. The scoped call sites acquire a permit
+    /// for both tiers, then record to one and disarm the guard, so before this
+    /// was fixed the global slot stayed held: `admitted` saturated at
+    /// `max_probes`, every host got `Permit::Rejected`, and only the 30s
+    /// `eval_timeout` broke it. That is a recall path, because the ladder skips
+    /// a Rejected tier for every host while it lasts.
+    #[tokio::test]
+    async fn scoped_outcome_releases_the_global_probe_it_does_not_record() {
+        let cfg = BreakerConfig {
+            min_calls: 5,
+            window_size: 10,
+            max_probes: 1,
+            base_cooldown: Duration::from_millis(20),
+            ..BreakerConfig::default()
+        };
+        let reg = BreakerRegistry::new(cfg);
+        for _ in 0..5 {
+            reg.record_outcome(
+                "example.com",
+                RendererKind::Chrome,
+                BreakerOutcome::ConnectionError,
+            )
+            .await;
+        }
+        std::thread::sleep(cfg.base_cooldown + Duration::from_millis(10));
+
+        let (permit, guard) = reg
+            .acquire_with_guard("example.com", RendererKind::Chrome)
+            .await;
+        assert_eq!(permit, Permit::Probe, "the global tier must be half-open");
+        assert_eq!(
+            reg.global_for(RendererKind::Chrome).try_acquire(),
+            Permit::Rejected,
+            "the probe quota is held while the attempt is in flight"
+        );
+
+        // Exactly what a host-scoped call site does: record to the host tier,
+        // hand the global tier None, then disarm.
+        reg.record_scoped_outcome(
+            "example.com",
+            RendererKind::Chrome,
+            None,
+            Some(BreakerOutcome::RenderError),
+        )
+        .await;
+        guard.disarm();
+
+        assert_ne!(
+            reg.global_for(RendererKind::Chrome).try_acquire(),
+            Permit::Rejected,
+            "the global probe must be released when the tier is handed None, or \
+             the tier stays shut for every host until eval_timeout"
+        );
+    }
+
+    /// One busy domain must not be able to disable a tier for every other host.
+    ///
+    /// The global window counts REQUESTS, not hosts: `min_calls: 50` with
+    /// `failure_rate_threshold: 0.80`. After the correct `SiteBlocked`
+    /// suppression only ~214 lightpanda outcomes reached any window in 6h of
+    /// production, and github.com alone contributed 38 of them, all failures, so
+    /// two domains satisfied the floor on their own and tripped the tier
+    /// globally. Content verdicts are host-scoped now, which is what makes this
+    /// hold.
+    #[tokio::test]
+    async fn single_host_thin_failures_never_open_the_global_tier() {
+        let reg = BreakerRegistry::with_defaults();
+        for _ in 0..200 {
+            reg.record_scoped_outcome(
+                "onebusyhost.com",
+                RendererKind::Lightpanda,
+                None,
+                Some(BreakerOutcome::RenderError),
+            )
+            .await;
+        }
+        assert_eq!(
+            reg.global_for(RendererKind::Lightpanda).snapshot().state,
+            "closed",
+            "200 content failures on ONE host must not disable the tier globally"
+        );
+        assert_eq!(
+            reg.host_for("onebusyhost.com", RendererKind::Lightpanda)
+                .await
+                .snapshot()
+                .state,
+            "open",
+            "the host tier must still learn that this host is unsuitable"
+        );
     }
 }

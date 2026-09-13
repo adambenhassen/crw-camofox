@@ -222,6 +222,28 @@ fn is_origin_navigation_failure(e: &CrwError) -> bool {
     }
 }
 
+/// Is this failure the ORIGIN's fault, for breaker-scoping purposes only?
+///
+/// Deliberately narrower than [`is_origin_navigation_failure`], which decides
+/// error ATTRIBUTION and is generous about `net::ERR_*` on purpose. The breaker
+/// asks whether the failure says anything about the TIER's own health. A proxy
+/// tunnel that will not open, and a box that lost its network, share the
+/// `net::ERR_` shape of a dead origin, but those are ours and must keep reaching
+/// the global window.
+fn is_origin_fault_for_breaker(e: &CrwError) -> bool {
+    if let CrwError::RendererError(m) = e {
+        let u = m.to_ascii_uppercase();
+        if u.contains("ERR_TUNNEL_CONNECTION_FAILED")
+            || u.contains("ERR_PROXY_CONNECTION_FAILED")
+            || u.contains("ERR_NETWORK_CHANGED")
+            || u.contains("ERR_INTERNET_DISCONNECTED")
+        {
+            return false;
+        }
+    }
+    is_origin_navigation_failure(e)
+}
+
 /// Prefix of the `warning` set when a JS escalation failed and the HTTP body was
 /// returned in its place. Public because it is BOTH the caller-facing
 /// explanation and the signal `crw_crawl::single` reads to skip a second
@@ -959,7 +981,7 @@ impl FallbackRenderer {
             // that were actually invoked.
             let remaining = deadline.remaining();
             if remaining < MIN_TIER_BUDGET {
-                tracing::debug!(
+                tracing::info!(
                     renderer = renderer.name(),
                     remaining_ms = remaining.as_millis() as u64,
                     "budget below minimum tier budget, skipping renderer"
@@ -978,7 +1000,11 @@ impl FallbackRenderer {
                 // every other `last_error` assignment in this function does. Assign
                 // unconditionally for the same reason: `get_or_insert_with` would let an
                 // earlier tier's `RendererError` survive and map to 500 instead of 504.
-                last_error = Some(CrwError::Timeout(remaining.as_millis().max(1) as u64));
+                //
+                // Report the REQUESTED budget, not `remaining`: that is below
+                // MIN_TIER_BUDGET by definition here and ~0 in practice, so it read as
+                // `Timeout after 1ms` to a caller given 30s.
+                last_error = Some(CrwError::Timeout(deadline.requested_ms()));
                 continue;
             }
 
@@ -1010,7 +1036,7 @@ impl FallbackRenderer {
             // (see `ProbeGuard::drop`), so the breaker is left as we found it.
             let remaining = deadline.remaining();
             if remaining < MIN_TIER_BUDGET {
-                tracing::debug!(
+                tracing::info!(
                     renderer = renderer.name(),
                     remaining_ms = remaining.as_millis() as u64,
                     "budget drained while acquiring breaker permit, skipping renderer"
@@ -1021,7 +1047,9 @@ impl FallbackRenderer {
                         .with_label_values(&[k.as_str(), "budgetSkipped"])
                         .inc();
                 }
-                last_error = Some(CrwError::Timeout(remaining.as_millis().max(1) as u64));
+                // Same reasoning as the floor above: report the requested budget,
+                // never the sub-minimum remainder.
+                last_error = Some(CrwError::Timeout(deadline.requested_ms()));
                 continue;
             }
 
@@ -1164,7 +1192,13 @@ impl FallbackRenderer {
                         // attempt context so deadline-clamped attempts don't
                         // poison the breaker.
                         let outcome = classify_outcome(false, false, false, &attempt_ctx);
-                        self.breakers.record_outcome(&host, k, outcome).await;
+                        // Host-scoped: the tier answered, and this is a verdict on
+                        // the body it returned. Written to the global window, one
+                        // busy domain reaches `min_calls` on its own and disables
+                        // the tier for every host.
+                        self.breakers
+                            .record_scoped_outcome(&host, k, None, Some(outcome))
+                            .await;
                         if k == RendererKind::Lightpanda
                             && let Some(target) =
                                 self.preferences.record_failure(&host, &err_kind).await
@@ -1347,7 +1381,16 @@ impl FallbackRenderer {
                     if let Some(k) = trackable {
                         let was_timeout = matches!(e, CrwError::Timeout(_));
                         let outcome = classify_outcome(false, false, was_timeout, &attempt_ctx);
-                        self.breakers.record_outcome(&host, k, outcome).await;
+                        // A renderer error with no response to inspect is not proof
+                        // the TIER is sick: a dead origin produces the same shape,
+                        // and every tier egressing from this box sees it. Origin
+                        // faults stay host-scoped. Timeouts are excluded on purpose:
+                        // a hung CDP pool also times out, and that IS a tier signal.
+                        let global =
+                            (!is_origin_fault_for_breaker(&e) || was_timeout).then_some(outcome);
+                        self.breakers
+                            .record_scoped_outcome(&host, k, global, Some(outcome))
+                            .await;
                         if k == RendererKind::Lightpanda {
                             let _ = self.preferences.record_failure(&host, &err_kind).await;
                         }
@@ -1678,6 +1721,7 @@ mod tests {
         Ok(String),
         OkStatus(u16, String),
         Err(String),
+        Timeout,
     }
 
     #[async_trait::async_trait]
@@ -1693,6 +1737,7 @@ mod tests {
                 MockBehavior::Ok(html) => (200u16, html.clone()),
                 MockBehavior::OkStatus(s, html) => (*s, html.clone()),
                 MockBehavior::Err(msg) => return Err(CrwError::RendererError(msg.clone())),
+                MockBehavior::Timeout => return Err(CrwError::Timeout(2_500)),
             };
             Ok(FetchResult {
                 url: url.to_string(),
@@ -1849,6 +1894,242 @@ mod tests {
         }
         async fn is_available(&self) -> bool {
             true
+        }
+    }
+
+    /// A tier that keeps returning THIN content must not be disabled for every
+    /// host, and this pins it at the call site rather than at the registry.
+    ///
+    /// The registry-level tests only prove `record_scoped_outcome` behaves; they
+    /// pass whether or not the ladder actually calls it. A mutation reverting the
+    /// serial thin arm to `record_outcome` left all 995 other tests green, which
+    /// is the gap this closes. A thin body is a verdict about the PAGE, so it
+    /// belongs to the host tier: the 1000-URL bench traced roughly 12% of
+    /// failures to false global trips from exactly this.
+    #[tokio::test]
+    async fn thin_content_does_not_open_the_global_tier() {
+        // Under MIN_RENDERED_TEXT_LEN (50), so every attempt classifies as thin
+        // rather than acceptable, and nothing here is a wall or a hard block.
+        let thin = "<html><body>tiny</body></html>";
+        let lp = Arc::new(MockFetcher {
+            name: "lightpanda",
+            behavior: MockBehavior::Ok(thin.to_string()),
+        }) as Arc<dyn PageFetcher>;
+        let chrome = Arc::new(MockFetcher {
+            name: "camofox",
+            behavior: MockBehavior::Ok(thin.to_string()),
+        }) as Arc<dyn PageFetcher>;
+        let mut r = make_renderer_with_mocks(vec![lp, chrome]);
+        r.breakers = Arc::new(BreakerRegistry::new(BreakerConfig {
+            base_cooldown: Duration::from_secs(300),
+            max_cooldown: Duration::from_secs(300),
+            ..BreakerConfig::default()
+        }));
+
+        for _ in 0..80 {
+            let _ = r
+                .fetch(
+                    "https://thin-host.example/page",
+                    &HashMap::new(),
+                    Some(true),
+                    None,
+                    None,
+                    tdl(),
+                )
+                .await;
+        }
+
+        assert_eq!(
+            r.breakers
+                .global_for(RendererKind::Lightpanda)
+                .snapshot()
+                .state,
+            "closed",
+            "a thin body is a judgement about the page, so it must not disable \
+             the tier for every other host"
+        );
+        assert_eq!(
+            r.breakers
+                .host_for("thin-host.example", RendererKind::Lightpanda)
+                .await
+                .snapshot()
+                .state,
+            "open",
+            "the host tier must still learn this host renders thin"
+        );
+    }
+
+    /// The other half of the origin carve-out, and the one a mutation test showed
+    /// nothing was guarding.
+    ///
+    /// `is_origin_fault_for_breaker` returns true for `CrwError::Timeout(_)`,
+    /// because it is shared with the error-attribution path where that arm is
+    /// correct. The breaker path must undo it with `&& !was_timeout`, or a hung
+    /// CDP pool, which times out on every host, would stop reaching the global
+    /// window and nothing would ever conclude the tier is sick. Dropping that
+    /// clause is a one-token mutation that left all 995 other tests green, which
+    /// is exactly why this test exists.
+    #[tokio::test]
+    async fn tier_timeouts_still_open_the_global_tier() {
+        let lp = Arc::new(MockFetcher {
+            name: "lightpanda",
+            behavior: MockBehavior::Timeout,
+        }) as Arc<dyn PageFetcher>;
+        let chrome = Arc::new(MockFetcher {
+            name: "camofox",
+            behavior: MockBehavior::Timeout,
+        }) as Arc<dyn PageFetcher>;
+        let mut r = make_renderer_with_mocks(vec![lp, chrome]);
+        r.breakers = Arc::new(BreakerRegistry::new(BreakerConfig {
+            base_cooldown: Duration::from_secs(300),
+            max_cooldown: Duration::from_secs(300),
+            ..BreakerConfig::default()
+        }));
+
+        // Spread across distinct hosts, which is what a genuinely sick tier looks
+        // like and what a single dead origin does not.
+        for i in 0..80 {
+            let _ = r
+                .fetch(
+                    &format!("https://host{i}.example/page"),
+                    &HashMap::new(),
+                    Some(true),
+                    None,
+                    None,
+                    tdl(),
+                )
+                .await;
+        }
+
+        assert_eq!(
+            r.breakers
+                .global_for(RendererKind::Lightpanda)
+                .snapshot()
+                .state,
+            "open",
+            "a tier timing out on every host must still trip globally, or a hung \
+             pool is never caught"
+        );
+    }
+
+    /// A dead ORIGIN must not disable a renderer tier for every other host.
+    ///
+    /// The serial error arm used to write its outcome to the global window as
+    /// well as the host one, on the stated premise that "the renderer itself
+    /// errored (no response to inspect), which is a genuine tier signal". A dead
+    /// origin produces exactly that shape: six hours of production held 24
+    /// net::ERR_ABORTED, 10 PeerFailedVerification, 5 ERR_CERT_DATE_INVALID and
+    /// more, every one the target's fault and every one advancing the global
+    /// window. Two of the four observed global trips came from here.
+    ///
+    /// Eighty such failures across eighty DISTINCT hosts is far past
+    /// `min_calls: 50` at `failure_rate_threshold: 0.80`, so this test fails
+    /// against the old code and passes only once the outcome is host-scoped.
+    #[tokio::test]
+    async fn origin_navigation_failures_do_not_open_the_global_tier() {
+        let lp = Arc::new(MockFetcher {
+            name: "lightpanda",
+            behavior: MockBehavior::Err(
+                "Renderer error: Navigation failed: net::ERR_CONNECTION_REFUSED".into(),
+            ),
+        }) as Arc<dyn PageFetcher>;
+        let chrome = Arc::new(MockFetcher {
+            name: "camofox",
+            behavior: MockBehavior::Ok(rich_html("CAMOFOX-OK")),
+        }) as Arc<dyn PageFetcher>;
+        let mut r = make_renderer_with_mocks(vec![lp, chrome]);
+        // Long cooldown so a half-open transition cannot mask the verdict under
+        // parallel test load, matching the sibling breaker test above.
+        r.breakers = Arc::new(BreakerRegistry::new(BreakerConfig {
+            base_cooldown: Duration::from_secs(300),
+            max_cooldown: Duration::from_secs(300),
+            ..BreakerConfig::default()
+        }));
+
+        // One dead origin, hammered. 80 failures is past `min_calls: 50` at
+        // `failure_rate_threshold: 0.80`, so this is exactly the shape that used
+        // to take the tier out for everyone: in production one domain
+        // contributed 38 of the ~214 lightpanda outcomes that reached any window
+        // in six hours.
+        for _ in 0..80 {
+            let _ = r
+                .fetch(
+                    "https://dead-origin.example/page",
+                    &HashMap::new(),
+                    Some(true),
+                    None,
+                    None,
+                    tdl(),
+                )
+                .await;
+        }
+
+        assert_eq!(
+            r.breakers
+                .global_for(RendererKind::Lightpanda)
+                .snapshot()
+                .state,
+            "closed",
+            "one dead origin must not disable lightpanda for every other host"
+        );
+        assert_eq!(
+            r.breakers
+                .host_for("dead-origin.example", RendererKind::Lightpanda)
+                .await
+                .snapshot()
+                .state,
+            "open",
+            "the host tier must still learn that this origin is unreachable"
+        );
+    }
+
+    /// A skipped tier must report the budget the CALLER was given, never the
+    /// sub-minimum remainder that is left when the skip fires.
+    ///
+    /// Regression guard for the production bug this pairs with: `remaining` is by
+    /// definition below MIN_TIER_BUDGET on that branch and in production is ~0, so
+    /// it rendered as the literal `Timeout after 1ms` on requests that had been
+    /// granted 30s and had spent ~25s of it walking the ladder. The sibling test
+    /// above only asserts the Timeout *variant*, so without this the exact bug can
+    /// come back without failing anything.
+    #[tokio::test]
+    async fn budget_skip_reports_the_requested_budget_not_the_remainder() {
+        let slow_calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let slow = Arc::new(SlowFailingFetcher {
+            name: "lightpanda",
+            burn: Duration::from_millis(1_200),
+            calls: slow_calls.clone(),
+        });
+        let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let chrome = Arc::new(CountingFetcher {
+            name: "camofox",
+            calls: calls.clone(),
+        });
+        let r = make_renderer_with_mocks(vec![slow, chrome]);
+
+        let err = r
+            .fetch_with_js(
+                "https://example.com",
+                &HashMap::new(),
+                None,
+                None,
+                crw_core::Deadline::from_request_ms(1_500),
+            )
+            .await
+            .expect_err("both tiers must fail");
+
+        assert_eq!(
+            calls.load(std::sync::atomic::Ordering::SeqCst),
+            0,
+            "camofox must be skipped for lack of budget, or this test proves nothing"
+        );
+        match err {
+            CrwError::Timeout(ms) => assert_eq!(
+                ms, 1_500,
+                "a budget skip must report the requested budget (1500ms), not the \
+                 sub-minimum remainder; got {ms}ms"
+            ),
+            other => panic!("expected Timeout, got {other:?}"),
         }
     }
 
