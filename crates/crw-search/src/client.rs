@@ -22,9 +22,12 @@ const MAX_RESPONSE_BYTES: usize = 10 * 1024 * 1024;
 /// to the caller anyway, so a 64 KiB ceiling is plenty for diagnostics while
 /// closing the door on hostile upstreams that retaliate to invalid params
 /// with multi-megabyte error pages.
-const MAX_ERROR_BODY_BYTES: usize = 64 * 1024;
+pub(crate) const MAX_ERROR_BODY_BYTES: usize = 64 * 1024;
 
-async fn read_capped(response: reqwest::Response, cap: usize) -> Result<Vec<u8>, SearchError> {
+pub(crate) async fn read_capped(
+    response: reqwest::Response,
+    cap: usize,
+) -> Result<Vec<u8>, SearchError> {
     if let Some(declared) = response.content_length()
         && declared as usize > cap
     {
