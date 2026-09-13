@@ -478,6 +478,8 @@ async fn scrape_url_inner(
                                 // deliberately NOT swapped: browser tiers leave it
                                 // `None`, and it is read later for `data.content_type`.
                                 fetch_result.html = std::mem::take(&mut js_fetch.html);
+                                // The verdict describes the body, so it moves with it.
+                                fetch_result.wall = js_fetch.wall.take();
                                 // Replace the original "Target returned 4xx" with the JS
                                 // fetch's warning (which is None for a clean 2xx render),
                                 // so a successful escalation doesn't leak the original
@@ -534,6 +536,14 @@ async fn scrape_url_inner(
     );
     if data.block.is_none() && data.http_error().is_some() {
         data.block = classify_error_page_wall(fetch_result.status_code, &fetch_result.html);
+    }
+    // The wall the renderer ladder recognized on this body. Covers what
+    // `classify_block` cannot re-derive: a vendor block served with HTTP 200 and
+    // enough prose to pass its markdown guard. Trusted only for an error-page
+    // sized body, because the ladder's vendor markers include the Cloudflare
+    // loader that cleared pages carry too, and a cleared page is bigger.
+    if data.block.is_none() && data.is_error_page_sized() {
+        data.block = fetch_result.wall.clone();
     }
     // Surface redirect mismatch as warning. Helps detect cases like
     // northernair.ca/history.htm silently 302'ing to the homepage — extraction
@@ -2236,6 +2246,7 @@ mod tests {
             render_decision: None,
             credit_cost: 0,
             warnings: Vec::new(),
+            wall: None,
             truncated: false,
             deadline_exceeded: false,
             captured_responses: Vec::new(),

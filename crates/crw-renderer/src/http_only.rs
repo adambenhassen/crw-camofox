@@ -1095,6 +1095,7 @@ impl PageFetcher for HttpFetcher {
             warnings: challenge
                 .map(|c| vec![c.warning_text().to_string()])
                 .unwrap_or_default(),
+            wall: None,
             truncated: false,
             deadline_exceeded: false,
             captured_responses: Vec::new(),

@@ -608,6 +608,13 @@ pub struct ScrapeData {
 const ERROR_PAGE_MAX_TEXT: usize = 2_500;
 
 impl ScrapeData {
+    /// True when the body the caller asked for is no bigger than an error page
+    /// (see [`ERROR_PAGE_MAX_TEXT`]). `false` when there is nothing to measure.
+    pub fn is_error_page_sized(&self) -> bool {
+        self.rendered_text_len()
+            .is_some_and(|n| n < ERROR_PAGE_MAX_TEXT)
+    }
+
     /// Size of the body the caller actually asked for, in bytes.
     ///
     /// Text formats first: the previous gate took `.max()` across all four body
@@ -1068,6 +1075,18 @@ mod tests {
         d.raw_html = None;
         d.warning = None;
         d
+    }
+
+    #[test]
+    fn error_page_sized_follows_the_error_page_bar() {
+        assert!(page(200, 120).is_error_page_sized());
+        assert!(!page(200, ERROR_PAGE_MAX_TEXT).is_error_page_sized());
+        let mut nothing = page(200, 0);
+        nothing.markdown = None;
+        assert!(
+            !nothing.is_error_page_sized(),
+            "no body is not a measurement"
+        );
     }
 
     #[test]
@@ -2256,6 +2275,11 @@ pub struct FetchResult {
     pub credit_cost: u32,
     /// Soft-failure / informational warnings to surface to the caller.
     pub warnings: Vec<String>,
+    /// The anti-bot wall a JS tier recognized on THIS body, set only when the
+    /// ladder rejected the body for it and returned it anyway because no tier
+    /// did better. The page-level classifier cannot always re-derive it: a
+    /// vendor wall with enough prose passes its markdown guard.
+    pub wall: Option<BlockOutcome>,
     /// Set by chrome renderer when the navigation budget elapsed before
     /// `loadEventFired` and we snapshotted the partial DOM. Mid-load HTML may
     /// still extract usefully (`single.rs` decides success on md length).

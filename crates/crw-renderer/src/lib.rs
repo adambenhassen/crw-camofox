@@ -62,7 +62,7 @@ use crw_core::config::{BUILTIN_UA_POOL, RendererConfig, RendererMode, StealthCon
 use crw_core::error::{CrwError, CrwResult};
 use crw_core::metrics::metrics;
 use crw_core::types::{
-    FailoverErrorKind, FetchResult, RenderDecision, RendererKind, resolve_render_js,
+    BlockOutcome, FailoverErrorKind, FetchResult, RenderDecision, RendererKind, resolve_render_js,
 };
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -1204,6 +1204,7 @@ impl FallbackRenderer {
                     let accepted = body.accepted();
                     let body_site_blocked = body.site_blocked(result.status_code);
                     let rejection = body.rejection_warning(renderer.name(), result.status_code);
+                    let wall = body.wall();
                     let JsBodyChecks {
                         text_len,
                         is_placeholder,
@@ -1390,6 +1391,7 @@ impl FallbackRenderer {
                     // accumulating bodies), but stitch later renderers'
                     // warnings onto it so debug output reflects every attempt.
                     let mut annotated = result;
+                    annotated.wall = wall;
                     let attempt_warning = rejection;
                     if is_bot_wall || vendor_block.is_some() || is_status_blocked || antibot_blocked
                     {
@@ -1581,6 +1583,7 @@ impl FallbackRenderer {
                         // `classify_block` downstream still surfaces it as blocked.
                         // The leak arm only runs when `thin_result` is None.
                         let rejection = body.rejection_warning(renderer.name(), result.status_code);
+                        result.wall = body.wall();
                         last_error = Some(CrwError::RendererError(format!(
                             "leak attempt: {rejection}"
                         )));
@@ -1761,6 +1764,36 @@ impl JsBodyChecks {
                 "{renderer} returned thin content (text_len={})",
                 self.text_len
             )
+        }
+    }
+
+    /// The wall this body is, when a wall signal is why it was rejected. A
+    /// blocked status alone is not one: `ScrapeData::http_error` owns that.
+    fn wall(&self) -> Option<BlockOutcome> {
+        let outcome = |vendor: &str, reason: String| {
+            Some(BlockOutcome {
+                vendor: vendor.to_string(),
+                reason,
+            })
+        };
+        if let Some(vendor) = self.vendor_block {
+            outcome(vendor, format!("{vendor} block page"))
+        } else if self.cf_challenge {
+            outcome(
+                "cloudflare",
+                "cloudflare challenge interstitial".to_string(),
+            )
+        } else if self.antibot_blocked
+            && self.antibot.signal != crw_extract::antibot::AntibotSignal::StructuralFailure
+        {
+            outcome(
+                self.antibot.signal.class_name(),
+                self.antibot.reason.clone(),
+            )
+        } else if self.is_bot_wall {
+            outcome("generic_block", "anti-bot interstitial".to_string())
+        } else {
+            None
         }
     }
 
@@ -2039,6 +2072,7 @@ mod tests {
                 render_decision: None,
                 credit_cost: 0,
                 warnings: Vec::new(),
+                wall: None,
                 truncated: false,
                 deadline_exceeded: false,
                 captured_responses: Vec::new(),
@@ -2103,6 +2137,7 @@ mod tests {
                 render_decision: None,
                 credit_cost: 0,
                 warnings: Vec::new(),
+                wall: None,
                 truncated: false,
                 deadline_exceeded: false,
                 captured_responses: Vec::new(),
@@ -3341,6 +3376,43 @@ mod tests {
                 .is_some_and(|w| w.contains("HTTP 403")),
             "the rejection must be visible, got {:?}",
             result.warning
+        );
+    }
+
+    /// Every tier hits the same PerimeterX wall served under HTTP 200. The ladder
+    /// returns the body as its best candidate; the verdict must travel with it,
+    /// because the page-level classifier lets a wall with this much prose pass.
+    #[tokio::test]
+    async fn rejected_wall_body_carries_the_ladder_verdict() {
+        let wall = format!(
+            "<html><head><script>window._pxAppId = 'PXabc';</script></head><body>\
+             <h1>Access to this page has been denied</h1><p>{}</p></body></html>",
+            "Press & Hold to confirm you are a human. ".repeat(4)
+        );
+        let lp = Arc::new(MockFetcher {
+            name: "lightpanda",
+            behavior: MockBehavior::Ok(wall.clone()),
+        }) as Arc<dyn PageFetcher>;
+        let chrome = Arc::new(MockFetcher {
+            name: "chrome",
+            behavior: MockBehavior::Ok(wall),
+        }) as Arc<dyn PageFetcher>;
+        let r = make_renderer_with_mocks(vec![lp, chrome]);
+
+        let result = r
+            .fetch(
+                "https://walled.example",
+                &HashMap::new(),
+                Some(true),
+                None,
+                None,
+                tdl(),
+            )
+            .await
+            .expect("the wall body is returned as the best candidate");
+        assert_eq!(
+            result.wall.as_ref().map(|w| w.vendor.as_str()),
+            Some("perimeterx")
         );
     }
 

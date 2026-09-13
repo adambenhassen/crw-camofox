@@ -1882,6 +1882,7 @@ impl CdpRenderer {
             } else {
                 Vec::new()
             },
+            wall: None,
             truncated,
             deadline_exceeded: deadline.remaining().is_zero(),
             captured_responses,
@@ -1986,6 +1987,7 @@ impl CdpRenderer {
             } else {
                 Vec::new()
             },
+            wall: None,
             truncated,
             deadline_exceeded: deadline.remaining().is_zero(),
             captured_responses,

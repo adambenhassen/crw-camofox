@@ -723,6 +723,7 @@ impl PageFetcher for CamofoxRenderer {
             render_decision: None,
             credit_cost: 0,
             warnings: Vec::new(),
+            wall: None,
             truncated: false,
             deadline_exceeded: deadline.expired(),
             captured_responses: Vec::new(),
