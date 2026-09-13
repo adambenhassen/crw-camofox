@@ -1107,7 +1107,8 @@ pub(crate) fn map_search_error(err: SearchError, timeout_ms: u64, base_url: &str
                 search_backend = %crate::diagnostics::sanitize_url_origin(base_url),
                 "search backend unreachable: {msg}"
             );
-            CrwError::TargetUnreachable(format!("search backend unreachable: {msg}"))
+            // Our own backend, not the caller's target: 502, not 422.
+            CrwError::HttpError(format!("search backend unreachable: {msg}"))
         }
     }
 }
@@ -1548,8 +1549,10 @@ mod tests {
         // operator gets the sanitized origin from the log line instead.
         let err = SearchError::Transport("dns error: failed to lookup address".into());
         let mapped = map_search_error(err, 5000, "https://user:pass@searxng:8080/tok?k=v");
+        // Our search backend being down is not the caller's fault: a 5xx, never
+        // `TargetUnreachable` (422, "you handed us a dead target").
         match mapped {
-            CrwError::TargetUnreachable(msg) => {
+            CrwError::HttpError(msg) => {
                 assert!(msg.contains("dns error"), "{msg}");
                 assert!(!msg.contains("searxng"), "must not name the backend: {msg}");
                 assert!(!msg.contains("8080"), "must not leak the port: {msg}");
@@ -1557,7 +1560,7 @@ mod tests {
                 assert!(!msg.contains("pass"), "must not leak credentials: {msg}");
                 assert!(!msg.contains("tok"), "must not leak path token: {msg}");
             }
-            other => panic!("expected TargetUnreachable, got {other:?}"),
+            other => panic!("expected HttpError, got {other:?}"),
         }
     }
 
