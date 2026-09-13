@@ -23,16 +23,65 @@ use regex::Regex;
 use std::collections::HashMap;
 use std::sync::OnceLock;
 use std::time::Duration;
-use tokio::sync::Semaphore;
+use tokio::sync::{Mutex, Semaphore};
 
 const UA: &str = "crw-opencore/0.x (https://fastcrw.com; contact@fastcrw.com) reqwest";
 const TIMEOUT: Duration = Duration::from_secs(20);
 const MAX_CONCURRENCY: usize = 8;
 const CACHE_TTL: Duration = Duration::from_secs(24 * 3600);
-// Entries hold full OpenAlex/SS JSON responses (~10-50KB each). 20k entries
-// could pin 200MB-1GB and OOM-restart crw-api under research load; 3k keeps the
-// cache useful while bounding it to ~50-150MB. ponytail: cap, not a byte-weigher.
+// Entries hold full OpenAlex/SS JSON responses (~10-50KB each) and, since the
+// arXiv pool, raw Atom XML bodies too. Those are the fattest entries here: up
+// to 40 <entry> blocks carrying authors, links, categories and full abstracts,
+// with none of the field pruning `select=` gives the JSON responses. moka's
+// `max_capacity` counts ENTRIES, not bytes, so the practical ceiling is above
+// the old ~50-150MB estimate. 3k keeps the cache useful while still bounding
+// it; revisit with a byte-weigher if crw-api's RSS ever tracks research load.
 const CACHE_CAP: u64 = 3_000;
+
+/// arXiv's Atom API. No key, no account.
+const ARXIV_URL: &str = "https://export.arxiv.org/api/query";
+/// arXiv's terms: "no more than one request every three seconds, and limit
+/// requests to a single connection at a time ... collectively" across every
+/// machine you control. 3.5s buys margin over their 3s floor.
+///
+/// A per-process pacer IS collectively compliant here because this code runs in
+/// the engine, which is a single container. The one window where it is not is a
+/// blue/green deploy, when the next colour briefly runs alongside the current
+/// one; that is bounded to the length of a deploy and costs at most a doubled
+/// rate for those minutes.
+const ARXIV_MIN_INTERVAL: Duration = Duration::from_millis(3_500);
+/// Benchmark escape hatch, read once. Production never sets it, so the default
+/// above is what ships; a long measurement run can widen the interval to stay
+/// well clear of arXiv's cool-off, which is slow to recover once tripped.
+fn arxiv_interval() -> Duration {
+    static I: OnceLock<Duration> = OnceLock::new();
+    *I.get_or_init(|| {
+        std::env::var("CRW_ARXIV_MIN_INTERVAL_MS")
+            .ok()
+            .and_then(|v| v.parse::<u64>().ok())
+            .map(Duration::from_millis)
+            .unwrap_or(ARXIV_MIN_INTERVAL)
+    })
+}
+/// Retries for arXiv only, deliberately lower than `get_json`'s four. That path
+/// can spend ~94s worst case (4 attempts x 20s + 2+4+8s backoff), and the
+/// server's outer timeout returns 504 at 60s — so its own retry budget can
+/// outlive the request it belongs to. One retry keeps this pool inside the
+/// budget even when arXiv is refusing.
+const ARXIV_MAX_ATTEMPTS: u32 = 2;
+/// Hard ceiling on how long the arXiv pool may take, queue wait INCLUDED.
+///
+/// The pacing gate serialises every arXiv call process-wide, so under
+/// concurrency the Nth caller waits (N-1) intervals before it even starts.
+/// `search_papers_pools` joins its pools with `tokio::join!`, which waits for
+/// ALL of them — so without this ceiling a queue of arXiv callers would hold
+/// finished OpenAlex/SS results hostage until the server's outer 60s timeout
+/// turned the whole request into a 504. A request that used to succeed with
+/// three pools must never fail because a fourth one was added.
+///
+/// 12s: enough for the gate's 3.5s plus a slow answer, small enough that four
+/// of them still fit inside the outer budget with room for the other legs.
+const ARXIV_BUDGET: Duration = Duration::from_secs(12);
 
 /// Per-call credentials, borrowed from the route's `AppConfig`.
 #[derive(Clone, Copy, Default)]
@@ -82,6 +131,18 @@ fn infra() -> Option<&'static Infra> {
         })
     })
     .as_ref()
+}
+
+/// Serialises arXiv calls process-wide and spaces them.
+///
+/// A Mutex, not a Semaphore: the requirement is "one connection at a TIME",
+/// so the lock is held across the request, and the next caller waits out the
+/// remaining interval before starting. Measured: called this way arXiv failed 5
+/// of 191 real queries (2.6%); called from 6 parallel workers it failed 150 of
+/// 191 (79%). The pacing is the whole difference.
+fn arxiv_gate() -> &'static Mutex<Option<std::time::Instant>> {
+    static G: OnceLock<Mutex<Option<std::time::Instant>>> = OnceLock::new();
+    G.get_or_init(|| Mutex::new(None))
 }
 
 fn sem() -> &'static Semaphore {
@@ -310,6 +371,24 @@ fn openalex_base(keys: &ResearchKeys<'_>) -> String {
 }
 
 /// OpenAlex `/works?search=` + filters → hits.
+/// Strip OpenAlex's wildcard metacharacters from a free-text search term.
+///
+/// OpenAlex reads `?` and `*` in `search=` as WILDCARDS and rejects the whole
+/// query with a 400 ("Wildcards (* or ?) require exact (no-stem) search"),
+/// which `get_json` turns into `None` and the pool into an empty `Vec` — a
+/// silent total loss of this pool, with nothing logged anywhere.
+///
+/// It is not an edge case: research queries are questions. Measured on the
+/// 191-question ArXivQA set, **121 of them (63%) contain `?`**, so before this
+/// the OpenAlex pool contributed nothing to nearly two thirds of real traffic.
+///
+/// Replaced with a space rather than deleted, so `what?why` cannot become one
+/// run-together token. Only these two characters matter; everything else in a
+/// natural-language question is already safe once form-urlencoded.
+fn oa_sanitize(query: &str) -> String {
+    query.replace(['?', '*'], " ").trim().to_string()
+}
+
 async fn openalex_search(
     keys: &ResearchKeys<'_>,
     query: &str,
@@ -340,7 +419,7 @@ async fn openalex_search(
     };
     let url = format!(
         "https://api.openalex.org/works?search={}{}&per_page={}&select=id,display_name,ids,abstract_inverted_index,cited_by_count,relevance_score{}",
-        enc(&search_term),
+        enc(&oa_sanitize(&search_term)),
         filter_param,
         k.min(50),
         openalex_base(keys),
@@ -494,6 +573,188 @@ pub fn merge_rank(pools: Vec<Vec<PaperHit>>, k: usize) -> Vec<ResearchPaperResul
         .collect()
 }
 
+/// arXiv Atom XML -> [`PaperHit`]s.
+///
+/// PANIC-FREE BY CONSTRUCTION: no `unwrap`, no `expect`, no indexing, no
+/// slicing. `search_papers_pools` joins its pools with `tokio::join!`, which
+/// does NOT isolate a panic, and `crw-server` has no `catch_unwind` layer — a
+/// panic here would drop the caller's connection with no HTTP response at all,
+/// not even a 500.
+fn parse_arxiv_atom(body: &str) -> Vec<PaperHit> {
+    static ENTRY: OnceLock<Option<Regex>> = OnceLock::new();
+    static ID: OnceLock<Option<Regex>> = OnceLock::new();
+    static TITLE: OnceLock<Option<Regex>> = OnceLock::new();
+    static SUMMARY: OnceLock<Option<Regex>> = OnceLock::new();
+    static DOI: OnceLock<Option<Regex>> = OnceLock::new();
+
+    // `(?s)` on every multi-line field: the regex crate's `.` does not match
+    // `\n`, and arXiv wraps long titles and abstracts across lines, so without
+    // DOTALL they silently truncate at the first newline.
+    let (Some(entry), Some(id), Some(title), Some(summary), Some(doi)) = (
+        ENTRY
+            .get_or_init(|| Regex::new(r"(?s)<entry>(.*?)</entry>").ok())
+            .as_ref(),
+        ID.get_or_init(|| Regex::new(r"<id>([^<]*)</id>").ok())
+            .as_ref(),
+        TITLE
+            .get_or_init(|| Regex::new(r"(?s)<title>(.*?)</title>").ok())
+            .as_ref(),
+        SUMMARY
+            .get_or_init(|| Regex::new(r"(?s)<summary>(.*?)</summary>").ok())
+            .as_ref(),
+        DOI.get_or_init(|| Regex::new(r"<arxiv:doi>([^<]*)</arxiv:doi>").ok())
+            .as_ref(),
+    ) else {
+        // A literal that fails to compile is a bug, but returning an empty pool
+        // is the one response here that cannot take the request down with it.
+        return Vec::new();
+    };
+
+    let grab = |re: &Regex, hay: &str| -> Option<String> {
+        re.captures(hay)
+            .and_then(|c| c.get(1))
+            .map(|m| unescape_xml(m.as_str().trim()))
+    };
+
+    // Scoped to each <entry> block FIRST. The feed carries its own
+    // document-level <id> and <title> (4 <id> for 3 entries, verified), so a
+    // document-wide regex would misalign ids to entries.
+    entry
+        .captures_iter(body)
+        .filter_map(|c| c.get(1))
+        .filter_map(|block| {
+            let b = block.as_str();
+            // arXiv's <id> is a URL whose tail is the versioned id
+            // (".../abs/2410.17954v2"); `norm_arxiv` strips the version.
+            let arxiv = grab(id, b).and_then(|u| {
+                arxiv_re()
+                    .find(&u)
+                    .map(|m| norm_arxiv(m.as_str()))
+                    .filter(|_| u.contains("arxiv.org/abs/"))
+            })?;
+            let t = grab(title, b).unwrap_or_default();
+            Some(PaperHit {
+                work_id: None,
+                arxiv: Some(arxiv),
+                // Present only for papers with a registered journal DOI; most
+                // preprints have none.
+                doi: grab(doi, b),
+                title: t,
+                abstract_: grab(summary, b),
+                // arXiv exposes no citation count anywhere in the response.
+                cited_by: 0,
+                // No native relevance score in the body. `ss_search` already
+                // sets 0.0 for the same reason, and `merge_rank` ranks on
+                // cross-pool frequency first anyway, so a synthetic score would
+                // be invented weight, not information.
+                score: 0.0,
+            })
+        })
+        .collect()
+}
+
+/// The five XML entities arXiv actually emits. Nothing in the crate decodes
+/// them, so without this a literal `&amp;` leaks into titles and abstracts.
+fn unescape_xml(s: &str) -> String {
+    s.replace("&lt;", "<")
+        .replace("&gt;", ">")
+        .replace("&quot;", "\"")
+        .replace("&#39;", "'")
+        // `&amp;` LAST, or "&amp;lt;" would decode twice into "<".
+        .replace("&amp;", "&")
+}
+
+/// Clean a free-text query for arXiv, which is NOT the same rule as OpenAlex's.
+///
+/// The two characters `oa_sanitize` strips are different kinds of thing, and
+/// only one of them is punctuation:
+///
+/// - `?` is sentence punctuation. Research queries are questions — 121 of the
+///   191 real ArXivQA questions (63%) end in one — and a trailing `?` is not
+///   part of any term anyone is searching for.
+/// - `*` is part of real terms: `A*` search, `C*-algebra`. Stripping it does
+///   not return nothing, it returns the WRONG thing, because arXiv ORs
+///   space-separated terms and `A*` would become a bare `A`.
+///
+/// So arXiv keeps `*` and loses `?`. OpenAlex has to lose both, because it
+/// reads both as wildcards and 400s the whole query either way. Two APIs, two
+/// rules, deliberately not shared.
+fn arxiv_sanitize(query: &str) -> String {
+    query
+        .replace('?', " ")
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+/// arXiv `/api/query` -> hits. Failures return empty, like every other pool.
+async fn arxiv_search(query: &str, k: usize) -> Vec<PaperHit> {
+    let q = arxiv_sanitize(query);
+    if q.is_empty() {
+        return Vec::new();
+    }
+    // Verified server behaviour: `all:mixture of experts` is rewritten to
+    // `all:mixture OR all:of OR all:experts` — space-joined terms are OR'd, not
+    // treated as a phrase. That is what we want for recall on a natural
+    // language question, so it is left alone rather than quoted into a phrase.
+    let url = format!(
+        "{}?search_query=all:{}&max_results={}&sortBy=relevance",
+        ARXIV_URL,
+        enc(&q),
+        k.min(40),
+    );
+    match arxiv_get(&url).await {
+        Some(body) => parse_arxiv_atom(&body),
+        None => Vec::new(),
+    }
+}
+
+/// One paced arXiv fetch. Never panics, never propagates an error.
+///
+/// Shares `infra()`'s client (so it inherits the 20s timeout) and its cache, but
+/// takes `arxiv_gate()` rather than the shared `sem()`: the other pools may run
+/// 8-wide, arXiv must run 1-wide.
+async fn arxiv_get(url: &str) -> Option<String> {
+    let inf = infra()?;
+    let ck = format!("arxiv|{url}");
+    if let Some(hit) = inf.cache.get(&ck).await {
+        // Cached as a JSON string so the one shared cache can hold both the
+        // JSON pools' values and this one.
+        return hit.as_str().map(|s| s.to_string());
+    }
+    let mut gate = arxiv_gate().lock().await;
+    for attempt in 0..ARXIV_MAX_ATTEMPTS {
+        if let Some(prev) = *gate {
+            let since = prev.elapsed();
+            let interval = arxiv_interval();
+            if since < interval {
+                tokio::time::sleep(interval - since).await;
+            }
+        }
+        *gate = Some(std::time::Instant::now());
+        let resp = inf.http.get(url).header("User-Agent", UA).send().await;
+        match resp {
+            Ok(r) if r.status().is_success() => {
+                let body = r.text().await.ok()?;
+                inf.cache
+                    .insert(ck, serde_json::Value::String(body.clone()))
+                    .await;
+                return Some(body);
+            }
+            // 429 here carries an empty body and no usable Retry-After, so
+            // there is nothing to branch on: wait out one more interval and
+            // give up. Any other status is not worth a retry.
+            Ok(r) if r.status().as_u16() == 429 || r.status().is_server_error() => {
+                if attempt + 1 == ARXIV_MAX_ATTEMPTS {
+                    return None;
+                }
+            }
+            _ => return None,
+        }
+    }
+    None
+}
+
 /// `search_papers` OpenAlex + SS legs (the route adds the SearXNG leg + calls
 /// [`merge_rank`]). Returns raw pools so the route can union its own search.
 pub async fn search_papers_pools(
@@ -507,7 +768,7 @@ pub async fn search_papers_pools(
     // near-certain 429s — wasted round-trips that only add backoff load — so skip
     // them entirely without a key and let OpenAlex carry scholarly recall.
     let has_s2 = keys.s2_key.is_some();
-    let (oa, ss, snip) = tokio::join!(
+    let (oa, ss, snip, ax) = tokio::join!(
         openalex_search(keys, query, k, f),
         async {
             if has_s2 {
@@ -523,6 +784,15 @@ pub async fn search_papers_pools(
                 Vec::new()
             }
         },
+        // Budgeted, and a timeout degrades to an empty pool rather than
+        // failing the request — the same "failure = empty" contract every other
+        // pool follows. This is what stops the serialised arXiv queue from
+        // turning a healthy request into a 504.
+        async {
+            tokio::time::timeout(ARXIV_BUDGET, arxiv_search(query, k))
+                .await
+                .unwrap_or_default()
+        },
     );
     // snippet ids -> thin hits (arxiv only) so the union picks up body matches
     let snip_hits: Vec<PaperHit> = snip
@@ -537,7 +807,7 @@ pub async fn search_papers_pools(
             score: 0.0,
         })
         .collect();
-    vec![oa, ss, snip_hits]
+    vec![oa, ss, snip_hits, ax]
 }
 
 /// Is `id` an arXiv-form id (`arxiv:X`, `arXiv:X`, or a bare `NNNN.NNNNN`)?
@@ -829,6 +1099,174 @@ mod tests {
         println!("references: {}", refs.len());
     }
 
+    /// The OpenAlex pool was silently empty on 63% of real research traffic:
+    /// `?` is a WILDCARD to OpenAlex, and a query carrying one is rejected with
+    /// a 400 that `get_json` converts to `None` and the pool to an empty Vec.
+    /// Measured on the 191-question ArXivQA set, 121 questions contain `?`.
+    /// The arXiv pool parses Atom by regex because the crate has no XML parser
+    /// and should not grow one. That is only safe with the three guards this
+    /// pins: entry-scoping, DOTALL, and entity unescaping.
+    ///
+    /// The fixture is shaped like a REAL response (verified against a live
+    /// fetch): a feed-level <id>/<title> before the entries, a multi-line
+    /// title, an escaped ampersand, and one entry with a DOI and one without.
+    /// The arXiv pool must never hold the other pools hostage.
+    ///
+    /// The pacing gate serialises arXiv process-wide, and `search_papers_pools`
+    /// joins with `tokio::join!`, so without a budget a queue of arXiv callers
+    /// would keep already-finished OpenAlex/SS results waiting until the
+    /// server's outer timeout turned the whole request into a 504. A request
+    /// that succeeded with three pools must not fail because a fourth was
+    /// added.
+    #[tokio::test]
+    async fn arxiv_budget_degrades_to_an_empty_pool_instead_of_stalling() {
+        // The budget must be well under the server's outer 60s timeout, or it
+        // could not protect anything: the request would 504 before it fired.
+        assert!(
+            ARXIV_BUDGET < Duration::from_secs(30),
+            "ARXIV_BUDGET must leave the other pools room inside the request"
+        );
+        // Stands in for an arXiv call stuck behind a long queue. A tiny budget
+        // keeps the test instant while exercising the identical code path.
+        let stalled = async {
+            tokio::time::sleep(Duration::from_secs(600)).await;
+            vec![PaperHit {
+                work_id: None,
+                arxiv: Some("2401.00001".into()),
+                doi: None,
+                title: "never arrives".into(),
+                abstract_: None,
+                cited_by: 0,
+                score: 0.0,
+            }]
+        };
+        let out: Vec<PaperHit> = tokio::time::timeout(Duration::from_millis(10), stalled)
+            .await
+            .unwrap_or_default();
+        assert!(
+            out.is_empty(),
+            "a stalled arXiv call must yield an empty pool, not block the join"
+        );
+    }
+
+    /// `oa_sanitize` is an OpenAlex rule and must not reach arXiv: `?` and `*`
+    /// are part of real search terms, so stripping them returns the WRONG
+    /// answer rather than no answer.
+    /// arXiv and OpenAlex need DIFFERENT cleaning, and the difference is not
+    /// cosmetic: `*` belongs to real terms, `?` is punctuation.
+    #[test]
+    fn arxiv_sanitize_keeps_star_and_drops_question_mark() {
+        // The reviewer's case: `*` must survive or the term is destroyed.
+        assert_eq!(arxiv_sanitize("A* search algorithm"), "A* search algorithm");
+        assert_eq!(
+            arxiv_sanitize("C*-algebra classification"),
+            "C*-algebra classification"
+        );
+        // The common case: 63% of real research queries end in a question mark.
+        assert_eq!(
+            arxiv_sanitize("Which paper improves upon GRPO?"),
+            "Which paper improves upon GRPO"
+        );
+        // Collapsing whitespace, so a stripped `?` cannot leave a double space
+        // that turns into an empty OR term.
+        assert_eq!(arxiv_sanitize("what? why?"), "what why");
+        assert_eq!(arxiv_sanitize("   "), "");
+        // And the OpenAlex rule stays stricter, because its API is stricter.
+        assert_eq!(oa_sanitize("A* search algorithm"), "A  search algorithm");
+    }
+
+    #[test]
+    fn parse_arxiv_atom_handles_a_real_shaped_feed() {
+        let body = r#"<?xml version="1.0" encoding="UTF-8"?>
+<feed xmlns="http://www.w3.org/2005/Atom">
+  <id>http://arxiv.org/api/xyzzy</id>
+  <title>ArXiv Query: search_query=all:mixture&amp;start=0</title>
+  <entry>
+    <id>http://arxiv.org/abs/2410.17954v2</id>
+    <title>ExpertFlow: Efficient Inference
+  via Predictive Caching &amp; Token Scheduling</title>
+    <summary>Sparse models can outperform dense ones.</summary>
+    <arxiv:doi>10.1145/3770743.3804292</arxiv:doi>
+  </entry>
+  <entry>
+    <id>http://arxiv.org/abs/1701.06538</id>
+    <title>Outrageously Large Neural Networks</title>
+    <summary>Conditional computation.</summary>
+  </entry>
+</feed>"#;
+        let hits = parse_arxiv_atom(body);
+
+        // Two entries, NOT three: the feed-level <id>/<title> must not be read
+        // as an entry. Without entry-scoping the ids misalign to the titles.
+        assert_eq!(hits.len(), 2);
+
+        // The version suffix arXiv always returns is stripped, so this key can
+        // match the same paper arriving from OpenAlex or Semantic Scholar.
+        assert_eq!(hits[0].arxiv.as_deref(), Some("2410.17954"));
+        assert_eq!(hits[1].arxiv.as_deref(), Some("1701.06538"));
+
+        // DOTALL: without it the title truncates at the newline.
+        assert!(hits[0].title.contains("via Predictive Caching"));
+        // Entities are decoded, or a literal "&amp;" reaches the caller.
+        assert!(hits[0].title.contains("Caching & Token"));
+
+        // DOI only where the paper has one; a preprint without it stays None
+        // rather than becoming an empty string that would key wrongly.
+        assert_eq!(hits[0].doi.as_deref(), Some("10.1145/3770743.3804292"));
+        assert_eq!(hits[1].doi, None);
+
+        // arXiv exposes neither, and inventing them would be fabricated weight
+        // in a ranker that sorts on them.
+        assert!(hits.iter().all(|h| h.cited_by == 0 && h.score == 0.0));
+        assert!(hits.iter().all(|h| h.work_id.is_none()));
+    }
+
+    /// Malformed input must yield an empty pool, never a panic. `tokio::join!`
+    /// does not isolate panics and the server has no catch_unwind layer, so a
+    /// panic here drops the caller's connection with no response at all.
+    #[test]
+    fn parse_arxiv_atom_never_panics_on_junk() {
+        for body in [
+            "",
+            "not xml at all",
+            "<feed><entry></entry></feed>",
+            "<entry><id>http://arxiv.org/abs/</id></entry>",
+            // An entry whose id is not an arXiv abs URL must be dropped, not
+            // mined for any digits that happen to look like an id.
+            "<entry><id>http://example.com/1234.5678</id></entry>",
+            "<entry><id>http://arxiv.org/abs/2410.17954v2</id>",
+        ] {
+            let _ = parse_arxiv_atom(body);
+        }
+        // The one that IS well-formed but non-arXiv yields nothing.
+        assert!(
+            parse_arxiv_atom("<entry><id>http://example.com/1234.5678</id></entry>").is_empty()
+        );
+    }
+
+    #[test]
+    fn oa_sanitize_strips_wildcards_that_400_the_whole_query() {
+        // The exact shape that fails live: a natural-language question.
+        assert_eq!(
+            oa_sanitize("Which paper improves upon GRPO?"),
+            "Which paper improves upon GRPO"
+        );
+        // `*` is the other wildcard OpenAlex rejects.
+        assert_eq!(oa_sanitize("transformer* scaling"), "transformer  scaling");
+        // Replaced with a SPACE, never deleted: joining the two sides would
+        // invent a token that is in neither the query nor the index.
+        assert_eq!(oa_sanitize("what?why"), "what why");
+        // A query with neither character must come through untouched, so this
+        // cannot quietly alter the 37% that were already working.
+        assert_eq!(
+            oa_sanitize("mixture of experts routing"),
+            "mixture of experts routing"
+        );
+        // Trailing whitespace left by the strip is trimmed, so the encoded URL
+        // does not carry a dangling `+`.
+        assert_eq!(oa_sanitize("scaling laws?  "), "scaling laws");
+    }
+
     #[test]
     fn merge_rank_dedups_and_orders_by_frequency() {
         let a = PaperHit {
@@ -863,5 +1301,34 @@ mod tests {
         // "1.1" appears in 2 pools -> ranks first despite lower citations
         assert_eq!(out[0].primary_id, "arxiv:1.1");
         assert_eq!(out[0].abstract_.as_deref(), Some("x")); // merged the richer record
+    }
+}
+
+#[cfg(test)]
+mod live_arxiv {
+    use super::*;
+
+    /// Live, network-gated. Proves the pool actually talks to arXiv and that the
+    /// paced gate holds: two back-to-back calls must be >= ARXIV_MIN_INTERVAL
+    /// apart, which is the single rule that took arXiv's failure rate from 79%
+    /// to 2.6% in measurement.
+    #[tokio::test]
+    #[ignore = "live network"]
+    async fn arxiv_pool_answers_and_paces() {
+        let t0 = std::time::Instant::now();
+        let a = arxiv_search("mixture of experts routing", 20).await;
+        let b = arxiv_search("retrieval augmented generation", 20).await;
+        let elapsed = t0.elapsed();
+
+        assert!(!a.is_empty(), "first arXiv call returned nothing");
+        assert!(!b.is_empty(), "second arXiv call returned nothing");
+        assert!(
+            a.iter().all(|h| h.arxiv.is_some()),
+            "every hit must carry an arXiv id, it is the dedup key"
+        );
+        assert!(
+            elapsed >= ARXIV_MIN_INTERVAL,
+            "two calls completed in {elapsed:?}, faster than the pacing gate allows"
+        );
     }
 }
