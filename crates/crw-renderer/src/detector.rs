@@ -551,10 +551,21 @@ pub fn looks_like_cloudflare_challenge(html: &str) -> bool {
         strong_end -= 1;
     }
     let strong_src = &html[..strong_end];
+    // The challenge-platform entry is the ORCHESTRATE path, not the bare
+    // directory. Both live under `/cdn-cgi/challenge-platform/`, but they mean
+    // opposite things — measured live upstream on 2026-08-18:
+    //
+    //   interstitial (rocketreach.co, glassdoor.com):
+    //       /cdn-cgi/challenge-platform/h/g/orchestrate/chl_page/v1
+    //   ordinary Bot-Management response, INCLUDING a cleared page:
+    //       /cdn-cgi/challenge-platform/scripts/jsd/main.js
+    //
+    // The `/h/` segment separates them: the challenge orchestrator is always
+    // served from it, the telemetry loader never is.
     const STRONG: [&str; 5] = [
         "cf-browser-verification",
         "cf-challenge-running",
-        "/cdn-cgi/challenge-platform/",
+        "challenge-platform/h/",
         "_cf_chl_opt", // substring of window._cf_chl_opt / __cf_chl_managed_tk__
         "__cf_chl_managed_tk__",
     ];
@@ -1036,6 +1047,20 @@ mod tests {
     fn vendor_cloudflare_challenge_platform_detected() {
         let html = r#"<html><head><script src="/cdn-cgi/challenge-platform/h/g/orchestrate/chl_page/v1?ray=abc"></script></head></html>"#;
         assert_eq!(looks_like_vendor_block(html), Some("cloudflare"));
+    }
+
+    /// Cloudflare injects its Bot Management loader
+    /// (`/cdn-cgi/challenge-platform/scripts/jsd/main.js`) into pages that have
+    /// already cleared. Only the `/h/` orchestrator path marks an interstitial.
+    #[test]
+    fn cleared_page_with_bot_management_loader_is_not_a_challenge() {
+        let filler = "<p>real article content</p>".repeat(4000);
+        let html = format!(
+            "<html><head><title>Glassdoor</title></head><body>{filler}\
+             <script src=\"/cdn-cgi/challenge-platform/scripts/jsd/main.js\"></script>\
+             </body></html>"
+        );
+        assert!(!looks_like_cloudflare_challenge(&html));
     }
 
     #[test]

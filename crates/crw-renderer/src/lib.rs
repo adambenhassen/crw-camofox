@@ -826,27 +826,33 @@ impl FallbackRenderer {
                         Err(e) => {
                             // For `is_auth_blocked` (4xx/5xx soft-block status codes), the
                             // HTTP body is almost certainly an error shell — falling back
-                            // to it silently misleads the caller. Surface the JS failure
-                            // through a warning so the post-extract layer can decide.
-                            // For `needs_js` / `is_blocked` / `is_thin_content`, the HTTP
-                            // body still has *some* useful content so the silent fallback
-                            // remains the safer default.
+                            // to it silently misleads the caller. For `needs_js` /
+                            // `is_blocked` / `is_thin_content`, the HTTP body still has
+                            // *some* useful content, so the fallback itself stays silent
+                            // and only the log level differs.
+                            //
+                            // The warning tag does NOT differ. `JS_ESCALATION_FAILED` is
+                            // how `crw_crawl::single` learns the ladder is spent
+                            // (`js_ladder_exhausted`); tagging only the soft-block arm let
+                            // a body-detected block on a plain 200 — the canonical
+                            // Turnstile-over-200 shape — re-run the ENTIRE ladder against
+                            // a site that had just failed it.
                             if is_auth_blocked {
                                 tracing::error!(
                                     url,
                                     status_code = result.status_code,
                                     "JS escalation failed for soft-block status; surfacing HTTP shell with warning: {e}"
                                 );
-                                let warning = format!("{JS_ESCALATION_FAILED} {e}");
-                                result.warning = Some(match result.warning.take() {
-                                    Some(prev) => format!("{warning}; {prev}"),
-                                    None => warning,
-                                });
                             } else {
                                 tracing::warn!(
                                     "JS rendering failed, falling back to HTTP result: {e}"
                                 );
                             }
+                            let warning = format!("{JS_ESCALATION_FAILED} {e}");
+                            result.warning = Some(match result.warning.take() {
+                                Some(prev) => format!("{warning}; {prev}"),
+                                None => warning,
+                            });
                             stamp_http_decision(&mut result, requested_renderer);
                             Ok(result)
                         }
@@ -2214,6 +2220,55 @@ mod tests {
     /// the JS tier's generic RendererError. `TargetUnreachable` maps to 422 (the caller
     /// gave us a dead target); `RendererError` falls through to a 500 and reads as "our
     /// server broke".
+    /// A 200-status vendor wall must tag the ladder as exhausted, exactly like a
+    /// 403 one does.
+    ///
+    /// `crw_crawl::single` reads `JS_ESCALATION_FAILED` off the warning to decide
+    /// whether the ladder is spent (`js_ladder_exhausted`). The tag used to be
+    /// attached only on the `is_auth_blocked` arm, so a wall served under HTTP
+    /// 200 — the canonical Turnstile shape — came back untagged and the whole
+    /// ladder ran a SECOND time against a site that had just failed it, on a
+    /// deadline it had already spent.
+    #[tokio::test]
+    async fn js_escalation_failure_tags_exhaustion_on_a_200_wall() {
+        let js = Arc::new(MockFetcher {
+            name: "camofox",
+            behavior: MockBehavior::Err("Timeout after 5000ms".to_string()),
+        }) as Arc<dyn PageFetcher>;
+        let mut r = make_renderer_with_mocks(vec![js]);
+        // HTTP 200 carrying a challenge shell: escalation fires via `is_blocked`,
+        // NOT `is_auth_blocked` — the arm that never tagged.
+        r.http = Arc::new(MockFetcher {
+            name: "http",
+            behavior: MockBehavior::OkStatus(
+                200,
+                "<html><head><title>Just a moment...</title></head><body>\
+                 <div id=\"cf-browser-verification\"></div></body></html>"
+                    .to_string(),
+            ),
+        });
+        r.render_js_default = None; // auto branch
+
+        let result = r
+            .fetch(
+                "https://walled.example",
+                &HashMap::new(),
+                None,
+                None,
+                None,
+                tdl(),
+            )
+            .await
+            .expect("falls back to the HTTP shell");
+
+        let warning = result.warning.unwrap_or_default();
+        assert!(
+            warning.contains(JS_ESCALATION_FAILED),
+            "a 200-status wall must report the ladder as exhausted so the caller \
+             does not re-run it; got {warning:?}"
+        );
+    }
+
     /// An HTTP tier that cannot reach the origin at all.
     struct Unreachable;
     #[async_trait::async_trait]
