@@ -337,12 +337,13 @@ impl FallbackRenderer {
             Arc<browser_pool::BrowserContextPool<cdp_conn::CdpConnection>>,
         > = None;
 
+        #[cfg(any(feature = "cdp", feature = "camofox"))]
+        let want = |m: RendererMode| -> bool {
+            matches!(config.mode, RendererMode::Auto) || config.mode == m
+        };
+
         #[cfg(feature = "cdp")]
         {
-            let want = |m: RendererMode| -> bool {
-                matches!(config.mode, RendererMode::Auto) || config.mode == m
-            };
-
             if want(RendererMode::Lightpanda) {
                 if let Some(lp) = &config.lightpanda {
                     js_renderers.push(Arc::new(
@@ -362,20 +363,36 @@ impl FallbackRenderer {
                     ));
                 }
             }
-            // Camofox (Firefox via camofox-browser REST) takes Chrome's slot:
-            // tried after LightPanda and before the CDP chrome tiers. It is not
-            // CDP, so it carries no browser-context pool.
-            #[cfg(feature = "camofox")]
-            if want(RendererMode::Camofox)
-                && let Some(cf) = &config.camofox
-            {
+        }
+
+        // Camofox (Firefox via camofox-browser REST) takes Chrome's slot:
+        // tried after LightPanda and before the CDP chrome tiers. It is not
+        // CDP, so it carries no browser-context pool and does not depend on
+        // the `cdp` feature — a camofox-only build must still register it.
+        #[cfg(feature = "camofox")]
+        if want(RendererMode::Camofox) {
+            if let Some(cf) = &config.camofox {
                 js_renderers.push(Arc::new(camofox::CamofoxRenderer::new(
                     "camofox",
                     &cf.base_url,
                     cf.api_key.clone(),
                     Duration::from_millis(config.chrome_timeout()),
                 )));
+            } else if matches!(config.mode, RendererMode::Camofox) {
+                return Err(CrwError::ConfigError(
+                    "renderer.mode = \"camofox\" but [renderer.camofox] base_url is not \
+                     configured"
+                        .into(),
+                ));
             }
+        }
+        #[cfg(not(feature = "camofox"))]
+        if matches!(config.mode, RendererMode::Camofox) {
+            return Err(CrwError::ConfigError(
+                "renderer.mode = \"camofox\" but this binary was built without the `camofox` \
+                 feature"
+                    .into(),
+            ));
         }
 
         // Spawn the process-wide CDP telemetry sampler. Idempotent —
