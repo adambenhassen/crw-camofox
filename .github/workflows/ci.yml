@@ -61,3 +61,10 @@ jobs:
       # artifacts CI never runs. (Kept in release.yml as a pre-publish gate.)
       - name: Test
         run: cargo test --workspace
+
+      # The Camofox tier and the ladder wiring around it are feature-gated, and
+      # the workspace default builds without them, so the step above never runs
+      # `tests/camofox_tests.rs` or the camofox arms of the renderer tests. The
+      # Docker image ships with `cdp,camofox`; test what ships.
+      - name: Test (camofox tier)
+        run: cargo test -p crw-renderer -p crw-server --features crw-renderer/cdp,crw-renderer/camofox,crw-server/camofox
