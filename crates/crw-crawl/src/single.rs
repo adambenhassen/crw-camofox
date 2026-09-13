@@ -448,9 +448,14 @@ async fn scrape_url_inner(
                         let js_score = js_md_quality.as_ref().map(|q| q.score).unwrap_or(0.0);
                         let before_score = md_quality.as_ref().map(|q| q.score).unwrap_or(0.0);
                         let http_was_thin = md_is_byte_thin;
-                        let quality_improved = js_score > before_score + 0.05;
-                        let accept =
-                            js_md_len >= retry_threshold && (http_was_thin || quality_improved);
+                        let accept = accept_js_escalation(
+                            md_bytes,
+                            http_was_thin,
+                            before_score,
+                            js_md_len,
+                            js_score,
+                            retry_threshold,
+                        );
                         if accept {
                             data = js_data;
                             // `classify_block` below reads `fetch_result.html`, and
@@ -476,12 +481,14 @@ async fn scrape_url_inner(
                                 quality_score_after = js_score,
                                 "JS escalation recovered content"
                             );
-                        } else if js_md_len >= retry_threshold && !http_was_thin {
+                        } else {
                             tracing::info!(
                                 url = %req.url,
+                                md_bytes,
+                                js_md_len,
                                 before = before_score,
                                 after = js_score,
-                                "JS retry returned worse-quality markdown ({before_score} -> {js_score}), keeping HTTP",
+                                "JS escalation added no content, keeping the prior tier's result",
                             );
                         }
                     }
@@ -832,6 +839,28 @@ fn change_tracking_mode_label(
 /// non-root resource (e.g. `/history.htm`) but the final URL collapsed to the
 /// site root (`/` or empty). Pure same-origin path tweaks (trailing slash,
 /// query string changes) are ignored.
+/// Whether a JS escalation's markdown replaces the lower tier's.
+///
+/// A thin prior is replaced by any result with more markdown: the escalation
+/// already ran the strongest tier available, so there is no better page to wait
+/// for, and requiring `retry_threshold` there shipped a husk over a short but
+/// real page. A non-thin prior (escalated on quality) is replaced only by a
+/// result that clears the threshold and scores measurably better.
+fn accept_js_escalation(
+    prior_md_len: usize,
+    prior_was_thin: bool,
+    prior_score: f32,
+    js_md_len: usize,
+    js_score: f32,
+    retry_threshold: usize,
+) -> bool {
+    if prior_was_thin {
+        js_md_len > prior_md_len
+    } else {
+        js_md_len >= retry_threshold && js_score > prior_score + 0.05
+    }
+}
+
 fn redirect_is_material(requested: &str, final_url: &str) -> bool {
     let Ok(req) = url::Url::parse(requested) else {
         return false;
@@ -1281,6 +1310,28 @@ mod tests {
     use super::*;
 
     const THRESH: usize = 100;
+
+    /// discord.com/app, live: lightpanda rendered a 45-byte husk, camofox the real
+    /// 624-byte login page. The 2000-byte lightpanda threshold threw camofox's page
+    /// away and shipped the husk, though camofox is the top tier on this ladder.
+    #[test]
+    fn js_escalation_keeps_more_content_from_a_thin_prior_below_threshold() {
+        assert!(accept_js_escalation(45, true, 0.005, 624, 0.4, 2000));
+    }
+
+    #[test]
+    fn js_escalation_rejects_a_thin_result_that_adds_nothing() {
+        // nowsecure.nl: both tiers return the same 45-byte page.
+        assert!(!accept_js_escalation(45, true, 0.005, 45, 0.005, 2000));
+        assert!(!accept_js_escalation(45, true, 0.005, 10, 0.0, 2000));
+    }
+
+    #[test]
+    fn js_escalation_on_quality_needs_threshold_and_better_score() {
+        assert!(accept_js_escalation(3000, false, 0.2, 2500, 0.3, 2000));
+        assert!(!accept_js_escalation(3000, false, 0.2, 2500, 0.22, 2000));
+        assert!(!accept_js_escalation(3000, false, 0.2, 1500, 0.9, 2000));
+    }
 
     /// Every body below is a VERBATIM prefix of a real prod scrape from
     /// 2026-08-09..12 that was billed as content. They render fine and carry
