@@ -35,7 +35,7 @@ No key needed — the MCP server runs a self-contained scraper in ~6 MB RAM. No 
 
 ## MCP Tools
 
-> **Output bounds:** By default, content is truncated to ~15 000 chars (`crw_scrape`, `crw_check_crawl_status`, `crw_parse_file`) and `crw_map` returns ≤ 100 URLs. Truncated results carry a `truncated: true` marker (`crw_map` also adds `totalDiscovered`). Pass `maxLength: 0` or `limit: 0` to opt out of bounding.
+> **Output bounds:** By default, content is truncated to ~15 000 chars (`crw_scrape`, `crw_check_crawl_status`, `crw_parse_file`) and `crw_map` returns ≤ 100 URLs and ≤ 100 sitemaps. Truncated results carry a `truncated: true` marker (`crw_map` also adds `totalDiscovered` for links and `totalSitemaps` for sitemaps). Pass `maxLength: 0` or `limit: 0` to opt out of bounding.
 
 ### crw_scrape
 
