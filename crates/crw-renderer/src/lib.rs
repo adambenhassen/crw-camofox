@@ -3429,6 +3429,53 @@ mod tests {
         );
     }
 
+    /// A site block says nothing about tier health, but ignoring it only pays off
+    /// when some tier can clear it (see `tests/site_block_recovery_gate.rs` for
+    /// how the flag is derived). This pins what the flag DOES to the breaker.
+    #[tokio::test]
+    async fn site_block_advances_the_host_window_only_without_a_recovery_tier() {
+        let wall = format!(
+            "<html><head><script>window._pxAppId = 'PXabc';</script></head>\
+             <body><p>{}</p></body></html>",
+            "Press & Hold to confirm you are a human. ".repeat(4)
+        );
+        for recovery in [false, true] {
+            let lp = Arc::new(MockFetcher {
+                name: "lightpanda",
+                behavior: MockBehavior::OkStatus(403, wall.clone()),
+            }) as Arc<dyn PageFetcher>;
+            let mut r = make_renderer_with_mocks(vec![lp]);
+            r.has_recovery_tier = recovery;
+            let _ = r
+                .fetch(
+                    "https://walled.example",
+                    &HashMap::new(),
+                    Some(true),
+                    None,
+                    None,
+                    tdl(),
+                )
+                .await;
+            let snap = r
+                .breakers
+                .host_for("walled.example", RendererKind::Lightpanda)
+                .await
+                .snapshot();
+            if recovery {
+                assert_eq!(
+                    snap.window_call_count, 0,
+                    "with a recovery tier the block must not count against lightpanda"
+                );
+            } else {
+                assert_eq!(
+                    (snap.window_call_count, snap.window_failure_rate),
+                    (1, 1.0),
+                    "with no recovery tier the block keeps counting"
+                );
+            }
+        }
+    }
+
     #[tokio::test]
     async fn breaker_skipped_renderer_falls_through_to_next() {
         // Trip the per-host breaker for lightpanda, then verify the loop
