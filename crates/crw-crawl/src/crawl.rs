@@ -198,6 +198,9 @@ async fn run_crawl_inner(opts: CrawlOptions<'_>) {
     let mut visited: HashSet<String> = HashSet::new();
     let mut queue: VecDeque<(String, u32)> = VecDeque::new();
     let mut results: Vec<ScrapeData> = Vec::new();
+    // Why the most recent page could not be fetched. Reported only when no
+    // page succeeded, so the crawl does not end as a success with zero pages.
+    let mut last_fetch_error: Option<String> = None;
 
     queue.push_back((req.url.clone(), 0));
     visited.insert(normalize_url(&req.url));
@@ -241,6 +244,7 @@ async fn run_crawl_inner(opts: CrawlOptions<'_>) {
             Ok(r) => r,
             Err(e) => {
                 tracing::warn!(url, error = %e, "Crawl: failed to fetch page");
+                last_fetch_error = Some(e.to_string());
                 continue;
             }
         };
@@ -256,6 +260,10 @@ async fn run_crawl_inner(opts: CrawlOptions<'_>) {
                 status = fetch_result.status_code,
                 "Crawl: CDN could not reach the origin"
             );
+            last_fetch_error = Some(format!(
+                "the site's own server did not respond (HTTP {} from its CDN)",
+                fetch_result.status_code
+            ));
             continue;
         }
 
@@ -374,6 +382,13 @@ async fn run_crawl_inner(opts: CrawlOptions<'_>) {
             data: vec![],
             error: None,
         });
+    }
+
+    if results.is_empty()
+        && let Some(error) = last_fetch_error
+    {
+        send_failed(id, &state_tx, error);
+        return;
     }
 
     let _ = state_tx.send(CrawlState {
