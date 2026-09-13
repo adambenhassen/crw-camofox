@@ -1143,6 +1143,51 @@ fn classify_block(
             reason: "wikimedia datacenter-ip block".to_string(),
         });
     }
+    // Reddit's own block page ("You've been blocked by network security...") is
+    // itself ~115 bytes of prose — over the markdown-substantial guard below —
+    // so antibot::classify (which already recognizes this exact phrase via its
+    // NetworkSecurity pattern) never runs. Same trap as the Wikimedia/CF cases
+    // above. Require both halves of the sentence (not just the first clause) so
+    // an article merely quoting "blocked by network security" in isolation
+    // cannot trip this ahead of the guard.
+    if html.contains("blocked by network security")
+        && html.contains("log in to your Reddit account")
+    {
+        return Some(BlockOutcome {
+            vendor: "network_security".to_string(),
+            reason: "blocked by network security".to_string(),
+        });
+    }
+    // Cloudflare's hard block page (an outright deny, distinct from the
+    // Turnstile/managed-challenge interstitial matched by CF_STRONG_MARKERS
+    // above) also beats the guard. `<span class="cf-error-code">` is the exact
+    // structural marker antibot::classify already trusts for this vendor
+    // (`crw-extract/src/antibot.rs`); require it together with the page's own
+    // block heading so a page that merely mentions the token in prose, a code
+    // sample, or documentation cannot trip this ahead of the guard.
+    if html.contains(r#"<span class="cf-error-code">"#) && html.contains("you have been blocked") {
+        return Some(BlockOutcome {
+            vendor: "cloudflare".to_string(),
+            reason: "cloudflare block page (cf-error-code)".to_string(),
+        });
+    }
+    // Vercel's bot-check interstitial beats the guard too — the real page (with
+    // its "Website owner? Click here to fix" link) extracts to ~135 bytes, over
+    // threshold, so antibot::classify's Vercel pattern (which requires this same
+    // heading + verifying/failed phrase) never runs. Caught only by testing
+    // against REAL production captures: the synthetic fixture used to validate
+    // the antibot.rs pattern was artificially short and never hit this guard,
+    // so this gap shipped once already — mirror the Reddit/CF strong-marker
+    // pattern here too.
+    if html.contains("Vercel Security Checkpoint")
+        && (html.contains("verifying your browser")
+            || html.contains("Failed to verify your browser"))
+    {
+        return Some(BlockOutcome {
+            vendor: "vercel".to_string(),
+            reason: "Vercel security checkpoint".to_string(),
+        });
+    }
     // A registrar parking / marketplace / default-server page is HTTP 200, so
     // `ScrapeData::http_error()` clears it, and it renders 300 to 9,000 chars of
     // clean prose, so the `>= threshold` guard below clears it too and
@@ -1488,6 +1533,201 @@ mod tests {
             )
             .is_none(),
             "multibyte content must neither panic nor be called parked"
+        );
+    }
+
+    #[test]
+    fn classify_block_reddit_network_security_over_markdown_guard() {
+        // Regression: Reddit's own block page extracts to ~115 bytes of prose
+        // (> THRESH), so without the strong-marker check the guard would
+        // suppress the verdict before antibot::classify ever ran.
+        let html = "<html><body><p>You've been blocked by network security.</p>\
+            <p>To continue, log in to your Reddit account or use your developer token</p></body></html>";
+        let md = "You've been blocked by network security.\n\nTo continue, \
+            log in to your Reddit account or use your developer token";
+        assert!(
+            md.len() >= THRESH,
+            "fixture must exceed the guard to be meaningful"
+        );
+        let b = classify_block(
+            200,
+            Some("text/html"),
+            html,
+            Some(md),
+            THRESH,
+            "https://example.com/",
+            None,
+        )
+        .expect("reddit network security block must be flagged even with substantial markdown");
+        assert_eq!(b.vendor, "network_security");
+    }
+
+    #[test]
+    fn classify_block_reddit_phrase_alone_is_not_enough() {
+        // Negative: an article that quotes the first half of Reddit's block
+        // sentence in isolation (no "log in to your Reddit account" nearby)
+        // must NOT be flagged — only the full page's block page trips this.
+        let html = "<html><body><article><p>Many scrapers report seeing \
+            \"blocked by network security\" style errors when hitting Reddit at \
+            scale, which is a common anti-bot pattern across social platforms.</p>\
+            </article></body></html>";
+        let md = "Many scrapers report seeing \"blocked by network security\" style \
+            errors when hitting Reddit at scale, which is a common anti-bot pattern.";
+        assert!(md.len() >= THRESH);
+        assert!(
+            classify_block(
+                200,
+                Some("text/html"),
+                html,
+                Some(md),
+                THRESH,
+                "https://example.com/",
+                None,
+            )
+            .is_none(),
+            "an article merely discussing the phrase must not be misflagged as a block"
+        );
+    }
+
+    #[test]
+    fn classify_block_cloudflare_hard_block_over_markdown_guard() {
+        // Regression: Cloudflare's hard-deny page (no interstitial, so
+        // CF_STRONG_MARKERS above doesn't match) extracts to well over THRESH
+        // bytes of prose, so it needs its own strong-marker check.
+        let html = r#"<html><body><h1>Attention Required! | Cloudflare</h1>
+            <p>Please enable cookies.</p>
+            <span class="cf-error-code">1020</span>
+            <h1>Sorry, you have been blocked</h1>
+            <h2>You are unable to access example.com</h2></body></html>"#;
+        let md = "# Attention Required! | Cloudflare\n\nPlease enable cookies.\n\n\
+            # Sorry, you have been blocked\n\n## You are unable to access example.com";
+        assert!(
+            md.len() >= THRESH,
+            "fixture must exceed the guard to be meaningful"
+        );
+        let b = classify_block(
+            200,
+            Some("text/html"),
+            html,
+            Some(md),
+            THRESH,
+            "https://example.com/",
+            None,
+        )
+        .expect("cloudflare hard block must be flagged even with substantial markdown");
+        assert_eq!(b.vendor, "cloudflare");
+    }
+
+    #[test]
+    fn classify_block_cf_error_code_marker_alone_is_not_enough() {
+        // Negative: a page that legitimately renders a `cf-error-code` span
+        // (e.g. a status/monitoring dashboard embedding one as a live example,
+        // not a real hard-block response) but has no "you have been blocked"
+        // heading must not be misflagged — the marker alone isn't sufficient,
+        // only its co-occurrence with the block heading is.
+        let html = r#"<html><body><article><h1>Error code reference</h1>
+            <p>Example live element: <span class="cf-error-code">1020</span></p>
+            <p>This is a normal reference page with plenty of unrelated
+            documentation content describing how status codes are displayed.</p>
+            </article></body></html>"#;
+        let md = "# Error code reference\n\nExample live element: 1020\n\n\
+            This is a normal reference page with plenty of unrelated documentation \
+            content describing how status codes are displayed.";
+        assert!(md.len() >= THRESH);
+        assert!(
+            classify_block(
+                200,
+                Some("text/html"),
+                html,
+                Some(md),
+                THRESH,
+                "https://example.com/",
+                None,
+            )
+            .is_none(),
+            "a page merely rendering the cf-error-code marker without the block heading must not be misflagged"
+        );
+    }
+
+    // Regression using the ACTUAL text captured in prod (9-day trace-log
+    // investigation, 2026-07-15..23) rather than a synthetic fixture — this is
+    // exactly what caught the Vercel gap below (the synthetic fixture used to
+    // ship that fix was artificially short and never exercised this guard).
+    // Raw HTML wasn't captured (format=markdown only); the real markdown
+    // stands in for html here since this check is a text match, not
+    // DOM-structural.
+    #[test]
+    fn classify_block_reddit_real_prod_capture() {
+        let real_markdown = "You've been blocked by network security.\n\nTo continue, log in to your Reddit account or use your developer token  \n  \nIf you think you've been blocked by mistake, file a ticket below and we'll look into it.\n\n[Log in](https://www.reddit.com/login/) [File a ticket](https://support.reddithelp.com/hc/en-us/requests/new?ticket_form_id=21879292693140)";
+        assert!(real_markdown.len() >= THRESH);
+        let b = classify_block(
+            200,
+            Some("text/html"),
+            real_markdown,
+            Some(real_markdown),
+            THRESH,
+            "https://example.com/",
+            None,
+        )
+        .expect("the exact text that silently returned success:true 198x in prod must be flagged");
+        assert_eq!(b.vendor, "network_security");
+    }
+
+    #[test]
+    fn classify_block_vercel_checkpoint_over_markdown_guard_real_capture() {
+        // Regression using the EXACT text captured in prod (2026-07-24 trace-log
+        // investigation): the real Vercel checkpoint page's "Website owner?
+        // Click here to fix" link pushes it to ~135 bytes, over THRESH, so
+        // antibot::classify's Vercel pattern never ran — this shipped once
+        // already because the synthetic fixture used to validate that pattern
+        // was artificially short (~58 bytes) and never hit this guard.
+        let html = "<html><body><h1>Vercel Security Checkpoint</h1>\
+            <p>We're verifying your browser</p>\
+            <p><a href=\"https://vercel.link/security-checkpoint\">Website owner? Click here to fix</a></p>\
+            </body></html>";
+        let md = "# Vercel Security Checkpoint\n\nWe're verifying your browser\n\n\
+            [Website owner? Click here to fix](https://vercel.link/security-checkpoint)";
+        assert!(
+            md.len() >= THRESH,
+            "this is the real-world case: the fixture must exceed the guard"
+        );
+        let b = classify_block(
+            200,
+            Some("text/html"),
+            html,
+            Some(md),
+            THRESH,
+            "https://example.com/",
+            None,
+        )
+        .expect("vercel checkpoint must be flagged even with substantial markdown");
+        assert_eq!(b.vendor, "vercel");
+    }
+
+    #[test]
+    fn classify_block_vercel_mention_alone_is_not_enough() {
+        // Negative: a page that merely mentions Vercel (a common hosting
+        // platform) with no checkpoint heading must not be misflagged.
+        let html = "<html><body><article><h1>Deploying on Vercel</h1>\
+            <p>This site is deployed on Vercel, a popular platform for hosting \
+            frontend applications and static sites with automatic previews on \
+            every pull request submitted to the repository.</p></article></body></html>";
+        let md = "# Deploying on Vercel\n\nThis site is deployed on Vercel, a popular \
+            platform for hosting frontend applications and static sites with \
+            automatic previews on every pull request submitted to the repository.";
+        assert!(md.len() >= THRESH);
+        assert!(
+            classify_block(
+                200,
+                Some("text/html"),
+                html,
+                Some(md),
+                THRESH,
+                "https://example.com/",
+                None,
+            )
+            .is_none(),
+            "an article merely mentioning Vercel without the checkpoint heading must not be misflagged"
         );
     }
 
