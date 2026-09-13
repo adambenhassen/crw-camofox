@@ -12,6 +12,10 @@ and the project uses [Semantic Versioning](https://semver.org/).
 - **Breaking:** `/metrics`, `/metrics/renderer-breakers`, and
   `/admin/breakers/reset` now sit behind the API-key auth boundary. When
   `[auth].api_keys` is set, Prometheus scrapes must send a Bearer token.
+- The Camofox tier refuses to return a page whose final URL (after redirects
+  and client-side navigation) is a private or internal address, and
+  `docker-compose.yml` sets `CAMOFOX_ALLOW_PRIVATE_NETWORK=false` so
+  camofox-browser blocks those requests inside the browser too.
 - CORS is no longer permissive. Browser callers need their origin listed in
   `server.cors_allowed_origins`; the default sends no CORS headers.
 

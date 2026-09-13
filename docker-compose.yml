@@ -50,6 +50,12 @@ services:
       - CAMOFOX_PORT=9377
       - CAMOFOX_API_KEY=${CAMOFOX_API_KEY:-}
       - CAMOFOX_AUTH_MODE=${CAMOFOX_AUTH_MODE:-disabled}
+      # Refuse navigations, redirects and page requests to private/internal
+      # addresses (metadata endpoint, other compose services) inside the browser.
+      # camofox-browser already defaults to this on a non-loopback bind; pinned
+      # explicitly so a changed default or an .env override is a visible diff.
+      # crw separately refuses to return a page whose final URL is internal.
+      - CAMOFOX_ALLOW_PRIVATE_NETWORK=false
     shm_size: "1g"
     healthcheck:
       test: ["CMD", "curl", "-fsS", "http://localhost:9377/health"]

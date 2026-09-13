@@ -65,7 +65,7 @@ async fn navigate_snapshot_timeout(
 async fn evaluate_committed(Path(_id): Path<String>, Json(body): Json<Value>) -> Json<Value> {
     if body["expression"].as_str() == Some("location.href") {
         return Json(json!({
-            "ok": true, "result": "https://example.com/huge", "resultType": "string", "truncated": false
+            "ok": true, "result": "https://93.184.215.14/huge", "resultType": "string", "truncated": false
         }));
     }
     Json(json!({ "ok": true, "result": RENDERED_HTML, "resultType": "string", "truncated": false }))
@@ -132,7 +132,16 @@ async fn create_tab_flaky(Json(body): Json<Value>) -> axum::response::Response {
     create_tab(Json(body)).await.into_response()
 }
 
-async fn evaluate(Path(_id): Path<String>, Json(_body): Json<Value>) -> Json<Value> {
+/// Final document URL the default mocks report: a public literal address, so the
+/// outbound check needs no DNS.
+const PUBLIC_FINAL_URL: &str = "https://93.184.215.14/";
+
+async fn evaluate(Path(_id): Path<String>, Json(body): Json<Value>) -> Json<Value> {
+    if body["expression"].as_str() == Some("location.href") {
+        return Json(
+            json!({ "ok": true, "result": PUBLIC_FINAL_URL, "resultType": "string", "truncated": false }),
+        );
+    }
     Json(json!({
         "ok": true,
         "result": RENDERED_HTML,
@@ -159,6 +168,11 @@ fn big_html() -> &'static String {
 
 async fn evaluate_big(Path(_id): Path<String>, Json(body): Json<Value>) -> Json<Value> {
     let expr = body["expression"].as_str().unwrap_or_default();
+    if expr == "location.href" {
+        return Json(
+            json!({ "ok": true, "result": PUBLIC_FINAL_URL, "resultType": "string", "truncated": false }),
+        );
+    }
     let doc = big_html();
     if expr == "document.documentElement.outerHTML" {
         return Json(json!({

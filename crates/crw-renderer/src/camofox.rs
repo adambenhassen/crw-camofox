@@ -256,6 +256,65 @@ impl CamofoxRenderer {
         }
     }
 
+    /// Fail unless the tab's current document is a destination the outbound
+    /// policy allows. Same rules as the CDP tiers' per-request check
+    /// (`crw_core::url_safety::classify_safe_host_resolved`): no-socket schemes
+    /// pass, anything else must be http(s) to a public address.
+    async fn check_final_url(&self, tab_id: &str, deadline: Deadline) -> CrwResult<()> {
+        let href = self
+            .post_decode_within::<EvaluateResponse>(
+                &format!("/tabs/{tab_id}/evaluate"),
+                json!({ "userId": USER_ID, "expression": "location.href" }),
+                deadline.remaining().min(Duration::from_secs(5)),
+                deadline,
+            )
+            .await?
+            .result
+            .unwrap_or_default();
+        let Ok(parsed) = url::Url::parse(&href) else {
+            return Err(CrwError::RendererError(
+                "camofox: could not read the page's final URL".to_string(),
+            ));
+        };
+        if matches!(parsed.scheme(), "about" | "data" | "blob") {
+            return Ok(());
+        }
+        let verdict = if matches!(parsed.scheme(), "http" | "https") {
+            match tokio::time::timeout(
+                deadline.remaining(),
+                crw_core::url_safety::classify_safe_host_resolved(&parsed),
+            )
+            .await
+            {
+                Ok(v) => v,
+                Err(_) => return Err(CrwError::Timeout(deadline.requested_ms())),
+            }
+        } else {
+            Err(crw_core::url_safety::HostRejection::Policy(
+                "scheme".to_string(),
+            ))
+        };
+        match verdict {
+            Ok(()) => Ok(()),
+            Err(crw_core::url_safety::HostRejection::Policy(_)) => {
+                crw_core::metrics::metrics()
+                    .chrome_blocked_requests_total
+                    .with_label_values(&["camofox_final_url"])
+                    .inc();
+                tracing::warn!(tab_id, "camofox: page navigated to a blocked destination");
+                Err(CrwError::RendererError(
+                    "camofox: the page navigated to a blocked destination".to_string(),
+                ))
+            }
+            // Our resolver could not answer. Fail closed, and say it is ours.
+            Err(crw_core::url_safety::HostRejection::Unresolved(reason)) => {
+                Err(CrwError::RendererError(format!(
+                    "camofox: outbound destination check unavailable ({reason})"
+                )))
+            }
+        }
+    }
+
     /// Whether the tab is still on `about:blank`, i.e. no navigation
     /// committed. `None` when the probe itself fails or no budget remains.
     async fn tab_left_blank(&self, tab_id: &str, deadline: Deadline) -> Option<bool> {
@@ -498,7 +557,22 @@ impl PageFetcher for CamofoxRenderer {
             )
             .await;
 
-        // 3. Evaluate the rendered DOM, send + body decode bounded by the budget.
+        // 3. Refuse to return a page that ended up somewhere internal. The route
+        //    layer checked the URL the caller gave, but a redirect or a JS
+        //    navigation inside the browser can land on the metadata endpoint or
+        //    a compose service, and camofox renders whatever it lands on. Checked
+        //    after the wait so client-side redirects have happened. The probe
+        //    failing means we cannot tell where the page is, so it fails closed.
+        //
+        //    This guards what crw RETURNS. Subresource requests the browser makes
+        //    along the way are only stopped by camofox-browser's own
+        //    private-network guard (`CAMOFOX_ALLOW_PRIVATE_NETWORK=false`).
+        if let Err(e) = self.check_final_url(&tab_id, deadline).await {
+            self.close_tab(&tab_id).await;
+            return Err(e);
+        }
+
+        // 4. Evaluate the rendered DOM, send + body decode bounded by the budget.
         //    A document larger than camofox's 1 MiB result cap comes back as a
         //    placeholder; fetch those in slices instead of treating the
         //    placeholder as the page.
@@ -518,7 +592,7 @@ impl PageFetcher for CamofoxRenderer {
             Err(e) => Err(e),
         };
 
-        // 4. Best-effort close — never fail the fetch on cleanup.
+        // 5. Best-effort close — never fail the fetch on cleanup.
         self.close_tab(&tab_id).await;
 
         let html = html?;
