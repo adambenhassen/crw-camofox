@@ -8,6 +8,8 @@ use crw_core::types::{
 use crw_renderer::FallbackRenderer;
 use crw_renderer::http_only::HttpFetcher;
 use crw_renderer::traits::PageFetcher;
+use regex::Regex;
+use std::sync::LazyLock;
 use std::sync::{Arc, Mutex};
 
 /// Scrape a single URL: fetch → extract → (optional) LLM structured extraction.
@@ -479,6 +481,8 @@ async fn scrape_url_inner(
         &fetch_result.html,
         data.markdown.as_deref(),
         extraction_cfg.http_retry_threshold_bytes,
+        &fetch_result.url,
+        fetch_result.final_url.as_deref(),
     );
     // Surface redirect mismatch as warning. Helps detect cases like
     // northernair.ca/history.htm silently 302'ing to the homepage — extraction
@@ -950,6 +954,117 @@ fn detect_block_interstitial(html: &str) -> Option<String> {
     }
 }
 
+/// The one signal this arm trusts: **the page names its own host and declares itself a
+/// placeholder**. Capture group 1 is the domain token, and the caller must match it
+/// against the host actually scraped.
+///
+/// That comparison is the entire guarantee, and it is why every earlier shape was
+/// removed. Unanchored template literals ("the nginx web server is successfully
+/// installed", "apache2 ubuntu default page", "this domain has been registered") fire on
+/// the most-scraped technical content there is: every nginx install tutorial quotes the
+/// default vhost verbatim to confirm the install worked, every "Apache2 Ubuntu Default
+/// Page still showing" StackOverflow thread repeats it in the title, and UDRP decisions
+/// say "this domain has been registered and is being used in bad faith". A token match
+/// alone is just as bad: "Insurance.com is for sale" is a real domain-industry headline,
+/// and `[a-z]{2,12}` happily accepts `checkout.html`, `main.py` or `config.yaml`, so a
+/// task board reading "- checkout.html ready for development" would fail too.
+///
+/// Requiring the token to BE the scraped host kills all of it at once: an article talks
+/// about someone else's domain, a parking page talks about the one you asked for.
+///
+/// Measured over 20,012 real prod scrape successes (2026-08-09..12): 294 matches, and in
+/// every single one the token equalled the scraped host — the host check costs nothing
+/// and removes the whole false-positive surface. It also correctly rejected two pages
+/// that named a DIFFERENT domain. Dropping the four unanchored literals costs 15
+/// records (0.075%), which against rejecting a real tutorial is not a close trade.
+static DOMAIN_PLACEHOLDER: LazyLock<Regex> = LazyLock::new(|| {
+    // The left guard is a CONSUMED character class, not `\b` and not a lookbehind:
+    // the `regex` crate has no lookaround, and `\b` matches straight after a dot, so
+    // `\b(...)` on "shop.example.com is for sale" captured only "example.com" — which
+    // would then equal the scraped host and fail a real page. It also truncated
+    // "example.co.uk" to "co.uk" (missing genuine parked pages) and could not match a
+    // single-letter label like "x.com" at all. Capturing whole dotted labels fixes all
+    // three at once and changed nothing on the 20,012-doc corpus (294 before, 294 after).
+    Regex::new(
+        r"(?:^|[^a-z0-9.\-])([a-z0-9](?:[a-z0-9-]*[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9-]*[a-z0-9])?)*\.[a-z]{2,24})\s{0,24}(?:[-–—]\s{0,24}|::\s{0,24}this domain\s{0,24})?(?:is for sale|ready for development|is parked free)\b",
+    )
+    .expect("static parked-domain pattern")
+});
+
+/// Upper bound on a placeholder page's own body. See `looks_like_parked_domain`.
+const PARKED_MAX_BODY_BYTES: usize = 16 * 1024;
+
+/// Host of `url`, lowercased with a leading `www.` stripped, for comparing against a
+/// domain token rendered in the page body.
+fn normalized_host(url: &str) -> Option<String> {
+    let parsed = url::Url::parse(url).ok()?;
+    let host = parsed.host_str()?.to_ascii_lowercase();
+    Some(host.strip_prefix("www.").unwrap_or(&host).to_string())
+}
+
+/// Registrar parking, domain-marketplace and holding pages: the page is served at the
+/// domain and its whole content is "this domain is available", so nothing the caller
+/// asked for was delivered.
+///
+/// Matches MARKDOWN, not HTML, for two load-bearing reasons: `classify_block` already
+/// receives the markdown so no extraction is needed, and `detector.rs`'s HTML text
+/// extractor emits no separator at tag boundaries, so `<h1>host</h1><h2>is for
+/// sale</h2>` would collapse to `hostis for sale` and silently break the pattern.
+///
+/// Both the requested and the post-redirect host count, so a domain that 302s to its
+/// registrar still matches on the name the caller asked for.
+///
+/// ponytail: "under construction" and "coming soon" are deliberately NOT here. Those are
+/// pages the origin published on purpose — `eliteteam.ch` renders its own WordPress
+/// under-construction plugin — so they are truthful scrapes and stay billable. That is
+/// 68% of the flagged population, so this does not take the class to zero by design.
+fn looks_like_parked_domain(markdown: &str, requested_url: &str, final_url: Option<&str>) -> bool {
+    /// Byte-bounded prefix that never splits a UTF-8 char (`&s[..n]` panics off a
+    /// char boundary, and scraped markdown is routinely non-ASCII).
+    fn head(s: &str, max: usize) -> &str {
+        if s.len() <= max {
+            return s;
+        }
+        let mut end = max;
+        while end > 0 && !s.is_char_boundary(end) {
+            end -= 1;
+        }
+        &s[..end]
+    }
+
+    // A placeholder page IS the whole document. Bounding the body stops a LIVE site
+    // that merely carries a "<our domain> is for sale" banner from having every page of
+    // a crawl failed and its body destroyed (`crawl.rs` clears the body on a block).
+    // The largest real placeholder measured over the 20,012-doc corpus is 9,459 bytes,
+    // so 16 KB costs nothing against all 294 matches and closes the banner class.
+    if markdown.len() > PARKED_MAX_BODY_BYTES {
+        return false;
+    }
+
+    let hosts: Vec<String> = [Some(requested_url), final_url]
+        .into_iter()
+        .flatten()
+        .filter_map(normalized_host)
+        .collect();
+    if hosts.is_empty() {
+        return false;
+    }
+
+    // ponytail: bound the scan rather than the verdict. A parking notice is always at
+    // the top (largest observed placeholder body is ~13 KB); this only stops a
+    // multi-hundred-KB article from being lowercased on the scrape hot path.
+    let low = head(markdown, 40_960).to_lowercase();
+
+    // `captures_iter`, not `captures`: a page may name another domain before its own.
+    DOMAIN_PLACEHOLDER.captures_iter(&low).any(|c| {
+        c.get(1).is_some_and(|m| {
+            let token = m.as_str();
+            let token = token.strip_prefix("www.").unwrap_or(token);
+            hosts.iter().any(|h| h == token)
+        })
+    })
+}
+
 /// Classify whether a fetched page is an anti-bot block/challenge shell. Runs
 /// ONCE at the scrape choke so every consumer (v1/v2/crawl/batch) inherits one
 /// verdict. Returns `None` for real content; `Some(BlockOutcome)` for a block.
@@ -966,6 +1081,8 @@ fn classify_block(
     html: &str,
     markdown: Option<&str>,
     threshold: usize,
+    requested_url: &str,
+    final_url: Option<&str>,
 ) -> Option<BlockOutcome> {
     if content_type.map(|c| c.contains("pdf")).unwrap_or(false) {
         return None;
@@ -1024,6 +1141,18 @@ fn classify_block(
         return Some(BlockOutcome {
             vendor: "generic_block".to_string(),
             reason: "wikimedia datacenter-ip block".to_string(),
+        });
+    }
+    // A registrar parking / marketplace / default-server page is HTTP 200, so
+    // `ScrapeData::http_error()` clears it, and it renders 300 to 9,000 chars of
+    // clean prose, so the `>= threshold` guard below clears it too and
+    // `antibot::classify` is never even called.
+    if let Some(md) = markdown
+        && looks_like_parked_domain(md, requested_url, final_url)
+    {
+        return Some(BlockOutcome {
+            vendor: crw_core::types::PARKED_DOMAIN_VENDOR.to_string(),
+            reason: "parked domain / placeholder page".to_string(),
         });
     }
     if markdown.map(|m| m.trim().len()).unwrap_or(0) >= threshold {
@@ -1086,14 +1215,298 @@ mod tests {
 
     const THRESH: usize = 100;
 
+    /// Every body below is a VERBATIM prefix of a real prod scrape from
+    /// 2026-08-09..12 that was billed as content. They render fine and carry
+    /// substantial markdown, so they sail past both the HTTP-status gate and the
+    /// `>= threshold` guard — which is why they needed their own arm.
+    #[test]
+    fn classify_block_parked_domain_templates() {
+        // (requested url, markdown) — the host must be the one the page names.
+        let cases: [(&str, &str); 4] = [
+            (
+                "https://ft-access.com/",
+                "ft-access.com\n\nis parked free, courtesy of GoDaddy.com.\n\n\
+                 [Get This Domain](https://www.godaddy.com/domainsearch/find?key=parkweb)",
+            ),
+            (
+                "https://arym.com/",
+                "# Arym.com is for sale\n\nWe value your privacy\n\nWe use cookies to \
+                 enhance your browsing experience and serve personalised ads.",
+            ),
+            (
+                // eWeb holding page: no "for sale" wording at all.
+                "https://sterki.com/",
+                "# Sterki.com -\n        Ready for Development\n\n[Contact Us for Details]\
+                 (https://ewebdevelopment.com/quotes/inquire/sterki.com)\n\n# Sterki.com\n\n\
+                 ## Ready For Development\n\nIf you're interested in this domain, contact us.",
+            ),
+            (
+                // `www.` on the request must still match the bare name in the body.
+                "https://www.conditorei.com/",
+                "conditorei.com :: this domain is for sale\n\nInquire now for pricing \
+                 and availability through our brokerage partner.",
+            ),
+        ];
+        for (url, md) in cases {
+            let b = classify_block(
+                200,
+                Some("text/html"),
+                "<html></html>",
+                Some(md),
+                THRESH,
+                url,
+                None,
+            )
+            .unwrap_or_else(|| panic!("{url} must be flagged"));
+            assert_eq!(b.vendor, crw_core::types::PARKED_DOMAIN_VENDOR, "{url}");
+            // Wording matters as much as the verdict: telling the caller a domain that
+            // is for sale was "blocked by anti-bot" is what sends them to buy proxies.
+            assert!(
+                b.message().starts_with("No usable content"),
+                "{url} must not be worded as an anti-bot block, got {:?}",
+                b.message()
+            );
+        }
+    }
+
+    /// THE guarantee. The identical body is a parking page when served AT that domain
+    /// and ordinary editorial content when served anywhere else, and the host
+    /// comparison is the only thing that tells them apart.
+    ///
+    /// `Insurance.com is for sale` is a real domain-industry headline; without this
+    /// check every article covering a domain sale, and every broker's inventory page,
+    /// becomes a failed scrape.
+    #[test]
+    fn classify_block_parked_arm_requires_the_page_to_name_its_own_host() {
+        let body = "# Insurance.com is for sale\n\nThe record-setting domain returns to \
+                    the market more than a decade after it changed hands.";
+        let call = |url: &str| {
+            classify_block(
+                200,
+                Some("text/html"),
+                "<html></html>",
+                Some(body),
+                THRESH,
+                url,
+                None,
+            )
+        };
+        assert!(
+            call("https://insurance.com/").is_some(),
+            "served at the domain it names, this is a parking page"
+        );
+        assert!(
+            call("https://domainnamewire.com/2026/08/12/insurance-com/").is_none(),
+            "the same text on a news site is editorial content, not a parking page"
+        );
+    }
+
+    /// A post-redirect host counts too. Discriminating on purpose: the REQUESTED host
+    /// deliberately does not appear in the body, so this passes only if `final_url` is
+    /// really consulted, and the body clears `THRESH` so a `Some` cannot come from the
+    /// structural arm instead.
+    #[test]
+    fn classify_block_parked_arm_accepts_either_requested_or_final_host() {
+        let md = "# Parked-Target.com is for sale\n\nThis premium name is available \
+                  immediately. Submit an offer through our brokerage and we will respond \
+                  within one business day with pricing and transfer details.";
+        assert!(md.len() > THRESH, "fixture must clear the threshold guard");
+        let call = |requested: &str, final_url: Option<&str>| {
+            classify_block(
+                200,
+                Some("text/html"),
+                "<html><body><p>a real enough shell</p></body></html>",
+                Some(md),
+                THRESH,
+                requested,
+                final_url,
+            )
+        };
+        assert!(
+            call(
+                "https://links.example.org/out?to=parked-target",
+                Some("https://parked-target.com/"),
+            )
+            .is_some(),
+            "the post-redirect host names the page and must count"
+        );
+        // Same body, same requested URL, no redirect recorded: nothing names the page.
+        assert!(
+            call("https://links.example.org/out?to=parked-target", None).is_none(),
+            "without the final host there is no anchor, so the arm must decline"
+        );
+    }
+
+    /// The token must be a host, not any dotted word. `[a-z]{2,12}` after a dot also
+    /// accepts file extensions, so a task board line like
+    /// `- checkout.html ready for development` matched before the host check existed.
+    #[test]
+    fn classify_block_parked_arm_ignores_dotted_non_hosts() {
+        let md = "# Sprint 12 board\n\n- checkout.html ready for development\n\
+                  - main.py ready for development\n- config.yaml is for sale (internal joke)";
+        assert!(
+            classify_block(
+                200,
+                Some("text/html"),
+                "<html></html>",
+                Some(md),
+                THRESH,
+                "https://tasks.internal.example/board",
+                None,
+            )
+            .is_none(),
+            "dotted filenames are not the scraped host"
+        );
+    }
+
+    /// The capture must be the WHOLE dotted name. `\b` matches straight after a dot, so
+    /// the first version of this pattern read `shop.example.com is for sale` as
+    /// `example.com` — which then equalled a scrape of example.com and failed a real
+    /// page. It also truncated `example.co.uk` to `co.uk`, missing genuine parked
+    /// pages, and could not match a single-letter label at all.
+    #[test]
+    fn classify_block_parked_arm_captures_whole_domain_tokens() {
+        let call = |md: &str, url: &str| {
+            classify_block(
+                200,
+                Some("text/html"),
+                "<html></html>",
+                Some(md),
+                THRESH,
+                url,
+                None,
+            )
+        };
+        // A subdomain named in the body is NOT the host that was scraped. The body is
+        // kept comfortably above `THRESH` so a `None` here proves the parked arm
+        // declined, rather than the structural arm firing on a thin page.
+        let announcement = "# Our shop is moving\n\nshop.example.com is for sale, and the \
+             main site stays exactly where it is. Existing orders, accounts and support \
+             tickets are unaffected by the change; only the storefront hostname retires.";
+        assert!(
+            call(announcement, "https://example.com/").is_none(),
+            "a subdomain mentioned in prose must not satisfy the host anchor"
+        );
+        // ...but scraping that subdomain directly does match it.
+        assert!(
+            call("shop.example.com is for sale", "https://shop.example.com/").is_some(),
+            "the page names exactly the host it was served at"
+        );
+        // Multi-label TLDs must survive whole.
+        assert!(
+            call("example.co.uk is for sale", "https://example.co.uk/").is_some(),
+            "a .co.uk parked page must be caught, not truncated to co.uk"
+        );
+        // Single-character label.
+        assert!(
+            call("x.com is for sale", "https://x.com/").is_some(),
+            "a one-letter label is still a host"
+        );
+        // A leading www. in the body still matches the bare scraped host.
+        assert!(
+            call("www.arym.com is for sale", "https://arym.com/").is_some(),
+            "www. is stripped on both sides before comparing"
+        );
+    }
+
+    /// The deliberate scope limit, pinned so nobody "improves" it later. An
+    /// under-construction page is a state the origin published on purpose — this body
+    /// is `cset-ag.com`, a real WordPress site in maintenance serving its own logo —
+    /// so it is a truthful scrape and stays billable. 68% of the flagged population
+    /// looks like this, which is why the fix does not take the class to zero.
+    #[test]
+    fn classify_block_leaves_a_real_under_construction_page_alone() {
+        let md = "![logo](https://www.cset-ag.com/wp-content/uploads/2025/09/cset-wit.png)\n\n\
+                  ## Under construction for new update\n\n### Clear Sustainable Energy Trading\n\n\
+                  © CSET Group 2025";
+        assert!(
+            classify_block(
+                200,
+                Some("text/html"),
+                "<html></html>",
+                Some(md),
+                THRESH,
+                "https://www.cset-ag.com/",
+                None,
+            )
+            .is_none(),
+            "an origin's own under-construction page is real content"
+        );
+    }
+
+    /// The four unanchored template literals that used to live here are gone, and this
+    /// pins why: every nginx install tutorial quotes the default vhost verbatim to
+    /// confirm the install worked, and it is exactly the kind of page a RAG pipeline
+    /// scrapes. Same shape for the Apache default page and for UDRP decisions saying
+    /// "this domain has been registered and is being used in bad faith".
+    #[test]
+    fn classify_block_leaves_technical_docs_quoting_default_pages_alone() {
+        let tutorial = "# How to install nginx on Ubuntu\n\nAfter `apt install nginx`, \
+             open the server in a browser. You should see the default landing page: \
+             \"Welcome to nginx! If you see this page, the nginx web server is \
+             successfully installed and working. Further configuration is required.\" \
+             If instead you get the Apache2 Ubuntu Default Page, another service is \
+             bound to port 80.\n\nNote that this domain has been registered for the \
+             lab and resolves locally.\n"
+            .repeat(3);
+        assert!(
+            classify_block(
+                200,
+                Some("text/html"),
+                "<html></html>",
+                Some(&tutorial),
+                THRESH,
+                "https://www.digitalocean.com/community/tutorials/install-nginx",
+                None,
+            )
+            .is_none(),
+            "a tutorial quoting default landing pages is real content"
+        );
+    }
+
+    /// Non-ASCII markdown is routine and `&s[..n]` panics off a char boundary. The
+    /// 3-byte repeat unit puts byte 40_960 mid-character (40_960 % 3 == 1), so the
+    /// boundary walk in `head()` actually executes — a 29-byte unit lands ON a
+    /// boundary and the loop never runs, which made the previous version vacuous.
+    #[test]
+    fn classify_block_parked_arm_survives_multibyte_markdown() {
+        let md = "€".repeat(20_000); // 60 KB, well past the 40_960 scan window
+        assert_eq!(md.len(), 60_000);
+        assert!(
+            !md.is_char_boundary(40_960),
+            "fixture must straddle the window"
+        );
+        assert!(
+            classify_block(
+                200,
+                Some("text/html"),
+                "<html></html>",
+                Some(&md),
+                THRESH,
+                "https://example.com/",
+                None,
+            )
+            .is_none(),
+            "multibyte content must neither panic nor be called parked"
+        );
+    }
+
     #[test]
     fn classify_block_challenge_on_cf_200() {
         // Ticket headline: a CF challenge served with HTTP 200. TIER2 "Just a
         // moment" does NOT run on 200, so a real TIER1 token (__cf_chl_f_tk=) is
         // required to reach vendor=cloudflare.
         let html = r#"<html><body><form id="challenge-form" action="/cdn-cgi/?__cf_chl_f_tk=abc"></form></body></html>"#;
-        let b = classify_block(200, Some("text/html"), html, None, THRESH)
-            .expect("CF challenge must be flagged");
+        let b = classify_block(
+            200,
+            Some("text/html"),
+            html,
+            None,
+            THRESH,
+            "https://example.com/",
+            None,
+        )
+        .expect("CF challenge must be flagged");
         assert_eq!(b.vendor, "cloudflare");
     }
 
@@ -1115,8 +1528,16 @@ mod tests {
             "marker must sit past the old 80KB prefix to guard the regression"
         );
         let md = "recovered looking text ".repeat(50); // > THRESH, must NOT suppress
-        let b = classify_block(200, Some("text/html"), &html, Some(&md), THRESH)
-            .expect("Turnstile 200 interstitial must be flagged");
+        let b = classify_block(
+            200,
+            Some("text/html"),
+            &html,
+            Some(&md),
+            THRESH,
+            "https://example.com/",
+            None,
+        )
+        .expect("Turnstile 200 interstitial must be flagged");
         assert_eq!(b.vendor, "cloudflare");
     }
 
@@ -1144,7 +1565,16 @@ mod tests {
         // Substantial recovered markdown too — the real content extracts fine.
         let md = "Real reviews and salaries content. ".repeat(50);
         assert!(
-            classify_block(200, Some("text/html"), &html, Some(&md), THRESH).is_none(),
+            classify_block(
+                200,
+                Some("text/html"),
+                &html,
+                Some(&md),
+                THRESH,
+                "https://example.com/",
+                None
+            )
+            .is_none(),
             "a cleared managed page with a trailing challenge-platform telemetry \
              script (but no _cf_chl_opt) must not be misflagged as a challenge"
         );
@@ -1153,8 +1583,16 @@ mod tests {
     #[test]
     fn classify_block_hard_block_on_datadome_403() {
         let html = r#"<html><body><script src="https://captcha-delivery.com/c.js"></script></body></html>"#;
-        let b = classify_block(403, Some("text/html"), html, None, THRESH)
-            .expect("DataDome block must be flagged");
+        let b = classify_block(
+            403,
+            Some("text/html"),
+            html,
+            None,
+            THRESH,
+            "https://example.com/",
+            None,
+        )
+        .expect("DataDome block must be flagged");
         assert_eq!(b.vendor, "datadome");
     }
 
@@ -1174,8 +1612,16 @@ mod tests {
             md.len() >= THRESH,
             "fixture must exceed the guard to be meaningful"
         );
-        let b = classify_block(200, Some("text/html"), html, Some(md), THRESH)
-            .expect("wikimedia datacenter block must be flagged even with substantial markdown");
+        let b = classify_block(
+            200,
+            Some("text/html"),
+            html,
+            Some(md),
+            THRESH,
+            "https://example.com/",
+            None,
+        )
+        .expect("wikimedia datacenter block must be flagged even with substantial markdown");
         assert_eq!(b.vendor, "generic_block");
     }
 
@@ -1185,7 +1631,18 @@ mod tests {
         // soft-block status with CF markers in the (stale) html.
         let html = r#"<html><body><form id="challenge-form" action="/cdn-cgi/?__cf_chl_f_tk=abc"></form></body></html>"#;
         let md = "x".repeat(500);
-        assert!(classify_block(403, Some("text/html"), html, Some(&md), THRESH).is_none());
+        assert!(
+            classify_block(
+                403,
+                Some("text/html"),
+                html,
+                Some(&md),
+                THRESH,
+                "https://example.com/",
+                None
+            )
+            .is_none()
+        );
     }
 
     #[test]
@@ -1199,7 +1656,9 @@ mod tests {
                 Some("text/html"),
                 html,
                 Some("# Hello\n\nreal body"),
-                THRESH
+                THRESH,
+                "https://example.com/",
+                None,
             )
             .is_none()
         );
@@ -1208,7 +1667,18 @@ mod tests {
     #[test]
     fn classify_block_pdf_skipped() {
         // PDF branch has empty html — must not false-flag as StructuralFailure.
-        assert!(classify_block(200, Some("application/pdf"), "", None, THRESH).is_none());
+        assert!(
+            classify_block(
+                200,
+                Some("application/pdf"),
+                "",
+                None,
+                THRESH,
+                "https://example.com/",
+                None
+            )
+            .is_none()
+        );
     }
 
     #[test]
@@ -1217,7 +1687,18 @@ mod tests {
         // `success:false` / `anti_bot` in prod: "Near-empty content (68 bytes)
         // with HTTP 200". It is a complete, valid file.
         let txt = "fastapi>=0.110.0\nuvicorn>=0.29.0\npydantic>=2.6\npython-multipart\n";
-        assert!(classify_block(200, Some("text/plain"), txt, Some(txt), THRESH).is_none());
+        assert!(
+            classify_block(
+                200,
+                Some("text/plain"),
+                txt,
+                Some(txt),
+                THRESH,
+                "https://example.com/",
+                None
+            )
+            .is_none()
+        );
         for ct in [
             "text/csv",
             "application/json",
@@ -1226,7 +1707,16 @@ mod tests {
             "text/css",
         ] {
             assert!(
-                classify_block(200, Some(ct), "x", None, THRESH).is_none(),
+                classify_block(
+                    200,
+                    Some(ct),
+                    "x",
+                    None,
+                    THRESH,
+                    "https://example.com/",
+                    None
+                )
+                .is_none(),
                 "{ct} was classified as a block"
             );
         }
@@ -1238,7 +1728,18 @@ mod tests {
         // DataDome answers XHR-shaped requests with an application/json captcha
         // stub, and that is still a block.
         let json = r#"{"url":"https://geo.captcha-delivery.com/captcha/?initialCid=x"}"#;
-        assert!(classify_block(200, Some("application/json"), json, None, THRESH).is_some());
+        assert!(
+            classify_block(
+                200,
+                Some("application/json"),
+                json,
+                None,
+                THRESH,
+                "https://example.com/",
+                None
+            )
+            .is_some()
+        );
     }
 
     #[test]
@@ -1246,17 +1747,41 @@ mod tests {
         // The guard must not blind the classifier: a wall is html or type-less.
         let html = "<html><body>You've been blocked by network security. \
                     Please log in to your Reddit account.</body></html>";
-        assert!(classify_block(200, None, html, None, THRESH).is_some());
+        assert!(
+            classify_block(200, None, html, None, THRESH, "https://example.com/", None).is_some()
+        );
     }
 
     #[test]
     fn classify_block_407_is_our_proxy_not_a_target_block() {
         // 215 records in 14 days of prod were our own DataImpulse egress failing
         // auth, stamped `structural_failure` and poisoning the routing registry.
-        assert!(classify_block(407, Some("text/html"), "", None, THRESH).is_none());
+        assert!(
+            classify_block(
+                407,
+                Some("text/html"),
+                "",
+                None,
+                THRESH,
+                "https://example.com/",
+                None
+            )
+            .is_none()
+        );
         // Everything else with an empty body stays classifiable: a near-empty
         // 403/503 is the canonical CloudFront/Akamai deny signature.
-        assert!(classify_block(403, Some("text/html"), "", None, THRESH).is_some());
+        assert!(
+            classify_block(
+                403,
+                Some("text/html"),
+                "",
+                None,
+                THRESH,
+                "https://example.com/",
+                None
+            )
+            .is_some()
+        );
     }
 
     #[test]
@@ -1266,8 +1791,20 @@ mod tests {
         // stamped `cloudflare` here and `clear_body()` throws the recovery away.
         let html = r#"<html><body><script>window._cf_chl_opt={}</script></body></html>"#;
         let md = "x".repeat(500);
-        assert!(classify_block(200, Some("text/html"), html, Some(&md), THRESH).is_some());
+        assert!(
+            classify_block(
+                200,
+                Some("text/html"),
+                html,
+                Some(&md),
+                THRESH,
+                "https://example.com/",
+                None
+            )
+            .is_some()
+        );
     }
+
     fn sample_fetch(status_code: u16, html: &str) -> FetchResult {
         FetchResult {
             url: "https://example.com".into(),

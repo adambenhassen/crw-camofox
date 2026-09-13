@@ -100,7 +100,9 @@ pub async fn scrape(
         // these since `BlockOutcome::message()`; the machine-readable code now
         // does too, so a client can branch without matching English. Refunds are
         // unaffected — the SaaS keys on `success:false`, not on this code.
-        let error_code = if b.vendor == crw_core::types::STRUCTURAL_FAILURE_VENDOR {
+        let error_code = if b.vendor == crw_core::types::STRUCTURAL_FAILURE_VENDOR
+            || b.vendor == crw_core::types::PARKED_DOMAIN_VENDOR
+        {
             "no_usable_content"
         } else {
             "anti_bot"

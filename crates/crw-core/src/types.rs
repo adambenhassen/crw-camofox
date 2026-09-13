@@ -698,6 +698,12 @@ pub const STRUCTURAL_FAILURE_VENDOR: &str = "structural_failure";
 /// it: they return an array of documents, not an envelope with an error code.
 pub const HTTP_ERROR_VENDOR: &str = "http_error";
 
+/// `BlockOutcome::vendor` for a registrar parking page, a domain-marketplace listing
+/// or a default web-server vhost. Not an anti-bot verdict, but nothing the caller
+/// asked for was delivered. Kept distinct from `STRUCTURAL_FAILURE_VENDOR` because
+/// these pages are not thin or broken — they are just not the site.
+pub const PARKED_DOMAIN_VENDOR: &str = "parked_domain";
+
 impl BlockOutcome {
     /// Standard anti-bot block error string shared by the v1 and v2 handlers so
     /// the two API surfaces label the same block identically.
@@ -714,7 +720,10 @@ impl BlockOutcome {
     /// still escalate to the next renderer tier, which is what `is_blocked()`
     /// drives.
     pub fn message(&self) -> String {
-        if self.vendor == STRUCTURAL_FAILURE_VENDOR {
+        // `parked_domain` rides the same wording: telling a customer their target
+        // was "blocked by anti-bot" when the domain is simply for sale is what sends
+        // them off to buy proxies for a site that does not exist.
+        if self.vendor == STRUCTURAL_FAILURE_VENDOR || self.vendor == PARKED_DOMAIN_VENDOR {
             format!("No usable content could be extracted ({})", self.reason)
         } else {
             format!("Blocked by anti-bot ({}): {}", self.vendor, self.reason)
