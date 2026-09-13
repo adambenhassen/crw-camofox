@@ -276,7 +276,7 @@ pub async fn github(
         camofox_engines: vec![SearchEngine::Github],
     };
     let resp = client.fetch(&params).await.map_err(|e| {
-        super::search::map_search_error(e, state.config.search.timeout_ms, client.base_url())
+        super::search::map_search_error(e, state.config.search.timeout_ms, client.github_api_base())
     })?;
     let results: Vec<ResearchGithubItem> = resp
         .results

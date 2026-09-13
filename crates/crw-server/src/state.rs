@@ -37,6 +37,13 @@ impl SearchBackend {
             SearchBackend::Camofox(c) => c.base_url(),
         }
     }
+
+    /// Host the `github` engine calls (the GitHub REST API, not the browser).
+    pub fn github_api_base(&self) -> &str {
+        match self {
+            SearchBackend::Camofox(c) => c.github_api_base(),
+        }
+    }
 }
 
 /// Validate that a request's pinned renderer is available before accepting

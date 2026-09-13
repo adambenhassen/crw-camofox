@@ -258,6 +258,12 @@ impl CamofoxSearchClient {
         &self.base_url
     }
 
+    /// Base URL the `github` engine calls instead of the browser, so errors from
+    /// that engine can name the host that actually failed.
+    pub fn github_api_base(&self) -> &str {
+        &self.github_api_base
+    }
+
     fn auth(&self, req: reqwest::RequestBuilder) -> reqwest::RequestBuilder {
         match &self.api_key {
             Some(k) => req.bearer_auth(k),
