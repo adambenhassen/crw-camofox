@@ -385,6 +385,13 @@ impl HttpFetcher {
     /// var is set": a malformed `CRW_HTTP_RATELIMIT_PROXY_URL` leaves this `None`,
     /// and callers reasoning about whether a recovery egress EXISTS must not be
     /// fooled by a typo.
+    /// Whether every request goes out through a configured or environment
+    /// proxy. A `cf_clearance` is bound to the egress IP, so the ladder never
+    /// injects one then.
+    pub fn has_static_proxy(&self) -> bool {
+        self.has_static_proxy
+    }
+
     pub fn has_ratelimit_proxy(&self) -> bool {
         self.ratelimit_proxy_client.is_some()
     }

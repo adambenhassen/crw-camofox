@@ -347,6 +347,12 @@ pub struct FallbackRenderer {
     /// decides whether a 200-status block page is a soft failure (escalate
     /// toward `chrome_proxy`) or a genuine success.
     antibot: crw_core::config::AntibotConfig,
+    /// Cloudflare clearance (cookies + UA) per host, written by the Camofox
+    /// tier, read before every HTTP-tier fetch. See [`clearance`].
+    clearance: Arc<clearance::ClearanceCache>,
+    /// Whether the HTTP tier egresses through a configured proxy. A cached
+    /// `cf_clearance` is bound to the egress IP, so it is never injected then.
+    http_has_proxy: bool,
     /// Chrome browser-context pool handle for graceful drain on shutdown.
     /// `None` when the pool is disabled or the chrome tier isn't configured.
     #[cfg(feature = "cdp")]
@@ -394,6 +400,8 @@ impl FallbackRenderer {
         // proxy-availability question is no longer askable, and asking the env var
         // instead would call a malformed URL a working recovery egress.
         let http_fallback_proxy_ready = http_concrete.has_ratelimit_proxy();
+        let http_has_proxy = http_concrete.has_static_proxy();
+        let clearance = Arc::new(clearance::ClearanceCache::with_defaults());
         let http = Arc::new(http_concrete) as Arc<dyn PageFetcher>;
 
         // A pinned backend (Lightpanda/Chrome/Playwright) must have CDP compiled in
@@ -434,6 +442,8 @@ impl FallbackRenderer {
                 requests_per_second: 0.0,
                 per_host_max_concurrent: 1,
                 antibot: config.antibot.clone(),
+                clearance: Arc::clone(&clearance),
+                http_has_proxy,
                 #[cfg(feature = "cdp")]
                 chrome_pool: None,
             });
@@ -527,6 +537,8 @@ impl FallbackRenderer {
             requests_per_second: 0.0,
             per_host_max_concurrent: 1,
             antibot: config.antibot.clone(),
+            clearance,
+            http_has_proxy,
             #[cfg(feature = "cdp")]
             chrome_pool,
         })
@@ -582,6 +594,11 @@ impl FallbackRenderer {
         self.http = http;
         self.js_renderers = js_renderers;
         self
+    }
+
+    /// Access the Cloudflare clearance cache (tests, admin endpoints).
+    pub fn clearance(&self) -> Arc<clearance::ClearanceCache> {
+        Arc::clone(&self.clearance)
     }
 
     /// Access the host preferences cache (for admin endpoints, tests).
@@ -690,7 +707,7 @@ impl FallbackRenderer {
         let is_hard_pinned = matches!(requested_renderer, Some(name) if name != "auto");
         match effective {
             Some(false) => {
-                let mut r = self.http.fetch(url, headers, None, deadline).await?;
+                let mut r = self.http_fetch(url, headers, deadline).await?;
                 stamp_http_decision(&mut r, requested_renderer, "success");
                 Ok(r)
             }
@@ -701,7 +718,7 @@ impl FallbackRenderer {
                 // branch), so escalate the way auto mode does. Previously a pinned
                 // camofox scrape of an origin slower than the HTTP tier's timeout
                 // 502'd here without ever reaching camofox.
-                let mut http_result = match self.http.fetch(url, headers, None, deadline).await {
+                let mut http_result = match self.http_fetch(url, headers, deadline).await {
                     Ok(r) => r,
                     // `UnsupportedContentType` is excluded on purpose: the body is
                     // not a web page at all (a .docx ZIP, an image), which no
@@ -814,7 +831,7 @@ impl FallbackRenderer {
                 // sites that reject reqwest's TLS/UA fingerprint succeed via a
                 // real Chromium navigation. Bench analysis: 10/147 false
                 // "unreachable" + 5/147 "http_502" map to this branch.
-                let mut result = match self.http.fetch(url, headers, None, deadline).await {
+                let mut result = match self.http_fetch(url, headers, deadline).await {
                     Ok(r) => r,
                     // `UnsupportedContentType` is excluded on purpose: the body is
                     // not a web page at all (a .docx ZIP, an image), which no
@@ -997,6 +1014,73 @@ impl FallbackRenderer {
     /// successful. If the rendered page has less visible text than this, the
     /// next renderer in the chain is tried.
     const MIN_RENDERED_TEXT_LEN: usize = 50;
+
+    /// The HTTP-tier fetch, with Cloudflare clearance reuse. When the cache
+    /// holds a live entry for the host and nothing forbids it (proxy egress,
+    /// latched host, caller-supplied Cookie/User-Agent), the cached cookies
+    /// and user agent go out with the request. If the origin still answers
+    /// with a challenge, the entry is dropped so the next render refreshes it.
+    async fn http_fetch(
+        &self,
+        url: &str,
+        headers: &HashMap<String, String>,
+        deadline: crw_core::Deadline,
+    ) -> CrwResult<FetchResult> {
+        let Some((host, clearance)) = self.clearance_for(url, headers).await else {
+            return self.http.fetch(url, headers, None, deadline).await;
+        };
+        let mut injected = headers.clone();
+        injected.insert("Cookie".to_string(), clearance.cookie_header(&host));
+        injected.insert("User-Agent".to_string(), clearance.user_agent.clone());
+        metrics()
+            .clearance_reuse_total
+            .with_label_values(&["hit"])
+            .inc();
+        let result = self.http.fetch(url, &injected, None, deadline).await?;
+        let challenged = result.warning.as_deref() == Some("cloudflare_mitigated")
+            || detector::looks_like_cloudflare_challenge(&result.html);
+        if challenged {
+            tracing::info!(url, host = %host, "cached cf_clearance rejected by origin, dropping it");
+            self.clearance.invalidate(&host).await;
+            metrics()
+                .clearance_reuse_total
+                .with_label_values(&["invalidated"])
+                .inc();
+        }
+        Ok(result)
+    }
+
+    /// Host + clearance entry to inject for `url`, or `None` when reuse does
+    /// not apply.
+    async fn clearance_for(
+        &self,
+        url: &str,
+        headers: &HashMap<String, String>,
+    ) -> Option<(String, Arc<clearance::Clearance>)> {
+        if self.http_has_proxy {
+            return None;
+        }
+        if headers
+            .keys()
+            .any(|k| k.eq_ignore_ascii_case("cookie") || k.eq_ignore_ascii_case("user-agent"))
+        {
+            return None;
+        }
+        let host = url::Url::parse(url).ok()?.host_str()?.to_owned();
+        if egress::global().should_proxy(&host).await {
+            return None;
+        }
+        match self.clearance.get(&host).await {
+            Some(c) => Some((host, c)),
+            None => {
+                metrics()
+                    .clearance_reuse_total
+                    .with_label_values(&["miss"])
+                    .inc();
+                None
+            }
+        }
+    }
 
     /// The HTTP tier failed but a JS renderer exists: escalate to it. If the
     /// JS tier fails too, pick the error that names the root cause.

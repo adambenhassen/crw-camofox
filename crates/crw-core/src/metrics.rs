@@ -30,6 +30,9 @@ pub struct Metrics {
     pub egress_latched_hosts: IntGauge,
     /// Fetches that started on the proxy because the host was latched.
     pub egress_latch_hit_total: IntCounter,
+    /// HTTP-tier fetches that consulted the Cloudflare clearance cache,
+    /// labeled by outcome (`hit` | `miss` | `invalidated`).
+    pub clearance_reuse_total: IntCounterVec,
     /// Chrome navigation budget truncations, labeled by snapshot outcome
     /// (`ok` = partial DOM extracted, `empty` = nothing snapshotted).
     pub chrome_budget_truncated_total: IntCounterVec,
@@ -212,6 +215,13 @@ impl Metrics {
         let egress_latch_hit_total = register_int_counter_with_registry!(
             "crw_egress_latch_hit_total",
             "Fetches that started on the proxy because the host was latched",
+            registry
+        )
+        .unwrap();
+        let clearance_reuse_total = register_int_counter_vec_with_registry!(
+            "crw_clearance_reuse_total",
+            "Cloudflare clearance cache consultations by the HTTP tier, by outcome",
+            &["outcome"],
             registry
         )
         .unwrap();
@@ -513,6 +523,7 @@ impl Metrics {
             host_preferences_size,
             egress_latched_hosts,
             egress_latch_hit_total,
+            clearance_reuse_total,
             chrome_budget_truncated_total,
             chrome_blocked_requests_total,
             breaker_ignored_total,
