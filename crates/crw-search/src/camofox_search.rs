@@ -18,7 +18,8 @@
 //! access and guards ONE long-lived warm tab that is reused across queries and
 //! never deleted — the context never sees concurrent tabs nor drops to zero.
 //! If the warm tab goes stale (idle eviction / camofox restart) the next
-//! navigate fails and we transparently recreate the tab and retry once.
+//! navigate fails — or hangs, when camofox accepts a navigate for a tab it no
+//! longer has — and we transparently recreate the tab and retry once.
 //!
 //! Rows are mapped into the existing [`SearxngResponse`] shape so the entire
 //! downstream transform / rerank pipeline (`transform.rs`, `rerank.rs`) is
@@ -291,9 +292,26 @@ impl CamofoxSearchClient {
             let outcome = if matches!(engine, SearchEngine::Github) {
                 self.github_search(&params.q).await
             } else {
+                // Whether this attempt will reuse a cached id rather than mint a
+                // fresh tab. Captured before the attempt because `ensure_tab`
+                // populates `tab` as a side effect.
+                let reused_tab = tab.is_some();
                 match self.attempt(&mut tab, engine, params).await {
                     Ok(rows) => Ok(rows),
-                    Err(e) if is_stale_tab(&e) => {
+                    // A timeout on a *reused* tab is the dead-tab signature, not
+                    // a slow page: camofox does not 404 a navigate for a tab it
+                    // no longer has, it accepts the request and hangs until its
+                    // own (longer) navigate timeout, so we only ever see our
+                    // client timeout. Without this the cached id is never
+                    // dropped and every later search repeats the same stall —
+                    // the endpoint stays broken until the process restarts.
+                    // A fresh tab that times out really is a slow page, and is
+                    // reported as-is: `reused_tab` is false on the retry below,
+                    // so this can recurse at most once.
+                    Err(e)
+                        if is_stale_tab(&e)
+                            || (reused_tab && matches!(e, SearchError::Timeout)) =>
+                    {
                         // Warm tab/context died (idle eviction or camofox
                         // restart). Drop the dead id, let any in-flight relaunch
                         // settle, then recreate and retry this engine once.
@@ -556,8 +574,13 @@ fn merge_results(
 /// Whether an error means the warm tab/context is gone and recreating it could
 /// recover — a missing tab (404), a server-side fault like the upstream
 /// `window is null` (5xx), or a dropped connection during a relaunch. A
-/// timeout or a malformed-response parse error won't be helped by recreating,
-/// so they're reported as-is.
+/// malformed-response parse error won't be helped by recreating, so it is
+/// reported as-is.
+///
+/// Timeouts are deliberately *not* classified here, because the same error
+/// means different things depending on the tab: on a freshly minted tab it is a
+/// slow page, on a reused one it is the dead-tab signature. `fetch` applies
+/// that context-dependent rule at the call site.
 fn is_stale_tab(e: &SearchError) -> bool {
     match e {
         SearchError::Upstream { status, .. } => *status == 404 || *status >= 500,
@@ -790,5 +813,86 @@ mod github_api_tests {
             ..Default::default()
         };
         assert!(client.fetch(&params).await.is_err());
+    }
+
+    /// A timeout on a *reused* warm tab is the dead-tab signature (camofox
+    /// accepts a navigate for a tab it no longer has and hangs instead of
+    /// returning 404), so the cached id is dropped and the search retried on a
+    /// fresh tab. Regression guard: without it the client keeps addressing the
+    /// dead tab and every later search stalls identically, leaving the endpoint
+    /// broken until the process restarts.
+    #[tokio::test]
+    async fn timeout_on_reused_tab_recreates_it_and_recovers() {
+        let server = MockServer::start().await;
+        let rows = r#"[{"url":"https://rust-lang.org","title":"Rust","content":"lang"}]"#;
+
+        // `t1` is minted first and later "dies"; `t2` is its replacement.
+        Mock::given(method("POST"))
+            .and(path("/tabs"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({ "tabId": "t1" })))
+            .up_to_n_times(1)
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/tabs"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({ "tabId": "t2" })))
+            .mount(&server)
+            .await;
+
+        // t1 answers the first navigate (warming the cache), then hangs well
+        // past the client timeout on every later one.
+        Mock::given(method("POST"))
+            .and(path("/tabs/t1/navigate"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({ "ok": true })))
+            .up_to_n_times(1)
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/tabs/t1/navigate"))
+            .respond_with(ResponseTemplate::new(200).set_delay(Duration::from_secs(30)))
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/tabs/t2/navigate"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({ "ok": true })))
+            .mount(&server)
+            .await;
+
+        for tab in ["t1", "t2"] {
+            Mock::given(method("POST"))
+                .and(path(format!("/tabs/{tab}/wait")))
+                .respond_with(ResponseTemplate::new(200).set_body_json(json!({ "ok": true })))
+                .mount(&server)
+                .await;
+            Mock::given(method("POST"))
+                .and(path(format!("/tabs/{tab}/evaluate")))
+                .respond_with(ResponseTemplate::new(200).set_body_json(json!({ "result": rows })))
+                .mount(&server)
+                .await;
+        }
+
+        let client = CamofoxSearchClient::new(server.uri(), None, None, Duration::from_millis(300));
+        let params = SearxngParams {
+            q: "rust".to_string(),
+            camofox_engines: vec![SearchEngine::Google],
+            ..Default::default()
+        };
+
+        // First search warms the cache with t1.
+        let first = client.fetch(&params).await.expect("first search succeeds");
+        assert_eq!(first.results.len(), 1);
+
+        // Second search stalls on the now-dead t1, recreates as t2, and still
+        // returns results — transparently, with no engine reported unresponsive.
+        let second = client
+            .fetch(&params)
+            .await
+            .expect("stale-tab timeout recovers on a fresh tab");
+        assert_eq!(second.results.len(), 1);
+        assert!(
+            second.unresponsive_engines.is_empty(),
+            "recovery should be transparent, got {:?}",
+            second.unresponsive_engines
+        );
     }
 }
