@@ -557,7 +557,27 @@ impl FallbackRenderer {
             }
             Some(true) => {
                 // Fetch via HTTP first to check content type — PDFs can't be JS-rendered.
-                let mut http_result = self.http.fetch(url, headers, None, deadline).await?;
+                // An HTTP-tier failure is not terminal when a JS renderer exists: the
+                // caller asked for a browser render (a pinned renderer implies this
+                // branch), so escalate the way auto mode does. Previously a pinned
+                // camofox scrape of an origin slower than the HTTP tier's timeout
+                // 502'd here without ever reaching camofox.
+                let mut http_result = match self.http.fetch(url, headers, None, deadline).await {
+                    Ok(r) => r,
+                    Err(e) if !self.js_renderers.is_empty() => {
+                        return self
+                            .escalate_after_http_failure(
+                                e,
+                                url,
+                                headers,
+                                wait_for_ms,
+                                requested_renderer,
+                                deadline,
+                            )
+                            .await;
+                    }
+                    Err(e) => return Err(e),
+                };
                 if http_result.content_type.as_deref() == Some("application/pdf") {
                     stamp_http_decision(&mut http_result, requested_renderer);
                     return Ok(http_result);
@@ -592,34 +612,16 @@ impl FallbackRenderer {
                 let mut result = match self.http.fetch(url, headers, None, deadline).await {
                     Ok(r) => r,
                     Err(e) if !self.js_renderers.is_empty() => {
-                        tracing::info!(
-                            url,
-                            error = %e,
-                            "HTTP fetch failed, escalating to JS renderer"
-                        );
                         return self
-                            .fetch_with_js(url, headers, wait_for_ms, requested_renderer, deadline)
-                            .await
-                            .map_err(|js_err| {
-                                tracing::warn!("Both HTTP and JS failed: http={e}, js={js_err}");
-                                // When the HTTP tier could not reach the origin AND the JS tier
-                                // failed navigating to that same origin, the origin is the root
-                                // cause: surface TargetUnreachable (422 — the caller handed us a
-                                // dead target) instead of the JS tier's RendererError, which
-                                // falls through to a 500 and reads as "our server broke".
-                                //
-                                // A JS failure can also be OUR fault (pool exhausted, CDP
-                                // discovery failed, pinned renderer missing). Those keep their
-                                // own error, or we would blame the caller for our outage.
-                                match (&e, &js_err) {
-                                    (CrwError::TargetUnreachable(_), js)
-                                        if is_origin_navigation_failure(js) =>
-                                    {
-                                        e
-                                    }
-                                    _ => js_err,
-                                }
-                            });
+                            .escalate_after_http_failure(
+                                e,
+                                url,
+                                headers,
+                                wait_for_ms,
+                                requested_renderer,
+                                deadline,
+                            )
+                            .await;
                     }
                     Err(e) => return Err(e),
                 };
@@ -749,6 +751,44 @@ impl FallbackRenderer {
     /// successful. If the rendered page has less visible text than this, the
     /// next renderer in the chain is tried.
     const MIN_RENDERED_TEXT_LEN: usize = 50;
+
+    /// The HTTP tier failed but a JS renderer exists: escalate to it. If the
+    /// JS tier fails too, pick the error that names the root cause.
+    async fn escalate_after_http_failure(
+        &self,
+        http_err: CrwError,
+        url: &str,
+        headers: &HashMap<String, String>,
+        wait_for_ms: Option<u64>,
+        requested_renderer: Option<&str>,
+        deadline: crw_core::Deadline,
+    ) -> CrwResult<FetchResult> {
+        tracing::info!(
+            url,
+            error = %http_err,
+            "HTTP fetch failed, escalating to JS renderer"
+        );
+        self.fetch_with_js(url, headers, wait_for_ms, requested_renderer, deadline)
+            .await
+            .map_err(|js_err| {
+                tracing::warn!("Both HTTP and JS failed: http={http_err}, js={js_err}");
+                // When the HTTP tier could not reach the origin AND the JS tier
+                // failed navigating to that same origin, the origin is the root
+                // cause: surface TargetUnreachable (422 — the caller handed us a
+                // dead target) instead of the JS tier's RendererError, which
+                // falls through to a 500 and reads as "our server broke".
+                //
+                // A JS failure can also be OUR fault (pool exhausted, CDP
+                // discovery failed, pinned renderer missing). Those keep their
+                // own error, or we would blame the caller for our outage.
+                match (&http_err, &js_err) {
+                    (CrwError::TargetUnreachable(_), js) if is_origin_navigation_failure(js) => {
+                        http_err
+                    }
+                    _ => js_err,
+                }
+            })
+    }
 
     async fn fetch_with_js(
         &self,

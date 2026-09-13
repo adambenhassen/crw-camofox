@@ -242,3 +242,54 @@ async fn fetch_error_omits_non_json_body() {
     );
     assert!(!msg.contains("<html"), "{msg}");
 }
+
+/// A pinned JS renderer implies `renderJs=true`. When the HTTP tier fails on
+/// that path (here: an origin slower than the HTTP timeout) the request must
+/// escalate to the renderer, not surface the HTTP tier's error.
+#[tokio::test]
+async fn render_js_true_escalates_when_http_tier_fails() {
+    use crw_core::config::{CamofoxEndpoint, RendererConfig, RendererMode, StealthConfig};
+    use crw_renderer::FallbackRenderer;
+    use wiremock::matchers::{method, path as wpath};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    // SAFETY: this test binary owns its process env.
+    unsafe { std::env::set_var("CRW_ALLOW_LOOPBACK_FOR_TESTS", "1") };
+    let camofox = spawn_camofox_mock().await;
+    let origin = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(wpath("/slow"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .set_body_string("<html>too late</html>")
+                .set_delay(Duration::from_secs(3)),
+        )
+        .mount(&origin)
+        .await;
+
+    let cfg = RendererConfig {
+        mode: RendererMode::Camofox,
+        camofox: Some(CamofoxEndpoint {
+            base_url: camofox,
+            api_key: None,
+        }),
+        http_timeout_ms: Some(300),
+        ..Default::default()
+    };
+    let renderer = FallbackRenderer::new(&cfg, "crw-test", None, &StealthConfig::default())
+        .expect("camofox-mode renderer builds");
+
+    let result = renderer
+        .fetch(
+            &format!("{}/slow", origin.uri()),
+            &HashMap::new(),
+            Some(true),
+            None,
+            Some("camofox"),
+            Deadline::now_plus(Duration::from_secs(30)),
+        )
+        .await
+        .expect("HTTP-tier timeout must escalate to the pinned renderer");
+    assert_eq!(result.rendered_with.as_deref(), Some("camofox"));
+    assert!(result.html.contains("camofox rendered"));
+}
