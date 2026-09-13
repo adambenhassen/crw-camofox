@@ -646,7 +646,44 @@ impl ScrapeData {
     ///
     /// One helper for every surface: v1, v2, crawl and batch all have to agree, or
     /// the same URL is refunded on one endpoint and billed on another.
+    ///
+    /// A block verdict outranks the origin's status, and that ordering lives here
+    /// rather than at the call sites. Cloudflare answers its challenge with 403,
+    /// so without this the wall was classified `http_error` and the "Just a
+    /// moment..." shell shipped as the page's markdown — `clear_body()` runs on
+    /// the block path, which the status gate returned before ever reaching.
+    /// Measured on prod 2026-08-24 and on 109 real customer requests across six
+    /// days of traces.
+    ///
+    /// Three callers already worked around this by hand (`crw-crawl::crawl`,
+    /// `crw-server::state`'s batch path, `crw-crawl::single`'s `unusable`), and
+    /// the batch one's comment says it clears the shell "exactly as the single
+    /// scrape route does" — which was not true, because the single scrape route
+    /// asked this helper first. Owning the rule here makes that comment true and
+    /// leaves those guards redundant but harmless.
+    ///
+    /// `structural_failure` is the one verdict that does NOT outrank the status,
+    /// and the exclusion is deliberate: `structural_integrity_check` never reads
+    /// the HTTP status, so a terse origin error page earns that verdict on its
+    /// shape alone. Letting it short-circuit here would turn every small 404 into
+    /// `no_usable_content` with its body cleared, when today the caller can read
+    /// the error page under `http_error`.
+    ///
+    /// It is also exactly the vendor `crw-crawl::crawl` filters out before it
+    /// asks this question, for the same stated reason — so excluding it here, and
+    /// only it, is what makes the two surfaces agree. `parked_domain` is NOT
+    /// excluded, precisely because crawl does not exclude it either: a parked
+    /// page is a real verdict about the destination on every surface, and
+    /// carving it out here would have created the cross-surface split this change
+    /// exists to close.
     pub fn http_error(&self) -> Option<String> {
+        if self
+            .block
+            .as_ref()
+            .is_some_and(|b| b.vendor != STRUCTURAL_FAILURE_VENDOR)
+        {
+            return None;
+        }
         let status = self.metadata.status_code;
         if status < 400 || self.rendered_text_len()? >= ERROR_PAGE_MAX_TEXT {
             return None;
@@ -656,6 +693,83 @@ impl ScrapeData {
                 .clone()
                 .unwrap_or_else(|| format!("Target returned HTTP {status}")),
         )
+    }
+
+    /// True when none of the formats the caller actually asked for produced
+    /// anything.
+    ///
+    /// This is the last gap that let a scrape charge for a response with no
+    /// content in it. Two shapes measured on prod, both `success:true`, both
+    /// billed:
+    ///
+    /// ```text
+    /// {"markdown":"", "warning":"pdf_too_large: document decompresses beyond
+    ///   the allowed size (possible decompression bomb)",
+    ///   "metadata":{"statusCode":200,"renderedWith":"pdf","numPages":0}}
+    /// {"markdown":"", "warning":null, "warnings":null,
+    ///   "metadata":{"statusCode":200,"renderedWith":"http","elapsedMs":110}}
+    /// ```
+    ///
+    /// The second carries no warning at all, so keying on warning strings — or
+    /// on a list of terminal `PdfError` codes — would miss it and would need
+    /// extending every time a new extraction failure is added.
+    ///
+    /// Takes `formats` instead of reading `Option::is_some()` off `self`. For
+    /// most fields the two agree, but `summary` collapses "requested and failed"
+    /// into the same `None` as "never asked for": `crw_crawl::single` turns a
+    /// `summarize()` error into a warning and leaves `summary: None`. That is
+    /// exactly the empty-success case this exists to catch, and it is not
+    /// visible without knowing what was asked.
+    ///
+    /// `ChangeTracking` is excluded on purpose: "nothing changed since
+    /// `previous`" is a real answer, the same way a confirmed zero-result search
+    /// is a real search. `chunks` is excluded too — it is driven by
+    /// `chunk_strategy` rather than a format, and is a derived view of markdown
+    /// rather than an independent ask.
+    pub fn has_no_content(&self, formats: &[OutputFormat]) -> bool {
+        // An explicitly empty `formats` array asked for nothing, so nothing is
+        // missing. `serde`'s default only fills in `[Markdown]` when the field is
+        // absent — `"formats": []` reaches here as an empty slice, and `.any()`
+        // over it is vacuously false, which would fail every such scrape. `/v2`
+        // rejects an empty list up front (`v2/formats.rs`); `/v1` accepts it, so
+        // the guard belongs here rather than at one route.
+        if formats.is_empty() {
+            return false;
+        }
+        !formats.iter().any(|f| self.format_delivered(*f))
+    }
+
+    /// Whether the one field that carries `format` came back with something in it.
+    fn format_delivered(&self, format: OutputFormat) -> bool {
+        fn filled(s: Option<&str>) -> bool {
+            s.is_some_and(|s| !s.trim().is_empty())
+        }
+        match format {
+            OutputFormat::Markdown => filled(self.markdown.as_deref()),
+            OutputFormat::Html => filled(self.html.as_deref()),
+            OutputFormat::RawHtml => filled(self.raw_html.as_deref()),
+            OutputFormat::PlainText => filled(self.plain_text.as_deref()),
+            OutputFormat::Summary => filled(self.summary.as_deref()),
+            // A collection that came back present-but-empty is a real answer:
+            // "this page has no outbound links" is a complete result, unlike an
+            // empty markdown body, which means the page never rendered. Presence
+            // is the measurement; emptiness is a legitimate value of it.
+            OutputFormat::Links => self.links.is_some(),
+            OutputFormat::Images => self.images.is_some(),
+            // An extraction that returns `{}` or `[]` found none of the schema's
+            // fields; a bare number or bool is still a real answer.
+            OutputFormat::Json => self.json.as_ref().is_some_and(|v| match v {
+                serde_json::Value::Null => false,
+                serde_json::Value::Object(m) => !m.is_empty(),
+                serde_json::Value::Array(a) => !a.is_empty(),
+                serde_json::Value::String(s) => !s.trim().is_empty(),
+                serde_json::Value::Number(_) | serde_json::Value::Bool(_) => true,
+            }),
+            // "nothing changed since `previous`" is a real answer, so the value
+            // is never inspected — but its presence is, so a change-tracking run
+            // that produced nothing at all is still caught.
+            OutputFormat::ChangeTracking => self.change_tracking.is_some(),
+        }
     }
 
     /// Clear the page-content fields (markdown, HTML, text, links, and any
@@ -918,8 +1032,14 @@ mod tests {
         }
     }
 
+    /// An ordinary origin error page: the status is the caller's, and there is no
+    /// anti-bot verdict. `block` must be cleared explicitly — the fixture this
+    /// builds on is a *walled* page, and `http_error` now returns `None` for
+    /// anything carrying a block, so leaving it set would make every assertion
+    /// here measure the block gate instead of the status gate.
     fn page(status: u16, markdown_len: usize) -> ScrapeData {
         let mut d = blocked_fixture();
+        d.block = None;
         d.metadata.status_code = status;
         d.markdown = Some("x".repeat(markdown_len));
         d.plain_text = None;
@@ -939,6 +1059,152 @@ mod tests {
         assert!(page(403, 39_499).http_error().is_none());
         // A thin page that the origin says is fine stays a success.
         assert!(page(200, 2).http_error().is_none());
+    }
+
+    #[test]
+    fn a_block_verdict_outranks_the_origin_status() {
+        // Cloudflare answers its challenge with 403. Reporting that as
+        // `http_error` returned the "Just a moment..." shell as the page's
+        // markdown, because `clear_body()` only runs on the block path.
+        let mut walled = page(403, 650);
+        walled.block = Some(BlockOutcome {
+            vendor: "cloudflare".into(),
+            reason: "cloudflare challenge interstitial".into(),
+        });
+        assert!(walled.http_error().is_none());
+        // The same page without a verdict is still an ordinary origin error.
+        walled.block = None;
+        assert!(walled.http_error().is_some());
+    }
+
+    #[test]
+    fn has_no_content_catches_the_shapes_that_were_billed_for_nothing() {
+        // pdf_too_large: the decompression-bomb guard refused the document, so
+        // markdown is empty and only a warning records why.
+        let mut d = page(200, 0);
+        d.warning = Some("pdf_too_large: document decompresses beyond the allowed size".into());
+        assert!(d.has_no_content(&[OutputFormat::Markdown]));
+        // aliexpress.com, 2026-08-17: same empty markdown, no warning at all —
+        // which is why this keys on the outcome and not on warning text.
+        d.warning = None;
+        assert!(d.has_no_content(&[OutputFormat::Markdown]));
+        // A legitimately thin page delivered what was asked for.
+        assert!(!page(200, 1).has_no_content(&[OutputFormat::Markdown]));
+    }
+
+    #[test]
+    fn has_no_content_judges_only_the_formats_that_were_requested() {
+        let mut d = page(200, 0); // markdown present but empty
+        d.links = Some(vec!["https://example.com/a".into()]);
+        // Asking for links and getting links is a delivered scrape, even though
+        // the markdown field happens to be empty.
+        assert!(!d.has_no_content(&[OutputFormat::Links]));
+        // Partial delivery across a multi-format request still counts.
+        assert!(!d.has_no_content(&[OutputFormat::Markdown, OutputFormat::Links]));
+    }
+
+    #[test]
+    fn has_no_content_accepts_a_page_that_genuinely_has_no_links() {
+        // `formats:["links"]` over a page with no outbound links returns
+        // `Some([])`. That is the complete, correct answer to what was asked —
+        // failing it would bill-refund a scrape that worked, and it is the one
+        // shape where "empty" and "missing" must not be conflated.
+        let mut d = page(200, 0);
+        d.markdown = None;
+        d.images = None;
+        d.links = Some(Vec::new());
+        assert!(!d.has_no_content(&[OutputFormat::Links]));
+        // Isolated from `links`, so an arm that read the wrong field would fail
+        // here instead of riding on the assertion above.
+        d.links = None;
+        d.images = Some(Vec::new());
+        assert!(!d.has_no_content(&[OutputFormat::Images]));
+        assert!(d.has_no_content(&[OutputFormat::Links]));
+        // Not requested at all is still nothing delivered.
+        d.images = None;
+        assert!(d.has_no_content(&[OutputFormat::Images]));
+    }
+
+    #[test]
+    fn a_thin_error_page_keeps_its_status_classification() {
+        // `structural_integrity_check` never reads the HTTP status, so a terse
+        // 404 earns a `structural_failure` verdict on shape alone. If that
+        // short-circuited `http_error`, every small error page would come back
+        // `no_usable_content` with its body cleared instead of readable under
+        // `http_error` — and would disagree with `crawl.rs`, which filters this
+        // vendor out for the same reason.
+        let mut d = page(404, 300);
+        d.block = Some(BlockOutcome {
+            vendor: STRUCTURAL_FAILURE_VENDOR.into(),
+            reason: "Structural: minimal_text, no_content_elements".into(),
+        });
+        assert!(d.http_error().is_some());
+        // `parked_domain` is NOT carved out: crawl.rs does not filter it either,
+        // and a parked page is a real verdict about the destination on every
+        // surface. Carving it out here is what would split them.
+        d.block = Some(BlockOutcome {
+            vendor: PARKED_DOMAIN_VENDOR.into(),
+            reason: "parked domain".into(),
+        });
+        assert!(d.http_error().is_none());
+        // A real vendor wall still outranks the status.
+        d.block = Some(BlockOutcome {
+            vendor: "datadome".into(),
+            reason: "datadome interstitial".into(),
+        });
+        assert!(d.http_error().is_none());
+    }
+
+    #[test]
+    fn has_no_content_catches_a_format_that_silently_failed() {
+        // `summarize()` failures become a warning and leave the field `None`,
+        // which is indistinguishable from "not requested" without the formats
+        // list — this is the whole reason `has_no_content` takes one.
+        let mut d = page(200, 400);
+        d.summary = None;
+        assert!(d.has_no_content(&[OutputFormat::Summary]));
+        // Delivered, so not empty.
+        d.summary = Some("a summary".into());
+        assert!(!d.has_no_content(&[OutputFormat::Summary]));
+    }
+
+    #[test]
+    fn has_no_content_treats_an_unchanged_page_as_an_answer() {
+        // "nothing changed since `previous`" is a real result, the same
+        // precedent as a confirmed zero-result search being a real search.
+        let mut d = page(200, 0);
+        d.markdown = None;
+        d.change_tracking = Some(ChangeTrackingResult {
+            status: ChangeStatus::Same,
+            first_observation: false,
+            content_hash: "sha256:same".into(),
+            snapshot: None,
+            diff: None,
+            judgment: None,
+            tag: None,
+            truncated: false,
+        });
+        assert!(!d.has_no_content(&[OutputFormat::ChangeTracking]));
+        // Requested but never produced is still nothing delivered.
+        d.change_tracking = None;
+        assert!(d.has_no_content(&[OutputFormat::ChangeTracking]));
+        // An empty extraction found none of the schema's fields.
+        d.json = Some(serde_json::json!({}));
+        assert!(d.has_no_content(&[OutputFormat::Json]));
+        d.json = Some(serde_json::json!({"title": "x"}));
+        assert!(!d.has_no_content(&[OutputFormat::Json]));
+    }
+
+    #[test]
+    fn has_no_content_does_not_fail_a_request_that_asked_for_nothing() {
+        // `"formats": []` survives serde (the default only fills in when the
+        // field is ABSENT), and `.any()` over an empty slice is vacuously false —
+        // without the guard, every such scrape would hard-fail as
+        // `no_usable_content` no matter what was actually fetched.
+        let d = page(200, 400);
+        assert!(!d.has_no_content(&[]));
+        let empty = page(200, 0);
+        assert!(!empty.has_no_content(&[]));
     }
 
     #[test]

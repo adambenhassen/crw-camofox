@@ -215,9 +215,25 @@ pub async fn scrape(
     // gate did not fire. Drop the challenge shell there so the caller gets a
     // clean block instead of the interstitial text as content.
     let is_anti_bot_block = http_error.is_none() && data.block.is_some();
+    // Nothing the caller asked for came back. Same gate as v1, and it has to be
+    // here too: the invariant this whole path is built on is that a URL is not
+    // billed on one surface and refunded on the other, and the SaaS decides that
+    // from `success` alone. Runs last, so a wall or an origin error keeps its own
+    // more specific classification.
+    let no_content =
+        http_error.is_none() && data.block.is_none() && data.has_no_content(&req.formats);
     let (success, error) = match (http_error, data.block.as_ref()) {
         (Some(msg), _) => (false, Some(msg)),
         (None, Some(b)) => (false, Some(b.message())),
+        (None, None) if no_content => (
+            false,
+            Some(
+                data.warning
+                    .clone()
+                    .or_else(|| data.warnings.first().cloned())
+                    .unwrap_or_else(|| "No content could be extracted from the page".to_string()),
+            ),
+        ),
         (None, None) => (true, None),
     };
     let mut data = data;

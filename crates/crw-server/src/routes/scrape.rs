@@ -121,6 +121,34 @@ pub async fn scrape(
         }));
     }
 
+    // Nothing the caller asked for came back. Until now this shipped as a
+    // success: a PDF the decompression-bomb guard refused, or an origin that
+    // answered 200 with nothing extractable, returned `success:true` with an
+    // empty body — and the SaaS refunds on `success:false`, so a `true` here is
+    // a charge for a response with no content in it. Measured on prod: four
+    // customer scrapes in six days, one of them carrying no warning at all,
+    // which is why `has_no_content` keys on the outcome rather than on warning
+    // text. `no_usable_content` is the code the structural/parked verdicts
+    // already use for exactly this meaning.
+    if data.has_no_content(&req.formats) {
+        // Several paths record why in `warnings` (plural) without ever setting
+        // the singular `warning` — a failed summary is one — so reading only the
+        // singular would hand the caller the generic sentence while the real
+        // reason sat one field over.
+        let error_msg = data
+            .warning
+            .clone()
+            .or_else(|| data.warnings.first().cloned())
+            .unwrap_or_else(|| "No content could be extracted from the page".to_string());
+        return Ok(Json(ApiResponse {
+            success: false,
+            data: Some(data),
+            error: Some(error_msg),
+            error_code: Some("no_usable_content".into()),
+            warning: None,
+        }));
+    }
+
     // Promote data.warning to ApiResponse.warning so it's visible at top level
     let warning = data.warning.clone();
     let mut resp = ApiResponse::ok(data);
