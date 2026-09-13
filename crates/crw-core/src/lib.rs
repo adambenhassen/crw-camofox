@@ -30,3 +30,4 @@ pub use config::AppConfig;
 pub use deadline::Deadline;
 pub use error::{CrwError, CrwResult};
 pub use proxy::redact_proxy_url;
+pub use types::is_html_like_content_type;

@@ -182,6 +182,7 @@ async fn scrape_url_inner(
     ) -> crw_extract::OwnedExtractInput {
         crw_extract::OwnedExtractInput {
             raw_html: fr.html.clone(),
+            content_type: fr.content_type.clone(),
             source_url: fr.url.clone(),
             status_code: fr.status_code,
             rendered_with: fr.rendered_with.clone(),
@@ -1235,7 +1236,7 @@ fn classify_block(
     // IS sometimes served under a data content type (DataDome answers XHR-shaped
     // requests with an `application/json` captcha stub).
     if r.signal == crw_extract::antibot::AntibotSignal::StructuralFailure
-        && !crw_renderer::is_html_like_content_type(content_type)
+        && !crw_core::is_html_like_content_type(content_type)
     {
         return None;
     }

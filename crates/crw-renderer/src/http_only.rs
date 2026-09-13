@@ -978,7 +978,7 @@ impl PageFetcher for HttpFetcher {
         // exists to close.
         let declared_html = content_type
             .as_deref()
-            .is_some_and(|ct| !ct.is_empty() && crate::is_html_like_content_type(Some(ct)));
+            .is_some_and(|ct| !ct.is_empty() && crw_core::is_html_like_content_type(Some(ct)));
         let (html, raw_bytes) = if is_pdf {
             (String::new(), Some(bytes.to_vec()))
         } else if !declared_html && looks_binary(&bytes, header_charset.as_deref()) {

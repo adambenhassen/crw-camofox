@@ -234,28 +234,6 @@ fn is_origin_navigation_failure(e: &CrwError) -> bool {
     }
 }
 
-/// Is this response an HTML document, or an unknown type we must assume is one?
-///
-/// The HTML structural heuristics in `antibot::classify` are only meaningful on
-/// one (`crw_crawl::single::classify_block`). The HTTP tier decodes every non-PDF
-/// response as HTML regardless of its declared type, so an `application/json` /
-/// `text/plain` body is indistinguishable from an HTML shell by body shape
-/// alone. Absent or unrecognised types stay HTML-like: a server that omits
-/// `Content-Type` on a bot-wall shell is exactly the case worth judging.
-pub fn is_html_like_content_type(content_type: Option<&str>) -> bool {
-    match content_type {
-        None => true,
-        Some(ct) => {
-            let ct = ct.trim().to_ascii_lowercase();
-            ct.is_empty()
-                || ct == "text/html"
-                || ct == "application/xhtml+xml"
-                || ct == "application/xml"
-                || ct == "text/xml"
-        }
-    }
-}
-
 /// Is this failure the ORIGIN's fault, for breaker-scoping purposes only?
 ///
 /// Deliberately narrower than [`is_origin_navigation_failure`], which decides
@@ -897,7 +875,7 @@ impl FallbackRenderer {
                 let is_empty_2xx = is_2xx
                     && !is_hard_pinned
                     && !matches!(result.status_code, 204..=206)
-                    && is_html_like_content_type(result.content_type.as_deref())
+                    && crw_core::is_html_like_content_type(result.content_type.as_deref())
                     && result.html.trim().is_empty();
 
                 if !self.js_renderers.is_empty()

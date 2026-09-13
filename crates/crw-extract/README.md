@@ -39,6 +39,7 @@ let html = r#"<html><body><article><h1>Hello</h1><p>World</p></article></body></
 
 let result = extract(ExtractOptions {
     raw_html: html,
+    content_type: Some("text/html"),
     source_url: "https://example.com",
     status_code: 200,
     rendered_with: None,
