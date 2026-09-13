@@ -1,4 +1,9 @@
+use lol_html::html_content::UserData;
 use lol_html::{RewriteStrSettings, element, rewrite_str};
+
+/// Marker for `<header>`/`<aside>` nested inside `<main>`/`<article>`, which
+/// are article furniture rather than site chrome and must survive cleaning.
+const KEEP_NESTED: u8 = 1;
 use scraper::{Html, Selector};
 use std::collections::HashSet;
 
@@ -12,6 +17,12 @@ pub fn clean_html(
 ) -> Result<String, String> {
     // Phase 1: lol_html streaming removal of always-unwanted tags.
     let mut handlers = vec![
+        // <head> carries <title>/<meta>, which htmd would otherwise render as
+        // a bare text line at the top of the markdown, duplicating the H1.
+        element!("head", |el| {
+            el.remove();
+            Ok(())
+        }),
         element!("script", |el| {
             el.remove();
             Ok(())
@@ -52,16 +63,42 @@ pub fn clean_html(
             el.remove();
             Ok(())
         }));
-        handlers.push(element!("footer", |el| {
-            el.remove();
+
+        // `<header>` and `<aside>` mean two different things depending on where
+        // they sit. Directly under <body> they are site chrome. Inside <main>
+        // or <article> they are part of the article itself: the title block
+        // that carries the H1 and the standfirst, or a pull-quote. Removing
+        // them wholesale deleted 9.6% of what these two tags match across a
+        // 400-page sample, including the lead paragraph of every Pantheon docs
+        // page. The same split applies to `<footer>`: inside an article it is the
+        // byline / date / tags block, not the site footer.
+        //
+        // lol_html streams, so a handler cannot look at its ancestors. Mark the
+        // nested ones first (handlers run in registration order, and both fire
+        // for the same element), then skip anything marked.
+        handlers.push(element!(
+            "main header, main aside, main footer, article header, article aside, article footer",
+            |el| {
+                el.set_user_data(KEEP_NESTED);
+                Ok(())
+            }
+        ));
+        handlers.push(element!("header", |el| {
+            if el.user_data().downcast_ref::<u8>() != Some(&KEEP_NESTED) {
+                el.remove();
+            }
             Ok(())
         }));
-        handlers.push(element!("header", |el| {
-            el.remove();
+        handlers.push(element!("footer", |el| {
+            if el.user_data().downcast_ref::<u8>() != Some(&KEEP_NESTED) {
+                el.remove();
+            }
             Ok(())
         }));
         handlers.push(element!("aside", |el| {
-            el.remove();
+            if el.user_data().downcast_ref::<u8>() != Some(&KEEP_NESTED) {
+                el.remove();
+            }
             Ok(())
         }));
         handlers.push(element!("menu", |el| {
@@ -97,15 +134,46 @@ pub fn clean_html(
             // a combined string that also contains the other classes).
             let combined = format!("{class} {id}");
 
-            const NOISE_PATTERNS: &[&str] = &[
+            // Layout names, matched per class token — NEVER as a substring.
+            // These describe where a region sits on the page, so themes reuse
+            // them to name the wrapper that HOLDS the article:
+            // `pds-sidebar-layout__content` (Pantheon docs), `has-sidebar`,
+            // `content-sidebar`, `navigation-list-container`. Substring
+            // matching on these emptied 14% of a 161-page labelled corpus
+            // (django docs 74670 -> 248 chars).
+            //
+            // Only names observed wrapping real content live here. Names like
+            // "cookie" / "consent" / "infobox" stay in NOISE_PATTERNS below:
+            // they appear almost exclusively as `cookie-notice` /
+            // `cookielawinfo-*` style tokens, so requiring an exact token
+            // would stop removing them entirely.
+            // Matched as a PREFIX of a class token (see `is_noise` below).
+            const NOISE_LAYOUT_TOKENS: &[&str] = &[
                 "sidebar",
+                "navigation",
+                "breadcrumb",
+                "dropdown",
+                "site-header",
+                "site-footer",
+                "page-header",
+                "page-footer",
+                "global-header",
+                "global-footer",
+                "global-nav",
+                "main-nav",
+                "primary-nav",
+                "secondary-nav",
+                // zhihu names the article body `copyrightrichtext-richtext`;
+                // as a substring this deleted 98% of the page.
+                "copyright",
+            ];
+
+            const NOISE_PATTERNS: &[&str] = &[
                 "table-of-contents",
                 "tableofcontents",
                 "infobox",
                 "navbox",
                 "nav-box",
-                "navigation",
-                "breadcrumb",
                 "cookie",
                 "consent",
                 "banner",
@@ -134,8 +202,6 @@ pub fn clean_html(
                 "shortdescription",
                 "sphinxsidebar",
                 "sphinxfooter",
-                "copyright",
-                "dropdown",
                 "city-selector",
                 "location-selector",
                 "lang-selector",
@@ -147,16 +213,6 @@ pub fn clean_html(
                 "promotional",
                 "widget",
                 "widgets",
-                "site-footer",
-                "site-header",
-                "page-footer",
-                "page-header",
-                "global-nav",
-                "global-footer",
-                "global-header",
-                "main-nav",
-                "primary-nav",
-                "secondary-nav",
                 "social-share",
                 "social-links",
                 "social-icons",
@@ -183,10 +239,20 @@ pub fn clean_html(
                 "ads-",
             ];
 
+            // Layout names match a class token that STARTS with the name, never
+            // one that merely contains it. Position carries the meaning:
+            //
+            //   sidebar-right, sidebar-card, dropdown-menu, breadcrumbs
+            //       -> the element IS that piece of furniture. Remove.
+            //   has-sidebar, no-sidebar, content-sidebar,
+            //   pds-sidebar-layout__content (Pantheon docs)
+            //       -> the element is the article, named after the furniture
+            //          beside it. Keep.
             let is_noise = NOISE_PATTERNS.iter().any(|p| combined.contains(p)) || {
                 let tokens_iter = class.split_whitespace().chain(std::iter::once(id.as_str()));
                 tokens_iter.into_iter().any(|tok| {
-                    NOISE_EXACT_TOKENS.contains(&tok)
+                    NOISE_LAYOUT_TOKENS.iter().any(|p| tok.starts_with(p))
+                        || NOISE_EXACT_TOKENS.contains(&tok)
                         || NOISE_PREFIXES.iter().any(|pre| tok.starts_with(pre))
                 })
             };

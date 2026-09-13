@@ -302,78 +302,6 @@ fn lookup_domain_selector(source_url: &str, map: &HashMap<String, String>) -> Op
     map.get(&host).cloned()
 }
 
-#[cfg(test)]
-mod private_tests {
-    use super::*;
-    use crw_core::types::CapturedNetworkResponse;
-
-    #[test]
-    fn domain_selector_matches_exact_host() {
-        let mut map = HashMap::new();
-        map.insert("news.example.com".to_string(), ".article".to_string());
-        let got = lookup_domain_selector("https://news.example.com/p/42", &map);
-        assert_eq!(got.as_deref(), Some(".article"));
-    }
-
-    #[test]
-    fn domain_selector_misses_on_other_host() {
-        let mut map = HashMap::new();
-        map.insert("news.example.com".to_string(), ".article".to_string());
-        let got = lookup_domain_selector("https://other.example.com/p/42", &map);
-        assert!(got.is_none());
-    }
-
-    #[test]
-    fn domain_selector_empty_map_returns_none() {
-        let map = HashMap::new();
-        assert!(lookup_domain_selector("https://x.example.com/", &map).is_none());
-    }
-
-    #[test]
-    fn xhr_extract_returns_none_for_empty_input() {
-        assert!(extract_xhr_text(&[]).is_none());
-    }
-
-    #[test]
-    fn xhr_extract_collects_long_string_fields() {
-        let body = serde_json::json!({
-            "title": "short",
-            "body": "a".repeat(300),
-            "meta": { "summary": "b".repeat(200) },
-            "tags": ["c".repeat(150), "short"],
-            "url": "https://example.com/should/skip",
-        })
-        .to_string();
-        let resp = vec![CapturedNetworkResponse {
-            url: "https://api.example.com/article/1".to_string(),
-            request_id: "1".to_string(),
-            status: 200,
-            mime_type: Some("application/json".to_string()),
-            body: Some(body),
-            body_size_bytes: 800,
-        }];
-        let got = extract_xhr_text(&resp).expect("expected long-text fields");
-        assert!(got.contains(&"a".repeat(300)));
-        assert!(got.contains(&"b".repeat(200)));
-        assert!(got.contains(&"c".repeat(150)));
-        assert!(!got.contains("short"));
-        assert!(!got.contains("example.com/should/skip"));
-    }
-
-    #[test]
-    fn xhr_extract_skips_invalid_json() {
-        let resp = vec![CapturedNetworkResponse {
-            url: "x".into(),
-            request_id: "1".into(),
-            status: 200,
-            mime_type: Some("application/json".into()),
-            body: Some("not json".into()),
-            body_size_bytes: 8,
-        }];
-        assert!(extract_xhr_text(&resp).is_none());
-    }
-}
-
 /// Decode the small set of HTML entities that commonly appear in `<meta>`
 /// `content` attributes. We don't pull in a full entity decoder because the
 /// metadata path only sees author-curated short text, and the long tail of
@@ -587,12 +515,6 @@ pub fn extract(opts: ExtractOptions<'_>) -> CrwResult<ScrapeData> {
                 let basic_md = markdown::html_to_markdown(&basic_cleaned);
                 let basic_q = quality::analyze_md_only(&basic_md);
                 candidates.push(("basic_clean", basic_md, basic_q));
-
-                // Alt 3: structural table/list extraction from raw HTML.
-                if let Some(structural) = extract_tables_and_lists(raw_html) {
-                    let q = quality::analyze_md_only(&structural);
-                    candidates.push(("structural", structural, q));
-                }
 
                 // Alt 4: XHR/fetch JSON capture — recursively walk every captured
                 // JSON body and gather long text fields. Useful when the article
@@ -972,15 +894,6 @@ fn apply_selector(html: &str, css: Option<&str>, xpath: Option<&str>) -> CrwResu
     Ok(None)
 }
 
-/// Walk the raw HTML for substantial `<table>` (≥2 data rows) and
-/// `<ul>/<ol>` (≥5 items) elements, render each to markdown, and return
-/// the concatenation. Returns `None` if no qualifying structure is found.
-///
-/// This exists as a last-ditch fallback: readability and the htmd-on-cleaned
-/// path treat tabular and list-only pages (county finance reports, job
-/// listings, niche product catalogs) as navigation noise. By pulling those
-/// structures out of the raw DOM we surface real content that would
-/// otherwise be reported as thin.
 /// Walk the captured XHR/fetch JSON responses and harvest long text fields.
 /// Each response is parsed as JSON; every string value with at least
 /// `MIN_FIELD_LEN` characters is appended (deduplicated). Returned as a
@@ -1050,95 +963,74 @@ fn walk_json_strings(value: &serde_json::Value, on_string: &mut dyn FnMut(&str))
     }
 }
 
-fn extract_tables_and_lists(html: &str) -> Option<String> {
-    use scraper::{Html, Selector};
-
-    let doc = Html::parse_document(html);
-    let table_sel = Selector::parse("table").ok()?;
-    let list_sel = Selector::parse("ul, ol").ok()?;
-    let row_sel = Selector::parse("tr").ok()?;
-    let item_sel = Selector::parse("li").ok()?;
-
-    let mut chunks: Vec<String> = Vec::new();
-
-    for table in doc.select(&table_sel) {
-        if table.select(&row_sel).count() < 2 {
-            continue;
-        }
-        let html_chunk = table.html();
-        let md = markdown::html_to_markdown(&html_chunk);
-        if md.trim().len() >= 40 {
-            chunks.push(md);
-        }
-    }
-
-    for list in doc.select(&list_sel) {
-        if list.select(&item_sel).count() < 5 {
-            continue;
-        }
-        // Skip nav/footer lists — those are usually identifiable by ancestor
-        // tag and would otherwise drown out real content.
-        let in_nav = list
-            .ancestors()
-            .filter_map(scraper::ElementRef::wrap)
-            .any(|el| {
-                let n = el.value().name();
-                n == "nav" || n == "footer" || n == "header"
-            });
-        if in_nav {
-            continue;
-        }
-        let html_chunk = list.html();
-        let md = markdown::html_to_markdown(&html_chunk);
-        if md.trim().len() >= 40 {
-            chunks.push(md);
-        }
-    }
-
-    if chunks.is_empty() {
-        return None;
-    }
-    Some(chunks.join("\n\n"))
-}
-
 #[cfg(test)]
-mod table_list_fallback_tests {
+mod private_tests {
     use super::*;
+    use crw_core::types::CapturedNetworkResponse;
 
     #[test]
-    fn extracts_two_row_table() {
-        let html = "<html><body><nav>x</nav><table>\
-            <tr><th>Name</th><th>Value</th></tr>\
-            <tr><td>Alpha</td><td>1</td></tr>\
-            <tr><td>Bravo</td><td>2</td></tr>\
-            </table></body></html>";
-        let md = extract_tables_and_lists(html).expect("table should extract");
-        assert!(md.contains("Alpha"));
-        assert!(md.contains("Bravo"));
+    fn domain_selector_matches_exact_host() {
+        let mut map = HashMap::new();
+        map.insert("news.example.com".to_string(), ".article".to_string());
+        let got = lookup_domain_selector("https://news.example.com/p/42", &map);
+        assert_eq!(got.as_deref(), Some(".article"));
     }
 
     #[test]
-    fn skips_short_table() {
-        let html = "<table><tr><td>only</td></tr></table>";
-        assert!(extract_tables_and_lists(html).is_none());
+    fn domain_selector_misses_on_other_host() {
+        let mut map = HashMap::new();
+        map.insert("news.example.com".to_string(), ".article".to_string());
+        let got = lookup_domain_selector("https://other.example.com/p/42", &map);
+        assert!(got.is_none());
     }
 
     #[test]
-    fn skips_nav_list() {
-        let html = "<nav><ul>\
-            <li>a</li><li>b</li><li>c</li><li>d</li><li>e</li><li>f</li>\
-            </ul></nav>";
-        assert!(extract_tables_and_lists(html).is_none());
+    fn domain_selector_empty_map_returns_none() {
+        let map = HashMap::new();
+        assert!(lookup_domain_selector("https://x.example.com/", &map).is_none());
     }
 
     #[test]
-    fn extracts_long_list() {
-        let html = "<main><ul>\
-            <li>Job A</li><li>Job B</li><li>Job C</li>\
-            <li>Job D</li><li>Job E</li><li>Job F</li>\
-            </ul></main>";
-        let md = extract_tables_and_lists(html).expect("list should extract");
-        assert!(md.contains("Job A"));
-        assert!(md.contains("Job F"));
+    fn xhr_extract_returns_none_for_empty_input() {
+        assert!(extract_xhr_text(&[]).is_none());
+    }
+
+    #[test]
+    fn xhr_extract_collects_long_string_fields() {
+        let body = serde_json::json!({
+            "title": "short",
+            "body": "a".repeat(300),
+            "meta": { "summary": "b".repeat(200) },
+            "tags": ["c".repeat(150), "short"],
+            "url": "https://example.com/should/skip",
+        })
+        .to_string();
+        let resp = vec![CapturedNetworkResponse {
+            url: "https://api.example.com/article/1".to_string(),
+            request_id: "1".to_string(),
+            status: 200,
+            mime_type: Some("application/json".to_string()),
+            body: Some(body),
+            body_size_bytes: 800,
+        }];
+        let got = extract_xhr_text(&resp).expect("expected long-text fields");
+        assert!(got.contains(&"a".repeat(300)));
+        assert!(got.contains(&"b".repeat(200)));
+        assert!(got.contains(&"c".repeat(150)));
+        assert!(!got.contains("short"));
+        assert!(!got.contains("example.com/should/skip"));
+    }
+
+    #[test]
+    fn xhr_extract_skips_invalid_json() {
+        let resp = vec![CapturedNetworkResponse {
+            url: "x".into(),
+            request_id: "1".into(),
+            status: 200,
+            mime_type: Some("application/json".into()),
+            body: Some("not json".into()),
+            body_size_bytes: 8,
+        }];
+        assert!(extract_xhr_text(&resp).is_none());
     }
 }

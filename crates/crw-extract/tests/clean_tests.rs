@@ -190,3 +190,40 @@ fn clean_html_removes_dropdown_noise_class() {
     );
     assert!(result.contains("Content"));
 }
+
+// ── onlyMainContent must not delete the article (upstream 682a731) ──
+
+#[test]
+fn layout_names_match_a_token_prefix_not_a_substring() {
+    let html = r#"<html><body>
+        <div class="pds-sidebar-layout__content"><p>Article body kept</p></div>
+        <div class="has-sidebar"><p>Also kept</p></div>
+        <div class="sidebar-right"><p>Sidebar removed</p></div>
+        <div class="dropdown-menu"><p>Menu removed</p></div>
+    </body></html>"#;
+    let out = clean_html(html, true, &[], &[]).unwrap();
+    assert!(out.contains("Article body kept"), "{out}");
+    assert!(out.contains("Also kept"), "{out}");
+    assert!(!out.contains("Sidebar removed"), "{out}");
+    assert!(!out.contains("Menu removed"), "{out}");
+}
+
+#[test]
+fn article_header_and_footer_survive_page_chrome_does_not() {
+    let html = r#"<html><head><title>Duplicate title</title></head><body>
+        <header><p>Site header</p></header>
+        <article><header><h1>Headline</h1></header><p>Body</p>
+        <footer><p>Byline</p></footer></article>
+        <footer><p>Site footer</p></footer>
+    </body></html>"#;
+    let out = clean_html(html, true, &[], &[]).unwrap();
+    assert!(out.contains("Headline") && out.contains("Byline"), "{out}");
+    assert!(
+        !out.contains("Site header") && !out.contains("Site footer"),
+        "{out}"
+    );
+    assert!(
+        !out.contains("Duplicate title"),
+        "<head> must be stripped: {out}"
+    );
+}
