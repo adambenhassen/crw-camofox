@@ -37,7 +37,7 @@ The bundled `docker-compose.yml` starts these services:
 | **camofox** | 9377 | ✅ | [Camofox](https://github.com/redf0x1/camofox-browser) (Camoufox/Firefox) — heavy/stealth JS tier + `/v1/search` backend |
 | **searxng** | 8080 | `--profile searxng` | SearXNG meta-search backend for `/v1/search` (opt-in alternative to Camofox) |
 
-¹ The host port defaults to `3000` but is overridable without editing the Compose file: set `CRW_HOST_PORT` in `.env` (e.g. `CRW_HOST_PORT=3055`) if something else already holds 3000 on the box. The container port stays `3000`. Compose interpolates `CRW_HOST_PORT` on the host into the port mapping only; unlike the `CRW_*` config keys elsewhere it is not delivered into the container, so the engine never reads it.
+¹ The host bind address and port are overridable without editing the Compose file: set `CRW_HOST_PORT` in `.env` (e.g. `CRW_HOST_PORT=3055`) if something else already holds 3000 on the box, and `CRW_BIND_ADDRESS` (e.g. `CRW_BIND_ADDRESS=127.0.0.1`) to stop publishing on public interfaces, for example when a reverse proxy fronts crw. Both default to `0.0.0.0:3000` and the container port stays `3000`. Compose interpolates these on the host into the port mapping only; unlike the `CRW_*` config keys elsewhere they are not delivered into the container, so the engine never reads them.
 
 The `crw` service reads its configuration from the mounted `config.docker.toml` (via
 `CRW_CONFIG=config.docker`), which already points each renderer at the matching
