@@ -570,6 +570,19 @@ impl FallbackRenderer {
         self
     }
 
+    /// Replace the HTTP tier and the JS ladder with the given fetchers. For tests
+    /// in other crates that drive the full ladder without a network or browser.
+    #[doc(hidden)]
+    pub fn with_fetchers(
+        mut self,
+        http: Arc<dyn PageFetcher>,
+        js_renderers: Vec<Arc<dyn PageFetcher>>,
+    ) -> Self {
+        self.http = http;
+        self.js_renderers = js_renderers;
+        self
+    }
+
     /// Access the host preferences cache (for admin endpoints, tests).
     pub fn preferences(&self) -> Arc<HostPreferences> {
         Arc::clone(&self.preferences)

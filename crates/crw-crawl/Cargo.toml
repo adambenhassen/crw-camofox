@@ -34,6 +34,7 @@ publicsuffix = { workspace = true }
 libc = { workspace = true }
 
 [dev-dependencies]
+async-trait = "0.1"
 tokio = { workspace = true }
 wiremock = { workspace = true }
 proptest = { workspace = true }
