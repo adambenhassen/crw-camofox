@@ -332,8 +332,13 @@ async fn scrape_url_inner(
         // the document has no DOM to escalate into.
         && fetch_result.content_type.as_deref() != Some("application/pdf");
 
-        let escalate_for_quality =
-            !md_is_byte_thin && md_is_low_quality && fetch_result.html.len() > 5000;
+        let escalate_for_quality = escalate_for_quality(
+            md_is_byte_thin,
+            md_is_low_quality,
+            fetch_result.status_code,
+            &fetch_result.html,
+            fetch_result.content_type.as_deref(),
+        );
         // A request whose JS ladder already failed comes back as an HTTP body
         // carrying the `js_escalation_failed:` warning. It looks exactly like a
         // low-tier result, so without this check we would re-run the whole ladder
@@ -1342,6 +1347,51 @@ pub(crate) fn classify_block(
     })
 }
 
+/// Should a substantive-but-low-scoring body buy a browser render?
+///
+/// The content-type term matters because the HTTP tier decodes every non-PDF
+/// body as HTML regardless of its declared type, so a healthy JSON API response
+/// scores as low-quality (no sentences, few word-like tokens) and used to buy a
+/// full render that was then discarded: prod measured 114 of 135 quality
+/// escalations ending in "keeping HTTP", ~2.5-3s each. Unlike the byte-thin
+/// trigger this one fires on a body we already hold in full, so for a
+/// non-html-ish type there is nothing left for a browser (or a different
+/// egress) to reveal. The byte-thin path stays content-type-agnostic on
+/// purpose: a near-empty response may be a deny stub that a retry from another
+/// fingerprint recovers.
+///
+/// Two things still earn a render under a data content type, so both get the
+/// last word before we suppress. Both are short-circuited away on the html
+/// path, which keeps its current cost exactly.
+fn escalate_for_quality(
+    md_is_byte_thin: bool,
+    md_is_low_quality: bool,
+    status: u16,
+    html: &str,
+    content_type: Option<&str>,
+) -> bool {
+    if md_is_byte_thin || !md_is_low_quality || html.len() <= 5000 {
+        return false;
+    }
+    // Only JSON is gated, and only because it is the one type we measured: 114
+    // of 135 quality escalations in 24h of production ended in "keeping HTTP",
+    // all of them JSON API bodies. Every other content type keeps escalating
+    // exactly as before, so no content sniffing has to be correct for recall to
+    // hold. Widening this needs its own measurement.
+    let is_json = content_type
+        .and_then(|ct| ct.split(';').next())
+        .map(|ct| ct.trim().eq_ignore_ascii_case("application/json"))
+        .unwrap_or(false);
+    if !is_json {
+        return true;
+    }
+    // A vendor wall can be served under a data content type, and that one a
+    // retry from another fingerprint can clear.
+    crw_extract::antibot::classify(Some(status), html)
+        .signal
+        .is_blocked()
+}
+
 fn formats_include_json(formats: &[OutputFormat]) -> bool {
     formats.contains(&OutputFormat::Json)
 }
@@ -1930,6 +1980,40 @@ mod tests {
             .is_none(),
             "an article merely mentioning Vercel without the checkpoint heading must not be misflagged"
         );
+    }
+
+    #[test]
+    fn quality_escalation_skips_json_only() {
+        // Prod: 114 of 135 quality escalations ended in "keeping HTTP" because
+        // a healthy JSON body scores low-quality (no sentences, few word-like
+        // tokens) and bought a browser render that was then discarded.
+        let json = r#"{"id":1,"body":"comment text"},"#.repeat(200); // > 5000 bytes
+        let q = |ct, html: &str| escalate_for_quality(false, true, 200, html, ct);
+        assert!(!q(Some("application/json"), &json));
+        // Production sends the charset suffix, so the media type is what counts.
+        assert!(!q(Some("application/json; charset=utf-8"), &json));
+        assert!(!q(Some("APPLICATION/JSON"), &json));
+        // Everything else is left exactly as it behaves on main. Only JSON was
+        // measured, and gating a type we never measured would trade recall for
+        // a saving we cannot show. `text/plain` and `application/octet-stream`
+        // in particular can carry a mislabeled SPA shell that a browser sniffs
+        // and hydrates, so they must keep escalating.
+        assert!(q(Some("text/html"), &json));
+        assert!(q(None, &json));
+        assert!(q(Some("text/plain"), &json));
+        assert!(q(Some("application/octet-stream"), &json));
+        // A vendor wall served as JSON is the one JSON case still worth a retry:
+        // another fingerprint can clear it.
+        let walled = format!("{json}\"url\":\"https://captcha-delivery.com/x\"");
+        assert!(q(Some("application/json"), &walled));
+        // A byte-thin body never reaches this trigger, whatever the type.
+        assert!(!escalate_for_quality(
+            true,
+            true,
+            200,
+            &json,
+            Some("text/html")
+        ));
     }
 
     #[test]
