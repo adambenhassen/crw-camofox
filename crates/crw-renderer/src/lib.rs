@@ -675,8 +675,16 @@ impl FallbackRenderer {
                     {
                         Ok(js_result) => Ok(js_result),
                         // An explicit renderer pin is a caller contract that
-                        // forbids silent substitution: fail closed.
-                        Err(e) if is_hard_pinned => Err(e),
+                        // forbids silent substitution: fail closed. So does a
+                        // shell that IS the wall the ladder just refused to clear:
+                        // returning it hands back exactly what every tier
+                        // rejected. A shell that is not a wall still substitutes.
+                        Err(e)
+                            if is_hard_pinned
+                                || detector::looks_like_generic_bot_wall(&http_result.html) =>
+                        {
+                            Err(e)
+                        }
                         Err(e) => {
                             if is_auth_blocked {
                                 tracing::error!(
@@ -806,9 +814,13 @@ impl FallbackRenderer {
                         .await
                     {
                         Ok(js_result) => Ok(js_result),
-                        Err(e) if is_hard_pinned => {
-                            // User explicitly pinned a renderer — surface the error
-                            // instead of silently returning the (likely useless) HTTP body.
+                        Err(e)
+                            if is_hard_pinned
+                                || detector::looks_like_generic_bot_wall(&result.html) =>
+                        {
+                            // Pinned: the caller's contract forbids substitution.
+                            // Wall: see the sibling arm — the shell is the very
+                            // thing the ladder rejected, so it is not a fallback.
                             Err(e)
                         }
                         Err(e) => {
@@ -1535,6 +1547,22 @@ impl FallbackRenderer {
                 );
                 result.warnings.push(hint);
             }
+            // A wall no tier could clear is not content. Every tier already
+            // classified it — that verdict is exactly why the result landed in
+            // `thin_result` instead of being accepted — and this was the one place
+            // that discarded it: the interstitial went back under `success: true`
+            // and an agent read it as the page.
+            //
+            // Scoped deliberately to the generic phrase-list wall. A genuinely thin
+            // but real page still ships, because returning the best available body
+            // is the point of this tail.
+            if detector::looks_like_generic_bot_wall(&result.html) {
+                return Err(CrwError::HttpError(format!(
+                    "blocked by an anti-bot wall that none of the {} renderer tier(s) \
+                     attempted could clear",
+                    chain.len().max(1),
+                )));
+            }
             Ok(result)
         } else {
             Err(last_error
@@ -2186,33 +2214,159 @@ mod tests {
     /// the JS tier's generic RendererError. `TargetUnreachable` maps to 422 (the caller
     /// gave us a dead target); `RendererError` falls through to a 500 and reads as "our
     /// server broke".
+    /// An HTTP tier that cannot reach the origin at all.
+    struct Unreachable;
+    #[async_trait::async_trait]
+    impl PageFetcher for Unreachable {
+        async fn fetch(
+            &self,
+            url: &str,
+            _h: &HashMap<String, String>,
+            _w: Option<u64>,
+            _d: crw_core::Deadline,
+        ) -> CrwResult<FetchResult> {
+            Err(CrwError::TargetUnreachable(format!(
+                "Could not reach {url}"
+            )))
+        }
+        fn name(&self) -> &str {
+            "http"
+        }
+        fn supports_js(&self) -> bool {
+            false
+        }
+        async fn is_available(&self) -> bool {
+            true
+        }
+    }
+
+    /// Prod shipped an anti-bot interstitial to a paying customer as
+    /// `success: true` with `creditCost: 1`, because the ladder tail returned
+    /// the best thin result without re-reading the verdict every tier had
+    /// already reached. Live case: https://www.prlib.ru/en/history/619410 on
+    /// 2026-09-03, "Security Check / Checking your browser", 95 chars.
+    #[tokio::test]
+    async fn wall_the_whole_ladder_failed_to_clear_is_not_a_success() {
+        let wall = "<html><body><h1>Security Check</h1>\
+                    <p>Checking your browser before accessing the site</p></body></html>";
+        let lp = Arc::new(MockFetcher {
+            name: "lightpanda",
+            behavior: MockBehavior::Ok(wall.to_string()),
+        }) as Arc<dyn PageFetcher>;
+        let camofox = Arc::new(MockFetcher {
+            name: "camofox",
+            behavior: MockBehavior::Ok(wall.to_string()),
+        }) as Arc<dyn PageFetcher>;
+        let mut r = make_renderer_with_mocks(vec![lp, camofox]);
+        // The HTTP tier cannot reach the origin, so the JS ladder actually runs
+        // — the real shape of the prod case, where HTTP escalated and every JS
+        // tier then hit the same wall.
+        r.http = Arc::new(Unreachable);
+
+        let out = r
+            .fetch(
+                "https://example.com",
+                &HashMap::new(),
+                Some(true),
+                None,
+                None,
+                tdl(),
+            )
+            .await;
+
+        match out {
+            Err(CrwError::HttpError(msg)) => {
+                assert!(
+                    msg.contains("anti-bot wall"),
+                    "expected the wall to be named, got: {msg}"
+                );
+            }
+            Ok(r) => panic!(
+                "a wall no tier could clear must not ship as a success: rendered_with={:?} html={:?}",
+                r.rendered_with, r.html
+            ),
+            Err(e) => panic!("expected HttpError naming the wall, got {e:?}"),
+        }
+    }
+
+    /// The other half of the same gate: a page that is merely thin, with no
+    /// wall phrasing, must still ship. Returning the best available body is the
+    /// point of the ladder tail and the recall invariant rests on it.
+    #[tokio::test]
+    async fn thin_but_real_page_still_ships_from_the_ladder_tail() {
+        let thin = "<html><body><h1>Notice</h1><p>Short but genuine page.</p></body></html>";
+        let lp = Arc::new(MockFetcher {
+            name: "lightpanda",
+            behavior: MockBehavior::Ok(thin.to_string()),
+        }) as Arc<dyn PageFetcher>;
+        let camofox = Arc::new(MockFetcher {
+            name: "camofox",
+            behavior: MockBehavior::Ok(thin.to_string()),
+        }) as Arc<dyn PageFetcher>;
+        let mut r = make_renderer_with_mocks(vec![lp, camofox]);
+        // The forced-JS arm fetches HTTP first for the content-type check, so
+        // the real fetcher would answer before the ladder ever runs.
+        r.http = Arc::new(MockFetcher {
+            name: "http",
+            behavior: MockBehavior::Ok(thin.to_string()),
+        });
+
+        let out = r
+            .fetch(
+                "https://example.com",
+                &HashMap::new(),
+                Some(true),
+                None,
+                None,
+                tdl(),
+            )
+            .await;
+        assert!(
+            out.is_ok(),
+            "a thin but wall-free body must still be returned, got {:?}",
+            out.err()
+        );
+    }
+
+    /// The ladder correctly refuses a wall, and then the HTTP-shell fallback
+    /// hands the same wall back anyway. Prod log, 2026-09-03: "JS escalation
+    /// failed for soft-block status; surfacing HTTP shell with warning: ...
+    /// blocked by an anti-bot wall that none of the 3 renderer tier(s)
+    /// attempted could clear". The ladder's verdict has to survive that
+    /// substitution, or rejecting the wall upstream buys nothing.
+    #[tokio::test]
+    async fn http_shell_fallback_does_not_resurrect_a_wall() {
+        let wall = "<html><body><h1>Security Check</h1>\
+                    <p>Checking your browser before accessing the site</p></body></html>";
+        let lp = Arc::new(MockFetcher {
+            name: "lightpanda",
+            behavior: MockBehavior::Ok(wall.to_string()),
+        }) as Arc<dyn PageFetcher>;
+        let mut r = make_renderer_with_mocks(vec![lp]);
+        r.http = Arc::new(MockFetcher {
+            name: "http",
+            behavior: MockBehavior::Ok(wall.to_string()),
+        });
+
+        let out = r
+            .fetch(
+                "https://example.com",
+                &HashMap::new(),
+                Some(true),
+                None,
+                None,
+                tdl(),
+            )
+            .await;
+        assert!(
+            out.is_err(),
+            "the wall must not come back through the HTTP shell: {:?}",
+            out.ok().map(|r| (r.rendered_with, r.html.len()))
+        );
+    }
+
     #[tokio::test]
     async fn unreachable_origin_beats_js_renderer_error() {
-        struct Unreachable;
-        #[async_trait::async_trait]
-        impl PageFetcher for Unreachable {
-            async fn fetch(
-                &self,
-                url: &str,
-                _h: &HashMap<String, String>,
-                _w: Option<u64>,
-                _d: crw_core::Deadline,
-            ) -> CrwResult<FetchResult> {
-                Err(CrwError::TargetUnreachable(format!(
-                    "Could not reach {url}"
-                )))
-            }
-            fn name(&self) -> &str {
-                "http"
-            }
-            fn supports_js(&self) -> bool {
-                false
-            }
-            async fn is_available(&self) -> bool {
-                true
-            }
-        }
-
         let js = Arc::new(MockFetcher {
             name: "chrome",
             behavior: MockBehavior::Err("Navigation failed: net::ERR_SSL".to_string()),
