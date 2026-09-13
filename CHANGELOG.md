@@ -5,6 +5,66 @@ camofox-first, anti-detection variant of crw; entries below cover the fork's own
 `v1.x` line. The format follows [Keep a Changelog](https://keepachangelog.com/),
 and the project uses [Semantic Versioning](https://semver.org/).
 
+## [1.3.0] - 2026-09-13
+
+A robustness release for the Camofox tier: search and render recover from the
+browser server's transient failures instead of wedging or stalling, pinned
+renders no longer die on the HTTP probe, and errors from the browser server
+finally say what went wrong.
+
+### Added
+
+- **Scrape:** an `images` output format returns the page's discovered images as
+  structured data (`[{url, alt}]`, flattened to `string[]` on v2) with
+  WHATWG-correct `srcset` parsing, instead of callers re-parsing HTML.
+
+### Fixed
+
+- **Search:** a search that timed out on the reused warm tab left every later
+  search stalled behind the same dead tab until the process restarted. A
+  timeout on a reused tab now recreates the tab and retries once; a timeout
+  on a fresh tab swaps it out for the next search. The abandoned tab is
+  closed only after its replacement exists, so the browser context never
+  drops to zero tabs and hits Camofox's eager teardown.
+- **Search:** a failed `/evaluate` (Camofox answers a dead tab with a JSON
+  error, not an empty result) is treated as an upstream error so the stale-tab
+  recovery runs, instead of being reported as a clean empty result page.
+- **Search:** the response no longer blames SearXNG in error messages; the
+  backend is Camofox.
+- **Renderer:** tabs are created blank under a creation lock and navigated
+  with a separate call. Concurrent creates that navigated inside the create
+  raced for Camofox's initial blank page on a freshly relaunched context and
+  aborted each other, and each failure counted toward Camofox's
+  consecutive-failure breaker, which then closed the context. A create that
+  lands in Camofox's context relaunch window (`window is null`) is retried
+  with a growing pause inside the request deadline instead of failing the
+  render.
+- **Renderer:** when JS rendering is requested (which a pinned renderer
+  implies), an HTTP-tier failure now escalates to the JS tier the way auto
+  mode does. A Camofox-pinned scrape of an origin slower than the HTTP timeout
+  used to return `502` without ever reaching Camofox.
+- **Renderer:** pages whose HTML exceeds Camofox's 1 MiB single-result cap
+  are retrieved in slices. Previously the Camofox tier returned the server's
+  truncation placeholder as the document, so large pages (Wikipedia-sized
+  articles) came back empty and flagged as a loading placeholder.
+- **Renderer:** a navigate that Camofox reports as failed only because its
+  post-navigation ARIA snapshot timed out (large documents) no longer fails
+  the render; the page has loaded by then and the snapshot is unused.
+- **Renderer:** the Camofox tier is registered independently of the `cdp`
+  feature, and `renderer.mode = "camofox"` without a configured endpoint (or
+  in a binary built without the feature) is a startup configuration error
+  rather than a silent fall back to HTTP-only.
+- **Diagnostics:** Camofox's own error message (for example a persistent
+  profile pinned to an older Camoufox build) is carried into search and
+  renderer errors instead of a bare status; non-JSON bodies such as proxy
+  error pages are logged rather than surfaced to API clients. Rejected or
+  failed closes of abandoned tabs, and engine failures that the response
+  strips to a short reason, are now logged in full.
+- **MCP:** inline scrape content in search results is capped across results
+  to protect agent context.
+- **Release:** the internal crate version pins are synchronized with the
+  workspace version, so the CI version guard passes again.
+
 ## [1.2.0] - 2026-07-18
 
 A hardening release: anti-bot detection accuracy, renderer recovery under blocked
