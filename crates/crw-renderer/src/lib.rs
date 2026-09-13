@@ -222,6 +222,34 @@ fn is_origin_navigation_failure(e: &CrwError) -> bool {
     }
 }
 
+/// Prefix of the `warning` set when a JS escalation failed and the HTTP body was
+/// returned in its place. Public because it is BOTH the caller-facing
+/// explanation and the signal `crw_crawl::single` reads to skip a second
+/// escalation round that would re-run a ladder this request already exhausted.
+/// A shared constant so the producer and that consumer cannot drift.
+pub const JS_ESCALATION_FAILED: &str = "js_escalation_failed:";
+
+/// Soft-block / soft-error status codes where the body often contains real
+/// content despite the status header. Sources:
+///   - UA/header-based bot filters: 401, 403, 405, 406, 412
+///   - Rate limits: 429
+///   - Geo gates: 451
+///   - Origin overload: 503
+///   - "Not found" SPAs that 404 the route but render content via JS
+///     hydration: 404, 410
+///   - Origin error that still serves a usable page: 500
+///
+/// Firecrawl-comparison (April 2026 bench): the JS render path recovered
+/// content in ~25/99 such cases that HTTP alone could not. Shared by the auto
+/// and forced-JS arms of `fetch`, which must agree on what counts as a body
+/// worth warning about.
+fn is_soft_block_status(status_code: u16) -> bool {
+    matches!(
+        status_code,
+        401 | 403 | 404 | 405 | 406 | 410 | 412 | 429 | 451 | 500 | 503
+    )
+}
+
 /// Minimum remaining request budget for a network attempt to be worth making.
 /// Below this a CDP tier cannot complete its handshake and returns a fabricated
 /// `Timeout after Nms` (single-digit N) while still consuming a pool slot.
@@ -612,8 +640,63 @@ impl FallbackRenderer {
                     stamp_http_decision(&mut result, requested_renderer);
                     Ok(result)
                 } else {
-                    self.fetch_with_js(url, headers, wait_for_ms, requested_renderer, deadline)
+                    // The HTTP body was already fetched above for the content-type
+                    // check, so when the JS ladder fails there is a valid document
+                    // in hand — returning `Err` instead of that body is a straight
+                    // recall loss, and the auto arm below has never done it.
+                    //
+                    // Unlike auto, the fallback here is ALWAYS announced. Auto can
+                    // swap silently because the caller expressed no preference; a
+                    // `renderJs:true` caller asked for a browser and must be able
+                    // to tell they did not get one.
+                    let is_auth_blocked = is_soft_block_status(http_result.status_code);
+                    let started_at = std::time::Instant::now();
+                    match self
+                        .fetch_with_js(url, headers, wait_for_ms, requested_renderer, deadline)
                         .await
+                    {
+                        Ok(js_result) => Ok(js_result),
+                        // An explicit renderer pin is a caller contract that
+                        // forbids silent substitution: fail closed.
+                        Err(e) if is_hard_pinned => Err(e),
+                        Err(e) => {
+                            if is_auth_blocked {
+                                tracing::error!(
+                                    url,
+                                    status_code = http_result.status_code,
+                                    "JS escalation failed for soft-block status; surfacing HTTP shell with warning: {e}"
+                                );
+                            } else {
+                                tracing::warn!(
+                                    "JS rendering failed, falling back to HTTP result: {e}"
+                                );
+                            }
+                            let warning = format!("{JS_ESCALATION_FAILED} {e}");
+                            http_result.warning = Some(match http_result.warning.take() {
+                                Some(prev) => format!("{warning}; {prev}"),
+                                None => warning,
+                            });
+                            // `elapsed_ms` came from the HTTP fetch alone, so it
+                            // would report a few hundred ms for a request that
+                            // spent the whole deadline in the ladder.
+                            http_result.elapsed_ms = http_result
+                                .elapsed_ms
+                                .saturating_add(started_at.elapsed().as_millis() as u64);
+                            // `stamp_http_decision` records a plain `http` route,
+                            // which reads as "no browser was needed". Emit the
+                            // real story first so forced-JS fallbacks are separable
+                            // from ordinary HTTP traffic in metrics.
+                            metrics()
+                                .render_route_decision_total
+                                .with_label_values(&[
+                                    RendererKind::Http.as_str(),
+                                    "jsLadderExhausted",
+                                ])
+                                .inc();
+                            stamp_http_decision(&mut http_result, requested_renderer);
+                            Ok(http_result)
+                        }
+                    }
                 }
             }
             None => {
@@ -652,22 +735,7 @@ impl FallbackRenderer {
                 let is_blocked = cf_header_signal
                     || detector::looks_like_cloudflare_challenge(&result.html)
                     || is_generic_bot_wall;
-                // Soft-block / soft-error status codes where the body often
-                // contains real content despite the status header. Sources:
-                //   - UA/header-based bot filters: 401, 403, 405, 406, 412
-                //   - Rate limits: 429
-                //   - Geo gates: 451
-                //   - Origin overload: 503
-                //   - "Not found" SPAs that 404 the route but render content
-                //     via JS hydration: 404, 410
-                //   - Origin error that still serves a usable page: 500
-                // Firecrawl-comparison (April 2026 bench): the JS render
-                // path recovered content in ~25/99 such cases that HTTP
-                // alone could not.
-                let is_auth_blocked = matches!(
-                    result.status_code,
-                    401 | 403 | 404 | 405 | 406 | 410 | 412 | 429 | 451 | 500 | 503
-                );
+                let is_auth_blocked = is_soft_block_status(result.status_code);
                 // Post-fetch thin-content trigger: HTTP returned 2xx but the
                 // body has effectively no extractable text. Catches sites whose
                 // SPA marker we don't recognize (no `id="root"`, no
@@ -739,7 +807,7 @@ impl FallbackRenderer {
                                     status_code = result.status_code,
                                     "JS escalation failed for soft-block status; surfacing HTTP shell with warning: {e}"
                                 );
-                                let warning = format!("js_escalation_failed: {e}");
+                                let warning = format!("{JS_ESCALATION_FAILED} {e}");
                                 result.warning = Some(match result.warning.take() {
                                     Some(prev) => format!("{warning}; {prev}"),
                                     None => warning,
@@ -2107,7 +2175,15 @@ mod tests {
             name: "chrome",
             behavior: MockBehavior::Err("boom".into()),
         }) as Arc<dyn PageFetcher>;
-        let r = make_renderer_with_mocks(vec![chrome]);
+        let mut r = make_renderer_with_mocks(vec![chrome]);
+        // Stub the HTTP tier: the forced-JS arm fetches it before the ladder, so
+        // without this the assertion depends on reaching example.com over the
+        // network — and now that a JS failure can fall back to the HTTP body,
+        // this test is the only thing pinning the hard-pin exclusion.
+        r.http = Arc::new(MockFetcher {
+            name: "http",
+            behavior: MockBehavior::Ok(rich_html("HTTP-")),
+        });
 
         let err = r
             .fetch(
@@ -2121,6 +2197,134 @@ mod tests {
             .await
             .unwrap_err();
         assert!(err.to_string().contains("boom"));
+    }
+
+    /// `renderJs:true` used to be the only arm that threw away a perfectly good
+    /// HTTP body when the JS ladder failed, so a forced-JS scrape returned a 504
+    /// while holding the document.
+    #[tokio::test]
+    async fn forced_js_failure_falls_back_to_http_body() {
+        let chrome = Arc::new(MockFetcher {
+            name: "chrome",
+            behavior: MockBehavior::Err("Timeout after 1ms".into()),
+        }) as Arc<dyn PageFetcher>;
+        let mut r = make_renderer_with_mocks(vec![chrome]);
+        r.http = Arc::new(MockFetcher {
+            name: "http",
+            behavior: MockBehavior::Ok(rich_html("HTTP-")),
+        });
+
+        let res = r
+            .fetch(
+                "https://example.com",
+                &HashMap::new(),
+                Some(true), // forced JS
+                None,
+                None, // unpinned
+                tdl(),
+            )
+            .await
+            .expect("a failed JS ladder must not discard a valid HTTP body");
+        assert!(res.html.contains("HTTP-"));
+        // A 2xx fallback is the motivating case and the one most at risk of
+        // going out silently: the caller asked for a browser, is billed either
+        // way, and has nothing else in the response to tell them they got HTTP.
+        assert!(
+            res.warning
+                .as_deref()
+                .is_some_and(|w| w.contains("js_escalation_failed")),
+            "every forced-JS fallback must be announced; got {:?}",
+            res.warning
+        );
+        assert!(
+            res.warning
+                .as_deref()
+                .is_some_and(|w| w.contains(JS_ESCALATION_FAILED)),
+            "single.rs reads this exact prefix to skip re-escalation: {:?}",
+            res.warning
+        );
+    }
+
+    /// A 4xx/5xx body is usually an error shell, so the swap is surfaced rather
+    /// than made silently — same rule the auto arm applies.
+    #[tokio::test]
+    async fn forced_js_failure_on_soft_block_warns() {
+        let chrome = Arc::new(MockFetcher {
+            name: "chrome",
+            behavior: MockBehavior::Err("Timeout after 1ms".into()),
+        }) as Arc<dyn PageFetcher>;
+        let mut r = make_renderer_with_mocks(vec![chrome]);
+        r.http = Arc::new(MockFetcher {
+            name: "http",
+            behavior: MockBehavior::OkStatus(403, rich_html("SHELL-")),
+        });
+
+        let res = r
+            .fetch(
+                "https://example.com",
+                &HashMap::new(),
+                Some(true),
+                None,
+                None,
+                tdl(),
+            )
+            .await
+            .expect("soft-block bodies still ship, with a warning");
+        assert!(
+            res.warning
+                .as_deref()
+                .is_some_and(|w| w.contains("js_escalation_failed")),
+            "the caller must be able to tell the JS tier failed; got {:?}",
+            res.warning
+        );
+    }
+
+    /// The real production failure is a deadline, and `MockBehavior::Err` can
+    /// only build a `RendererError` — so the timeout shape gets its own fetcher.
+    #[tokio::test]
+    async fn forced_js_timeout_falls_back_to_http_body() {
+        struct TimesOut;
+        #[async_trait::async_trait]
+        impl PageFetcher for TimesOut {
+            async fn fetch(
+                &self,
+                _u: &str,
+                _h: &HashMap<String, String>,
+                _w: Option<u64>,
+                _d: crw_core::Deadline,
+            ) -> CrwResult<FetchResult> {
+                Err(CrwError::Timeout(1))
+            }
+            fn name(&self) -> &str {
+                "chrome"
+            }
+            fn supports_js(&self) -> bool {
+                true
+            }
+            async fn is_available(&self) -> bool {
+                true
+            }
+        }
+
+        let mut r = make_renderer_with_mocks(vec![Arc::new(TimesOut)]);
+        r.http = Arc::new(MockFetcher {
+            name: "http",
+            behavior: MockBehavior::Ok(rich_html("HTTP-")),
+        });
+
+        let res = r
+            .fetch(
+                "https://example.com",
+                &HashMap::new(),
+                Some(true),
+                None,
+                None,
+                tdl(),
+            )
+            .await
+            .expect("a ladder timeout must not discard a valid HTTP body");
+        assert!(res.html.contains("HTTP-"));
+        assert_eq!(res.rendered_with.as_deref(), Some("http"));
     }
 
     #[tokio::test]
