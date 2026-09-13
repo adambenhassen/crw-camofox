@@ -1100,3 +1100,62 @@ async fn fetch_falls_back_to_200_when_the_status_probe_is_unusable() {
 
     assert_eq!(result.status_code, 200);
 }
+
+/// Live: a real Camoufox browser waits out a challenge page that clears itself
+/// after 5 s, and the clearance it earns is captured. Needs a camofox-browser
+/// that can reach the challenge server, so it is ignored by default:
+///
+/// `CRW_ALLOW_LOOPBACK_FOR_TESTS=1` lets the final-URL guard accept the
+/// private challenge host:
+///
+/// ```text
+/// CRW_ALLOW_LOOPBACK_FOR_TESTS=1 \
+/// CRW_CAMOFOX_LIVE_BASE=http://127.0.0.1:9377 CRW_CAMOFOX_LIVE_KEY=<key> \
+/// CRW_CAMOFOX_LIVE_CHALLENGE_URL=http://host.docker.internal:18777/ \
+/// cargo test -p crw-renderer --features camofox --test camofox_tests \
+///   live_challenge -- --ignored
+/// ```
+#[tokio::test]
+#[ignore = "needs a live camofox-browser and challenge server"]
+async fn live_challenge_wait_clears_and_captures_clearance() {
+    use crw_renderer::clearance::ClearanceCache;
+    let base = std::env::var("CRW_CAMOFOX_LIVE_BASE").expect("CRW_CAMOFOX_LIVE_BASE");
+    let key = std::env::var("CRW_CAMOFOX_LIVE_KEY").ok();
+    let url = std::env::var("CRW_CAMOFOX_LIVE_CHALLENGE_URL").expect("challenge url");
+    let host = url::Url::parse(&url)
+        .unwrap()
+        .host_str()
+        .unwrap()
+        .to_owned();
+    let cache = std::sync::Arc::new(ClearanceCache::with_defaults());
+    let renderer = CamofoxRenderer::new("camofox", &base, key, Duration::from_secs(60))
+        .with_clearance_cache(cache.clone());
+
+    let started = std::time::Instant::now();
+    let result = renderer
+        .fetch(
+            &url,
+            &HashMap::new(),
+            None,
+            Deadline::now_plus(Duration::from_secs(60)),
+        )
+        .await
+        .expect("live fetch");
+
+    assert!(
+        result.html.contains("Cleared content"),
+        "the challenge must clear during the wait; got {}",
+        &result.html[..result.html.len().min(300)]
+    );
+    assert!(
+        started.elapsed() >= Duration::from_secs(4),
+        "the page only clears after 5 s, so the loop must have waited"
+    );
+    let entry = cache.get(&host).await.expect("cf_clearance captured");
+    assert!(
+        entry
+            .cookie_header(&host)
+            .contains("cf_clearance=live-token")
+    );
+    assert!(!entry.user_agent.is_empty());
+}
