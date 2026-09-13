@@ -204,10 +204,6 @@ fn pick_ua<'a>(default_ua: &'a str, stealth: &'a StealthConfig) -> String {
 /// when both fail. Getting it wrong in the permissive direction (treating our fault as
 /// the origin's) would blame the caller for our outage, so the match is deliberately
 /// narrow.
-///
-/// `Timeout` is NOT included: a JS-tier timeout is just as likely to be a local CDP
-/// websocket/command timeout as a slow origin, and it already maps to 504 on its own,
-/// which is the honest answer either way.
 fn is_origin_navigation_failure(e: &CrwError) -> bool {
     match e {
         CrwError::TargetUnreachable(_) => true,
@@ -226,6 +222,14 @@ fn is_origin_navigation_failure(e: &CrwError) -> bool {
                 // `target_unreachable`.
                 || m.contains("outbound destination check unavailable")
         }
+        // A JS-tier timeout does not refute the HTTP tier's positive finding. Callers
+        // only consult this when the HTTP error was already `TargetUnreachable`, i.e.
+        // the origin failed to connect; a browser that then also gets no answer is
+        // absence of evidence, not evidence against. A host that blackholes SYNs hangs
+        // every tier, so lightpanda/camofox report a plain timeout and never a
+        // `net::ERR_*`. The breaker path (`is_origin_fault_for_breaker`) excludes
+        // timeouts itself, so a hung renderer still trips globally.
+        CrwError::Timeout(_) => true,
         _ => false,
     }
 }
@@ -2463,6 +2467,40 @@ mod tests {
             out.is_err(),
             "the wall must not come back through the HTTP shell: {:?}",
             out.ok().map(|r| (r.rendered_with, r.html.len()))
+        );
+    }
+
+    /// The same rule when the JS tier TIMES OUT instead of reporting a navigation
+    /// error. A host that blackholes SYNs hangs the browser rather than producing a
+    /// `net::ERR_*`, so this is the shape the class actually takes in production: it
+    /// surfaced as a 504 that paged the 5xx watchdog, told the caller to raise a
+    /// `timeout` no host would ever answer, and billed them for it.
+    #[tokio::test]
+    async fn unreachable_origin_beats_js_timeout() {
+        let js = Arc::new(MockFetcher {
+            name: "camofox",
+            behavior: MockBehavior::Timeout,
+        });
+        let mut r = make_renderer_with_mocks(vec![js]);
+        r.http = Arc::new(Unreachable);
+        r.render_js_default = None; // auto branch
+
+        let err = r
+            .fetch(
+                "https://dead.example",
+                &HashMap::new(),
+                None, // render_js: auto
+                None, // wait_for_ms
+                None, // requested_renderer
+                tdl(),
+            )
+            .await
+            .expect_err("both tiers fail");
+
+        assert!(
+            matches!(err, CrwError::TargetUnreachable(_)),
+            "a dead origin that hangs the browser must surface as TargetUnreachable \
+             (422, refunded), not Timeout (504, billed); got {err:?}"
         );
     }
 
