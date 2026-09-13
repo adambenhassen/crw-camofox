@@ -257,6 +257,11 @@ fn is_origin_fault_for_breaker(e: &CrwError) -> bool {
             || u.contains("ERR_PROXY_CONNECTION_FAILED")
             || u.contains("ERR_NETWORK_CHANGED")
             || u.contains("ERR_INTERNET_DISCONNECTED")
+            // Firefox's own error-page codes for the same classes, as camofox
+            // reports them (`about:neterror?e=proxyConnectFailure`).
+            || u.contains("PROXYCONNECTFAILURE")
+            || u.contains("PROXYRESOLVEFAILURE")
+            || u.contains("NETOFFLINE")
         {
             return false;
         }
@@ -1966,6 +1971,21 @@ mod tests {
     #[cfg(feature = "cdp")]
     use crw_core::config::CdpEndpoint;
     use std::time::Duration;
+
+    /// Camofox reports a dead proxy as a Firefox error page wrapped in
+    /// "navigation failed". That is our egress, not the origin, so it must keep
+    /// reaching the global breaker window.
+    #[test]
+    fn firefox_proxy_error_page_is_not_an_origin_fault() {
+        let proxy = CrwError::RendererError(
+            "camofox: navigation failed, page did not load: proxyConnectFailure".into(),
+        );
+        assert!(!is_origin_fault_for_breaker(&proxy));
+        let dns = CrwError::RendererError(
+            "camofox: navigation failed, page did not load: dnsNotFound".into(),
+        );
+        assert!(is_origin_fault_for_breaker(&dns));
+    }
 
     /// Generous deadline used by tests that don't care about budget enforcement.
     fn tdl() -> crw_core::Deadline {
