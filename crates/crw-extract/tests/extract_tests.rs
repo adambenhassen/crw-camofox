@@ -587,6 +587,47 @@ fn text_plain_source_markdown_is_byte_for_byte_passthrough() {
     );
 }
 
+// A plain-text README's table of contents is a run of short link lines, the
+// exact shape the onlyMainContent nav strip removes from HTML pages. On a
+// non-HTML body it must survive: the body is already final text.
+#[test]
+fn text_plain_table_of_contents_is_not_stripped_as_nav() {
+    let prose = "This paragraph carries enough ordinary words to clear the nav strip body floor. ";
+    let body = format!(
+        "# Project\n\n- [Install](#install)\n- [Usage](#usage)\n- [Config](#config)\n- [License](#license)\n\n{}\n",
+        prose.repeat(6)
+    );
+    let data = crw_extract::extract(ExtractOptions {
+        raw_html: &body,
+        content_type: Some("text/plain"),
+        source_url: "https://raw.githubusercontent.com/us/crw/main/README.md",
+        status_code: 200,
+        rendered_with: None,
+        elapsed_ms: 0,
+        render_decision: None,
+        credit_cost: 0,
+        warnings: Vec::new(),
+        formats: &[OutputFormat::Markdown],
+        only_main_content: true,
+        include_tags: &[],
+        exclude_tags: &[],
+        css_selector: None,
+        xpath: None,
+        chunk_strategy: None,
+        query: None,
+        filter_mode: None,
+        top_k: None,
+        domain_selectors: None,
+        captured_responses: &[],
+        llm_fallback: None,
+        debug: false,
+        debug_sink: None,
+    })
+    .unwrap();
+
+    assert_eq!(data.markdown.as_deref(), Some(body.as_str()));
+}
+
 // Issue #365: an Elementor product page rendered with duplicated responsive
 // navigation used to come back as the whole unfiltered page — six copies of the
 // menu, the footer, a popup form and stray ``` fences where nested lists were.

@@ -582,9 +582,10 @@ pub fn extract(opts: ExtractOptions<'_>) -> CrwResult<ScrapeData> {
     // copy, a desktop copy, one per dropdown. Applied after the candidate is
     // chosen, so scoring (and therefore which candidate wins) is unaffected.
     // Skipped without `onlyMainContent`: there the caller asked for the
-    // document as it is.
+    // document as it is. Skipped for a non-HTML body too: it is already final
+    // text, and a README's table of contents is not site navigation.
     let md = md.map(|m| {
-        if only_main_content {
+        if only_main_content && !treat_as_plain {
             let m = markdown::drop_repeated_nav_lines(&m);
             // `drop_repeated_nav_lines` only catches a menu that a responsive
             // template rendered more than once. A menu rendered once survives
