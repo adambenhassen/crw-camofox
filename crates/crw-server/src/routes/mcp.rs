@@ -113,6 +113,7 @@ pub async fn call_tool(state: &AppState, tool_name: &str, args: Value) -> Result
                 "links": result.urls,
                 "droppedActionCount": result.dropped_action_count,
                 "strippedTrackingCount": result.stripped_tracking_count,
+                "sitemaps": result.sitemaps,
             }))
         }
         "crw_search" => {
