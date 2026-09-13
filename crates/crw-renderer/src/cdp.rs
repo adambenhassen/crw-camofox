@@ -972,9 +972,8 @@ async fn run_intercept_pump(
     let mut in_flight: FuturesUnordered<BoxFuture<'_, ()>> = FuturesUnordered::new();
     // Child sessions auto-attached under our page target (out-of-process
     // iframes, workers). Their requests carry their own session id, so they
-    // have to be recognised as ours — and only ours: a pooled connection is
-    // shared with other concurrent scrapes, and answering their paused
-    // requests would double-continue them.
+    // have to be recognised as ours, and only ours: answering a session we did
+    // not attach risks double-continuing a request another consumer owns.
     let mut child_sessions: std::collections::HashSet<String> = std::collections::HashSet::new();
 
     loop {
@@ -994,12 +993,13 @@ async fn run_intercept_pump(
         let ev = match received {
             Ok(ev) => ev,
             Err(broadcast::error::RecvError::Lagged(dropped)) => {
-                // Dropped events are not equally recoverable. A missed
-                // `Fetch.requestPaused` is resumed by the cleanup
-                // `Fetch.disable`; a missed `Target.attachedToTarget` leaves
-                // that child paused for the rest of the render, because nothing
-                // else sends `Runtime.runIfWaitingForDebugger`. Neither is
-                // fixable here, so make it visible instead of silent.
+                // Neither loss is recoverable here. A missed
+                // `Fetch.requestPaused` leaves that request paused until the
+                // target closes, which is fail-closed but costs the subresource;
+                // a missed `Target.attachedToTarget` leaves that child paused for
+                // the rest of the render, because nothing else sends
+                // `Runtime.runIfWaitingForDebugger`. Make it visible rather than
+                // silent.
                 tracing::warn!(
                     dropped,
                     "CDP event backlog overflowed; a paused request or child target may stall"
@@ -2415,10 +2415,10 @@ impl CdpRenderer {
         // Not repeated at browser scope. Service workers and shared workers are
         // not children of the page target, so this does not reach them, and
         // their `fetch` is the one remaining path that can carry a response back
-        // into the page. Browser-scope auto-attach would deliver those events
-        // with no `sessionId`, and accepting them on a pooled connection means
-        // answering paused requests that belong to another concurrent scrape.
-        // Left as a known gap rather than traded for cross-render interference.
+        // into the page. Browser-scope auto-attach delivers those events with no
+        // `sessionId`, so the pump cannot tell which render they belong to
+        // without tracking browser contexts. Left as a known gap; on LightPanda
+        // `--block-private-networks` covers it, on chrome it does not.
 
         // Network-idle tracker fed by a sibling pump (spawned below in the
         // select!). Created before the `work` future because `work` borrows
@@ -2504,13 +2504,18 @@ impl CdpRenderer {
         let outbound_ctx = OutboundCtx {
             memo: Arc::new(StdMutex::new(HashMap::new())),
             render_limit: tokio::sync::Semaphore::new(PER_RENDER_RESOLVE_LIMIT),
-            // A verdict is worthless once the navigation has given up, so the
-            // check gets that budget and nothing more. `nav_budget` is the right
-            // field, not `page_timeout`: on chrome the latter is the 30s outer
-            // ceiling while the navigation itself is capped at 12s, so using it
-            // would have made this looser rather than tighter. It defaults to
-            // `page_timeout` on the tiers that never set one.
-            budget: self.nav_budget.min(self.page_timeout),
+            // A verdict that arrives after the request is already lost helps
+            // nobody, so the check is bounded by the smallest thing that can end
+            // it: the caller's remaining deadline, the tier's outer timeout, and
+            // the post-navigate budget. Using `page_timeout` alone would have
+            // given chrome 30s, well past the point the render is abandoned.
+            // Accepted cost: on a tier with a small ceiling (LightPanda is
+            // 2500ms) a cold lookup that queues can expire and drop that one
+            // subresource, counted as `outbound_unresolved`.
+            budget: self
+                .nav_budget
+                .min(self.page_timeout)
+                .min(deadline.remaining()),
             doc_host: url::Url::parse(url)
                 .ok()
                 .and_then(|u| u.host_str().map(str::to_string))
@@ -2562,9 +2567,9 @@ impl CdpRenderer {
         };
 
         // Any request whose check was still running when the pump was dropped is
-        // still paused, and `Fetch.disable` below auto-continues paused requests
-        // per CDP docs. Continuing an unfinished check is an allow, so fail them
-        // explicitly first: the guard has to stay fail-closed through teardown.
+        // still paused. Failing them explicitly releases the browser's own state
+        // now rather than at target close, and makes the denial observable; the
+        // target close behind us is the backstop, not the mechanism.
         let leftover: Vec<(String, String)> = outstanding
             .lock()
             .map(|o| o.iter().cloned().collect())
@@ -2572,10 +2577,9 @@ impl CdpRenderer {
         if !leftover.is_empty() {
             use futures::stream::{FuturesUnordered, StreamExt};
             // Concurrent, under one overall cap. The pump has no in-flight limit
-            // by design, so this set is unbounded; failing them serially would
-            // run past the caller's remaining deadline, the outer timeout would
-            // fire mid-loop, and the `Fetch.disable` below would never run,
-            // poisoning a pooled slot for the rest of its life.
+            // by design, so this set is unbounded, and failing them serially
+            // would run past the caller's remaining deadline and let the outer
+            // timeout fire in the middle of cleanup.
             let mut pending: FuturesUnordered<_> = leftover
                 .into_iter()
                 .map(|(sess, req_id)| async move {
@@ -2598,20 +2602,20 @@ impl CdpRenderer {
             .await;
         }
 
-        // Cleanup: `Fetch.disable` auto-continues any still-paused requests
-        // per CDP docs, which avoids leaks if the pump was cancelled mid-flight.
-        // Unconditional, matching `Fetch.enable` above: pooled connections are
-        // reused across requests, so leaving Fetch enabled on a slot would make
-        // the next navigation on it pause every request with no consumer and
-        // hang until the budget expires, for the life of the slot.
-        let _ = conn
-            .send_recv(
-                "Fetch.disable",
-                serde_json::json!({}),
-                Some(&session_id),
-                Duration::from_secs(2),
-            )
-            .await;
+        // Deliberately no `Fetch.disable`. It auto-continues still-paused
+        // requests, and the ones it would release are exactly the ones the guard
+        // never got to judge: a `Fetch.requestPaused` still sitting in the
+        // broadcast ring when the pump was dropped, or one lost to a `Lagged`
+        // drop, is in no set we can fail explicitly. Disabling would let those
+        // out unchecked, which is the hole this guard exists to close.
+        //
+        // Nothing leaks by leaving it on. `Fetch.enable` was sent against this
+        // session, every render creates its own target and therefore its own
+        // session, and the caller always closes that target: the legacy path
+        // right after `fetch_inner` returns, the pooled path in `release()`,
+        // which skips the close only in the cases where no target was ever
+        // created. Anything still paused dies with the target, which is the
+        // fail-closed outcome.
         // A denial the guard could not decide is our failure, not the origin's.
         // Both tiers resolve through the same resolver, so leaving this as a
         // navigation failure lets a DNS brown-out be reported as an unreachable
