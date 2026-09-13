@@ -328,6 +328,18 @@ pub async fn run(mut args: ScrapeArgs) -> Result<(), CmdError> {
                     data = Some(d);
                 }
             }
+            Err(crw_core::error::CrwError::UnsupportedContentType(msg)) => {
+                // Same rule as the server ladder: the body is not a web page at
+                // all, so spawning LightPanda and Chrome to look at it again
+                // only costs the user startup time and prints a "trying JS
+                // renderer" line that never had a chance of working.
+                eprintln!("error: Unsupported content type: {msg}");
+                // `CmdError`, never `process::exit`: `teardown` owns the single
+                // exit path so `kill_all_browsers()` runs on every one of them,
+                // and it keeps that guarantee structurally rather than by
+                // auditing which call sites happen to run before a spawn.
+                return Err(CmdError::code_only(1));
+            }
             Err(e) => {
                 // HTTP-only failure → fall through to JS escalation below.
                 eprintln!("info: HTTP fetch failed ({e}), trying JS renderer...");

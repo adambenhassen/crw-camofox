@@ -689,8 +689,6 @@ impl PageFetcher for HttpFetcher {
             .map(crate::detector::is_cloudflare_mitigated_header)
             .unwrap_or(false);
 
-        let is_pdf = content_type.as_deref() == Some("application/pdf");
-
         let final_url_str = resp.url().as_str().to_string();
 
         let bytes = resp
@@ -712,18 +710,44 @@ impl PageFetcher for HttpFetcher {
         // extractor: a .docx/.xlsx/.pptx comes back as `markdown` beginning
         // "PK\u{3}\u{4}...[Content_Types].xml" under `success: true`, which a
         // caller cannot tell apart from a real scrape.
-        let sniffed_pdf = bytes.starts_with(b"%PDF-");
-        if sniffed_pdf && !is_pdf {
+        if bytes.starts_with(b"%PDF-") {
             // A PDF served as octet-stream (or text/html). Relabel it so the
-            // downstream PDF branch in crw-crawl — which gates on the same
-            // content type — engages, instead of extracting an empty body.
+            // downstream PDF branch in crw-crawl, which gates on the same
+            // content type, engages instead of extracting an empty body.
             content_type = Some("application/pdf".to_string());
         }
-        let (html, raw_bytes) = if is_pdf || sniffed_pdf {
+        // Computed AFTER the relabel, so a sniffed PDF and a declared one are
+        // one case from here down rather than a disjunction repeated at every use.
+        let is_pdf = content_type.as_deref() == Some("application/pdf");
+        // The NUL test applies only when the origin did NOT declare an HTML-ish
+        // type. A page served as `text/html` with a stray NUL in it renders
+        // fine in a real browser (the HTML5 tokenizer maps NUL to U+FFFD), so
+        // rejecting one would cost a page we scrape today, and would hand any
+        // origin a one-byte way to shut the ladder down that costs it nothing
+        // with human visitors. An undeclared or empty type stays in scope: a
+        // body with no `Content-Type` at all is exactly what the sniff is for.
+        // `is_html_like_content_type` answers true for an empty type as well as
+        // for `None`, so the emptiness is checked here: an origin that sends a
+        // bare `Content-Type:` has declared nothing, and treating that as a
+        // declaration of HTML would let a .docx back through the hole this
+        // exists to close.
+        let declared_html = content_type
+            .as_deref()
+            .is_some_and(|ct| !ct.is_empty() && crate::is_html_like_content_type(Some(ct)));
+        let (html, raw_bytes) = if is_pdf {
             (String::new(), Some(bytes.to_vec()))
-        } else if looks_binary(&bytes, header_charset.as_deref()) {
+        } else if !declared_html && looks_binary(&bytes, header_charset.as_deref()) {
+            // Logged rather than silent: this is the one path that returns a
+            // hard error without climbing the ladder, so if a class of real
+            // pages ever lands here it has to be visible in production.
+            tracing::info!(
+                url,
+                content_type = content_type.as_deref().unwrap_or("none"),
+                bytes = bytes.len(),
+                "binary body, returning unsupported content type without escalating"
+            );
             return Err(CrwError::UnsupportedContentType(format!(
-                "{} ({} bytes): not HTML and not a PDF, \
+                "{} ({} bytes): the body is binary, not HTML and not a PDF, \
                  so there is nothing to extract",
                 content_type.as_deref().unwrap_or("no content-type"),
                 bytes.len()
@@ -819,14 +843,24 @@ fn sniff_meta_charset(bytes: &[u8]) -> Option<String> {
 /// one, while ZIP containers (.docx/.xlsx/.pptx), images and archives hit one
 /// within a few bytes.
 ///
-/// UTF-16/32 documents are legitimately NUL-rich, so a declared wide charset
-/// opts out — `decode_html_bytes` handles those correctly.
+/// UTF-16 documents are legitimately NUL-rich, so a declared UTF-16 charset opts
+/// out. The verdict comes from `encoding_rs` rather than a substring test on the
+/// label, because `decode_html_bytes` resolves the HEADER label the same way and
+/// the two must not disagree about it: a hand-written list misses
+/// `charset=unicode` and `charset=csunicode`, both of which
+/// `Encoding::for_label` maps to UTF-16LE and classic IIS still emits.
+///
+/// The agreement stops at the header label. `decode_html_bytes` also falls back
+/// to a `<meta charset>` sniff, and lets `Encoding::decode` override the label
+/// from a BOM; neither is mirrored here. Both gaps need a wide encoding under a
+/// non-HTML content type to matter at all, since a declared HTML-ish type skips
+/// this function outright, and `sniff_meta_charset` cannot read UTF-16 anyway.
 fn looks_binary(bytes: &[u8], header_charset: Option<&str>) -> bool {
-    if let Some(label) = header_charset {
-        let label = label.to_ascii_lowercase();
-        if label.contains("utf-16") || label.contains("utf-32") || label.contains("ucs-") {
-            return false;
-        }
+    // `for_label` lowercases and trims the label itself, so no normalisation here.
+    if let Some(enc) = header_charset.and_then(|l| encoding_rs::Encoding::for_label(l.as_bytes()))
+        && (enc == encoding_rs::UTF_16LE || enc == encoding_rs::UTF_16BE)
+    {
+        return false;
     }
     bytes[..bytes.len().min(1024)].contains(&0)
 }
@@ -874,6 +908,56 @@ mod tests {
         // UTF-16LE "hi": NUL-rich, but genuinely text.
         assert!(!looks_binary(b"h\x00i\x00", Some("utf-16le")));
         assert!(looks_binary(b"h\x00i\x00", None));
+    }
+
+    #[test]
+    fn looks_binary_accepts_every_utf16_label_decode_html_bytes_accepts() {
+        // The two functions must agree on what counts as UTF-16, or a page one
+        // of them decodes the other rejects as binary. `unicode` in particular
+        // is what classic IIS emits, and a substring test on the label misses
+        // it: the page came back 422 instead of its text.
+        for label in [
+            "utf-16",
+            "UTF-16LE",
+            "utf-16be",
+            "ucs-2",
+            "unicode",
+            "csunicode",
+            "unicodefeff",
+            "unicodefffe",
+            "iso-10646-ucs-2",
+        ] {
+            assert!(
+                encoding_rs::Encoding::for_label(label.as_bytes()).is_some(),
+                "{label} is no longer a charset label, drop it from this test"
+            );
+            assert!(
+                !looks_binary(b"h\x00i\x00", Some(label)),
+                "{label} decodes as UTF-16 but was called binary"
+            );
+        }
+    }
+
+    #[test]
+    fn looks_binary_ignores_a_charset_that_is_not_wide() {
+        // A single-byte or UTF-8 label buys no exemption: those encodings never
+        // carry a NUL, so one means the header is lying about the body.
+        // `utf-32` is in this list on purpose: WHATWG has no UTF-32, so
+        // `for_label` rejects the label and `decode_html_bytes` cannot decode
+        // such a body either. An honest refusal beats handing back mojibake.
+        for label in [
+            "utf-8",
+            "windows-1252",
+            "iso-8859-1",
+            "shift_jis",
+            "utf-32",
+            "not-a-charset",
+        ] {
+            assert!(
+                looks_binary(b"PK\x03\x04\x14\x00", Some(label)),
+                "{label} should not exempt a ZIP container"
+            );
+        }
     }
 
     #[test]

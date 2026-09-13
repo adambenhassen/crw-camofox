@@ -2495,6 +2495,111 @@ mod tests {
         );
     }
 
+    /// An HTTP tier whose origin answered with a body that is not a web page.
+    struct BinaryBody;
+    #[async_trait::async_trait]
+    impl PageFetcher for BinaryBody {
+        async fn fetch(
+            &self,
+            _url: &str,
+            _h: &HashMap<String, String>,
+            _w: Option<u64>,
+            _d: crw_core::Deadline,
+        ) -> CrwResult<FetchResult> {
+            Err(CrwError::UnsupportedContentType(
+                "application/zip (1200 bytes): the body is binary".to_string(),
+            ))
+        }
+        fn name(&self) -> &str {
+            "http"
+        }
+        fn supports_js(&self) -> bool {
+            false
+        }
+        async fn is_available(&self) -> bool {
+            true
+        }
+    }
+
+    /// A body that is not a web page must NOT climb the ladder. No browser turns
+    /// a .docx into a page, so escalating one only spends a Chromium/Camoufox
+    /// session before failing anyway, and the ladder's generic "no usable
+    /// content" replaces the content type the caller needs to see.
+    ///
+    /// The call COUNT is the assertion that matters: the error variant alone
+    /// would survive deleting the guard, since the JS tier's own failure loses
+    /// to nothing here.
+    #[tokio::test]
+    async fn unsupported_content_type_does_not_climb_the_ladder_in_auto() {
+        let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let js = Arc::new(CountingFetcher {
+            name: "chrome",
+            calls: calls.clone(),
+        });
+        let mut r = make_renderer_with_mocks(vec![js]);
+        r.http = Arc::new(BinaryBody);
+        r.render_js_default = None; // auto branch
+
+        let err = r
+            .fetch(
+                "https://example.com/spec.docx",
+                &HashMap::new(),
+                None, // render_js: auto
+                None,
+                None,
+                tdl(),
+            )
+            .await
+            .expect_err("a binary body has nothing to extract");
+
+        assert_eq!(
+            calls.load(std::sync::atomic::Ordering::SeqCst),
+            0,
+            "the JS renderer must never be invoked for a binary body"
+        );
+        assert!(
+            matches!(err, CrwError::UnsupportedContentType(_)),
+            "the content type must reach the caller, not the ladder's generic \
+             failure; got {err:?}"
+        );
+    }
+
+    /// Same rule on the forced-JS arm. `renderJs: true` (and every screenshot
+    /// request, which is routed down this arm) fetches over HTTP first for the
+    /// content-type check, so it hits the identical guard.
+    #[tokio::test]
+    async fn unsupported_content_type_does_not_climb_the_ladder_when_js_is_forced() {
+        let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let js = Arc::new(CountingFetcher {
+            name: "chrome",
+            calls: calls.clone(),
+        });
+        let mut r = make_renderer_with_mocks(vec![js]);
+        r.http = Arc::new(BinaryBody);
+
+        let err = r
+            .fetch(
+                "https://example.com/spec.docx",
+                &HashMap::new(),
+                Some(true), // render_js: on
+                None,
+                None,
+                tdl(),
+            )
+            .await
+            .expect_err("a binary body has nothing to extract");
+
+        assert_eq!(
+            calls.load(std::sync::atomic::Ordering::SeqCst),
+            0,
+            "an explicit renderJs:true must not spend a browser on a binary body"
+        );
+        assert!(
+            matches!(err, CrwError::UnsupportedContentType(_)),
+            "got {err:?}"
+        );
+    }
+
     /// Control: with a healthy budget the same tier IS invoked. Guards against the
     /// floor silently disabling the ladder.
     #[tokio::test]
