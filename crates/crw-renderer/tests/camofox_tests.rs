@@ -34,6 +34,19 @@ async fn create_tab(Json(body): Json<Value>) -> impl IntoResponse {
     )
 }
 
+async fn navigate(Path(_id): Path<String>, Json(body): Json<Value>) -> impl IntoResponse {
+    if body.get("url").and_then(|v| v.as_str()).is_none() {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({ "error": "url required" })),
+        );
+    }
+    (
+        StatusCode::OK,
+        Json(json!({ "ok": true, "url": body["url"] })),
+    )
+}
+
 async fn wait(Path(_id): Path<String>, Json(_body): Json<Value>) -> Json<Value> {
     Json(json!({ "ok": true }))
 }
@@ -103,6 +116,7 @@ async fn health() -> Json<Value> {
 async fn spawn_camofox_mock() -> String {
     let app = Router::new()
         .route("/tabs", post(create_tab))
+        .route("/tabs/{id}/navigate", post(navigate))
         .route("/tabs/{id}/wait", post(wait))
         .route("/tabs/{id}/evaluate", post(evaluate))
         .route("/tabs/{id}", delete(close_tab))
@@ -266,6 +280,7 @@ async fn fetch_retries_transient_tab_create_failure() {
     FLAKY_CREATES.store(0, std::sync::atomic::Ordering::SeqCst);
     let app = Router::new()
         .route("/tabs", post(create_tab_flaky))
+        .route("/tabs/{id}/navigate", post(navigate))
         .route("/tabs/{id}/wait", post(wait))
         .route("/tabs/{id}/evaluate", post(evaluate))
         .route("/tabs/{id}", delete(close_tab));
@@ -306,8 +321,10 @@ async fn fetch_gives_up_on_persistent_tab_create_failure() {
         err.to_string().contains("camofox /tabs returned 500"),
         "{err}"
     );
+    // 3 retries with 0.5 s / 1 s / 2 s pauses ≈ 3.5 s; anything near the 30 s
+    // deadline would mean the retry loop is not bounded by the attempt count.
     assert!(
-        started.elapsed() < Duration::from_secs(5),
+        started.elapsed() < Duration::from_secs(10),
         "retries must stay bounded"
     );
 }

@@ -39,14 +39,17 @@ const OUTER_HTML_EXPR: &str = "document.documentElement.outerHTML";
 /// context toward MAX_SESSIONS, so the reap must still get a real chance to run.
 const CLEANUP_BUDGET: Duration = Duration::from_secs(3);
 
-/// `POST /tabs` fails transiently in two known ways: `window is null` right
-/// after the context's last tab was closed (camofox eagerly tears the context
-/// down and relaunches it), and `NS_BINDING_ABORTED` when concurrent creates
-/// race for the reusable initial about:blank page. Both clear in well under a
-/// second, so a 5xx create is retried this many times in total, with
-/// [`CREATE_TAB_BACKOFF`] between attempts, inside the request deadline.
-const CREATE_TAB_ATTEMPTS: u32 = 3;
-const CREATE_TAB_BACKOFF: Duration = Duration::from_millis(400);
+/// `POST /tabs` fails transiently right after the context's last tab was
+/// closed: camofox eagerly tears the context down and relaunches it, and a
+/// create landing in that window fails with `window is null` (or, once the
+/// breaker trips, `browser has been closed`). A relaunch takes a few seconds,
+/// so a 5xx create is retried this many times in total with a growing pause
+/// ([`CREATE_TAB_BACKOFF`] doubling each time), inside the request deadline.
+/// The tab is created blank and navigated separately: camofox counts a failed
+/// navigate-in-create toward its consecutive-failure breaker (3 by default),
+/// so retrying creates that also navigate would trip the breaker faster.
+const CREATE_TAB_ATTEMPTS: u32 = 4;
+const CREATE_TAB_BACKOFF: Duration = Duration::from_millis(500);
 
 /// Renderer backed by a camofox-browser REST endpoint.
 pub struct CamofoxRenderer {
@@ -54,6 +57,13 @@ pub struct CamofoxRenderer {
     base_url: String,
     api_key: Option<String>,
     client: reqwest::Client,
+    /// Serializes `POST /tabs`. Concurrent creates on a freshly (re)launched
+    /// context race for camofox's reusable initial blank page and abort each
+    /// other's navigation (`NS_BINDING_ABORTED`). A blank create is
+    /// milliseconds when the context is warm, so holding this only across the
+    /// create call costs nothing in steady state; navigation itself runs
+    /// concurrently.
+    create_lock: tokio::sync::Mutex<()>,
 }
 
 /// `POST /tabs` response — we only need the tab id.
@@ -93,6 +103,7 @@ impl CamofoxRenderer {
             base_url: base_url.trim_end_matches('/').to_string(),
             api_key,
             client,
+            create_lock: tokio::sync::Mutex::new(()),
         }
     }
 
@@ -112,12 +123,15 @@ impl CamofoxRenderer {
             .map_err(|e| CrwError::RendererError(format!("camofox {path} request failed: {e}")))
     }
 
-    /// Open a tab navigated at `url`, retrying a 5xx create (see
-    /// [`CREATE_TAB_ATTEMPTS`]). Each attempt's send + decode is bounded by
-    /// the remaining deadline; a non-5xx failure surfaces at once.
-    async fn create_tab(&self, url: &str, deadline: Deadline) -> CrwResult<String> {
-        let body = json!({ "userId": USER_ID, "sessionKey": SESSION_KEY, "url": url });
+    /// Open a blank tab, retrying a 5xx create (see [`CREATE_TAB_ATTEMPTS`]).
+    /// Each attempt's send + decode is bounded by the remaining deadline; a
+    /// non-5xx failure surfaces at once. Creates are serialized on
+    /// [`Self::create_lock`].
+    async fn create_tab(&self, deadline: Deadline) -> CrwResult<String> {
+        let _serialized = self.create_lock.lock().await;
+        let body = json!({ "userId": USER_ID, "sessionKey": SESSION_KEY });
         let mut attempt = 1;
+        let mut backoff = CREATE_TAB_BACKOFF;
         loop {
             let budget = deadline.remaining();
             if budget.is_zero() {
@@ -148,18 +162,62 @@ impl CamofoxRenderer {
                 Ok(Ok(Ok(tab_id))) => return Ok(tab_id),
                 Ok(Ok(Err(transient))) => {
                     tracing::info!(
-                        url,
                         attempt,
                         error = %transient,
                         "camofox: tab create failed, retrying"
                     );
-                    tokio::time::sleep(CREATE_TAB_BACKOFF.min(deadline.remaining())).await;
+                    tokio::time::sleep(backoff.min(deadline.remaining())).await;
+                    backoff *= 2;
                     attempt += 1;
                 }
                 Ok(Err(e)) => return Err(e),
                 Err(_) => return Err(CrwError::Timeout(budget.as_millis() as u64)),
             }
         }
+    }
+
+    /// Navigate an open tab to `url`, send + decode bounded by the remaining
+    /// deadline. A non-2xx answer carries camofox's message.
+    async fn navigate_tab(&self, tab_id: &str, url: &str, deadline: Deadline) -> CrwResult<()> {
+        let budget = deadline.remaining();
+        if budget.is_zero() {
+            return Err(CrwError::Timeout(0));
+        }
+        let path = format!("/tabs/{tab_id}/navigate");
+        let fut = async {
+            let resp = self
+                .post_json(&path, json!({ "userId": USER_ID, "url": url }))
+                .await?;
+            let status = resp.status();
+            if status.is_success() {
+                return Ok(());
+            }
+            let detail = error_detail(resp).await;
+            Err(CrwError::RendererError(format!(
+                "camofox {path} returned {status}{detail}"
+            )))
+        };
+        match tokio::time::timeout(budget, fut).await {
+            Ok(r) => r,
+            Err(_) => Err(CrwError::Timeout(budget.as_millis() as u64)),
+        }
+    }
+
+    /// Best-effort `DELETE /tabs/{id}` — never fails the caller. Uses a fixed
+    /// grace budget (NOT the deadline, which may already be spent) so a tab
+    /// opened above is still reaped instead of leaking toward MAX_SESSIONS.
+    /// Deadline expiry is the common trigger for this path.
+    async fn close_tab(&self, tab_id: &str) {
+        let _ = tokio::time::timeout(
+            CLEANUP_BUDGET,
+            self.auth(
+                self.client
+                    .delete(format!("{}/tabs/{tab_id}", self.base_url)),
+            )
+            .json(&json!({ "userId": USER_ID }))
+            .send(),
+        )
+        .await;
     }
 
     /// Fire-and-discard POST bounded by `budget`. The response is dropped
@@ -274,7 +332,11 @@ impl PageFetcher for CamofoxRenderer {
         //    idle-evicts it. Eliminating that race needs the warm-tab+mutex model
         //    the search client uses (crw-search::camofox_search); tracked as the
         //    next step, out of scope for the deadline fix.
-        let tab_id = self.create_tab(url, deadline).await?;
+        let tab_id = self.create_tab(deadline).await?;
+        if let Err(e) = self.navigate_tab(&tab_id, url, deadline).await {
+            self.close_tab(&tab_id).await;
+            return Err(e);
+        }
 
         // 2. Wait for readiness, bounded by the smaller of the caller's
         //    `wait_for_ms` hint and the remaining request budget. The HTTP call
@@ -299,20 +361,8 @@ impl PageFetcher for CamofoxRenderer {
             )
             .await;
 
-        // 4. Best-effort close — never fail the fetch on cleanup. Uses a fixed
-        //    grace budget (NOT the deadline, which may already be spent) so a
-        //    tab opened above is still reaped instead of leaking toward
-        //    MAX_SESSIONS. Deadline expiry is the common trigger for this path.
-        let _ = tokio::time::timeout(
-            CLEANUP_BUDGET,
-            self.auth(
-                self.client
-                    .delete(format!("{}/tabs/{tab_id}", self.base_url)),
-            )
-            .json(&json!({ "userId": USER_ID }))
-            .send(),
-        )
-        .await;
+        // 4. Best-effort close — never fail the fetch on cleanup.
+        self.close_tab(&tab_id).await;
 
         let html = html?.result.unwrap_or_default();
         if html.is_empty() {
