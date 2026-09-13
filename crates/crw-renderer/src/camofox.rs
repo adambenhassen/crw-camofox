@@ -167,7 +167,7 @@ impl CamofoxRenderer {
         loop {
             let budget = deadline.remaining();
             if budget.is_zero() {
-                return Err(CrwError::Timeout(0));
+                return Err(CrwError::Timeout(deadline.requested_ms()));
             }
             let can_retry = attempt < CREATE_TAB_ATTEMPTS;
             let fut = async {
@@ -216,7 +216,7 @@ impl CamofoxRenderer {
     async fn navigate_tab(&self, tab_id: &str, url: &str, deadline: Deadline) -> CrwResult<()> {
         let budget = deadline.remaining();
         if budget.is_zero() {
-            return Err(CrwError::Timeout(0));
+            return Err(CrwError::Timeout(deadline.requested_ms()));
         }
         let path = format!("/tabs/{tab_id}/navigate");
         let fut = async {

@@ -545,9 +545,7 @@ impl FallbackRenderer {
         let _host_permit = if let Some(key) = host_key.as_deref() {
             let remaining = deadline.remaining();
             if remaining.is_zero() {
-                return Err(CrwError::Timeout(
-                    deadline.overrun().as_millis().max(1) as u64
-                ));
+                return Err(CrwError::Timeout(deadline.requested_ms()));
             }
             match tokio::time::timeout(
                 remaining,
@@ -571,9 +569,7 @@ impl FallbackRenderer {
                 }
                 Ok(Err(_)) => return Err(CrwError::RendererError("host limiter closed".into())),
                 Err(_) => {
-                    return Err(CrwError::Timeout(
-                        deadline.overrun().as_millis().max(1) as u64
-                    ));
+                    return Err(CrwError::Timeout(deadline.requested_ms()));
                 }
             }
         } else {

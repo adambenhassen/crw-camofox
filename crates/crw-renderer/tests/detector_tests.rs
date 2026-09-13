@@ -222,3 +222,26 @@ fn thin_markdown_floor_is_100_bytes() {
     assert!(!is_thin_markdown(100));
     assert!(!is_thin_markdown(5000));
 }
+
+/// A LightPanda render cut off by its own nav budget arrives without a closing
+/// `</body>`. The body scan must read to the end of what arrived, or the wall
+/// extracts as "" and ships as content (upstream 294eb3d).
+#[test]
+fn truncated_wall_without_close_body_is_a_bot_wall() {
+    let html = "<html><body><h1>Security Check</h1>\
+                <p>Checking your browser before accessing the site</p>\
+                <p>This will take a few seconds";
+    assert!(looks_like_generic_bot_wall(html));
+}
+
+/// The 600-visible-char bail still protects a real article that was truncated
+/// mid-page and happens to mention a wall phrase.
+#[test]
+fn truncated_long_article_mentioning_a_phrase_is_not_a_wall() {
+    let filler = "the quick brown fox jumps over the lazy dog. ".repeat(30);
+    let html = format!(
+        "<html><body><h1>How bot walls work</h1><p>Sites often say \
+         checking your browser before letting you in.</p><p>{filler}"
+    );
+    assert!(!looks_like_generic_bot_wall(&html));
+}
