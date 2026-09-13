@@ -39,6 +39,15 @@ const OUTER_HTML_EXPR: &str = "document.documentElement.outerHTML";
 /// context toward MAX_SESSIONS, so the reap must still get a real chance to run.
 const CLEANUP_BUDGET: Duration = Duration::from_secs(3);
 
+/// `POST /tabs` fails transiently in two known ways: `window is null` right
+/// after the context's last tab was closed (camofox eagerly tears the context
+/// down and relaunches it), and `NS_BINDING_ABORTED` when concurrent creates
+/// race for the reusable initial about:blank page. Both clear in well under a
+/// second, so a 5xx create is retried this many times in total, with
+/// [`CREATE_TAB_BACKOFF`] between attempts, inside the request deadline.
+const CREATE_TAB_ATTEMPTS: u32 = 3;
+const CREATE_TAB_BACKOFF: Duration = Duration::from_millis(400);
+
 /// Renderer backed by a camofox-browser REST endpoint.
 pub struct CamofoxRenderer {
     name: String,
@@ -101,6 +110,56 @@ impl CamofoxRenderer {
             .send()
             .await
             .map_err(|e| CrwError::RendererError(format!("camofox {path} request failed: {e}")))
+    }
+
+    /// Open a tab navigated at `url`, retrying a 5xx create (see
+    /// [`CREATE_TAB_ATTEMPTS`]). Each attempt's send + decode is bounded by
+    /// the remaining deadline; a non-5xx failure surfaces at once.
+    async fn create_tab(&self, url: &str, deadline: Deadline) -> CrwResult<String> {
+        let body = json!({ "userId": USER_ID, "sessionKey": SESSION_KEY, "url": url });
+        let mut attempt = 1;
+        loop {
+            let budget = deadline.remaining();
+            if budget.is_zero() {
+                return Err(CrwError::Timeout(0));
+            }
+            let can_retry = attempt < CREATE_TAB_ATTEMPTS;
+            let fut = async {
+                let resp = self.post_json("/tabs", body.clone()).await?;
+                let status = resp.status();
+                if status.is_success() {
+                    return resp
+                        .json::<CreateTabResponse>()
+                        .await
+                        .map(|r| Ok(r.tab_id))
+                        .map_err(|e| {
+                            CrwError::RendererError(format!("camofox /tabs bad response: {e}"))
+                        });
+                }
+                let detail = error_detail(resp).await;
+                if status.is_server_error() && can_retry {
+                    return Ok(Err(format!("{status}{detail}")));
+                }
+                Err(CrwError::RendererError(format!(
+                    "camofox /tabs returned {status}{detail}"
+                )))
+            };
+            match tokio::time::timeout(budget, fut).await {
+                Ok(Ok(Ok(tab_id))) => return Ok(tab_id),
+                Ok(Ok(Err(transient))) => {
+                    tracing::info!(
+                        url,
+                        attempt,
+                        error = %transient,
+                        "camofox: tab create failed, retrying"
+                    );
+                    tokio::time::sleep(CREATE_TAB_BACKOFF.min(deadline.remaining())).await;
+                    attempt += 1;
+                }
+                Ok(Err(e)) => return Err(e),
+                Err(_) => return Err(CrwError::Timeout(budget.as_millis() as u64)),
+            }
+        }
     }
 
     /// Fire-and-discard POST bounded by `budget`. The response is dropped
@@ -215,14 +274,7 @@ impl PageFetcher for CamofoxRenderer {
         //    idle-evicts it. Eliminating that race needs the warm-tab+mutex model
         //    the search client uses (crw-search::camofox_search); tracked as the
         //    next step, out of scope for the deadline fix.
-        let tab_id = self
-            .post_decode_within::<CreateTabResponse>(
-                "/tabs",
-                json!({ "userId": USER_ID, "sessionKey": SESSION_KEY, "url": url }),
-                deadline.remaining(),
-            )
-            .await?
-            .tab_id;
+        let tab_id = self.create_tab(url, deadline).await?;
 
         // 2. Wait for readiness, bounded by the smaller of the caller's
         //    `wait_for_ms` hint and the remaining request budget. The HTTP call

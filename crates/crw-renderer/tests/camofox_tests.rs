@@ -65,6 +65,24 @@ async fn create_tab_html_error(Json(_body): Json<Value>) -> impl IntoResponse {
     )
 }
 
+/// `/tabs` that fails the first two creates the way camofox does right after a
+/// context teardown (`window is null`), then succeeds — the transient the
+/// renderer must ride out.
+static FLAKY_CREATES: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+async fn create_tab_flaky(Json(body): Json<Value>) -> axum::response::Response {
+    let n = FLAKY_CREATES.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    if n < 2 {
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({
+                "error": "browserContext.newPage: Protocol error (Browser.newPage): can't access property \"delayedStartupPromise\", window is null"
+            })),
+        )
+            .into_response();
+    }
+    create_tab(Json(body)).await.into_response()
+}
+
 async fn evaluate(Path(_id): Path<String>, Json(_body): Json<Value>) -> Json<Value> {
     Json(json!({
         "ok": true,
@@ -241,6 +259,57 @@ async fn fetch_error_omits_non_json_body() {
         "{msg}"
     );
     assert!(!msg.contains("<html"), "{msg}");
+}
+
+#[tokio::test]
+async fn fetch_retries_transient_tab_create_failure() {
+    FLAKY_CREATES.store(0, std::sync::atomic::Ordering::SeqCst);
+    let app = Router::new()
+        .route("/tabs", post(create_tab_flaky))
+        .route("/tabs/{id}/wait", post(wait))
+        .route("/tabs/{id}/evaluate", post(evaluate))
+        .route("/tabs/{id}", delete(close_tab));
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        axum::serve(listener, app).await.unwrap();
+    });
+    let base = format!("http://{addr}");
+    let renderer = CamofoxRenderer::new("camofox", &base, None, Duration::from_secs(5));
+
+    let result = renderer
+        .fetch("https://example.com", &HashMap::new(), None, deadline())
+        .await
+        .expect("two transient 500s on /tabs must be retried through");
+    assert!(result.html.contains("camofox rendered"));
+    assert_eq!(FLAKY_CREATES.load(std::sync::atomic::Ordering::SeqCst), 3);
+}
+
+#[tokio::test]
+async fn fetch_gives_up_on_persistent_tab_create_failure() {
+    // Always 500: after the retry budget the error surfaces (bounded, not a hang).
+    let app = Router::new().route("/tabs", post(create_tab_profile_mismatch));
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        axum::serve(listener, app).await.unwrap();
+    });
+    let base = format!("http://{addr}");
+    let renderer = CamofoxRenderer::new("camofox", &base, None, Duration::from_secs(5));
+
+    let started = std::time::Instant::now();
+    let err = renderer
+        .fetch("https://example.com", &HashMap::new(), None, deadline())
+        .await
+        .expect_err("persistent 500 must fail");
+    assert!(
+        err.to_string().contains("camofox /tabs returned 500"),
+        "{err}"
+    );
+    assert!(
+        started.elapsed() < Duration::from_secs(5),
+        "retries must stay bounded"
+    );
 }
 
 /// A pinned JS renderer implies `renderJs=true`. When the HTTP tier fails on
