@@ -45,6 +45,17 @@ async fn create_tab_stalls(Json(_body): Json<Value>) -> impl IntoResponse {
     (StatusCode::OK, Json(json!({ "tabId": "tab-slow" })))
 }
 
+/// A `/tabs` handler that fails the way camofox does when a persistent profile
+/// is pinned to an older Camoufox build: HTTP 500 with the reason in `error`.
+async fn create_tab_profile_mismatch(Json(_body): Json<Value>) -> impl IntoResponse {
+    (
+        StatusCode::INTERNAL_SERVER_ERROR,
+        Json(json!({
+            "error": "Profile for user \"crw\" was created with Camoufox 135.0.1-beta.24, but the current version is 152.0.4-beta.28"
+        })),
+    )
+}
+
 async fn evaluate(Path(_id): Path<String>, Json(_body): Json<Value>) -> Json<Value> {
     Json(json!({
         "ok": true,
@@ -171,5 +182,31 @@ async fn fetch_fails_when_deadline_expired() {
     assert!(
         res.is_err(),
         "expired deadline should short-circuit before any HTTP call"
+    );
+}
+
+#[tokio::test]
+async fn fetch_error_carries_camofox_message() {
+    // A failed camofox call must surface the server's own `error` text, not
+    // just the status — it is what tells a profile-version pin apart from a
+    // crashed browser.
+    let app = Router::new().route("/tabs", post(create_tab_profile_mismatch));
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        axum::serve(listener, app).await.unwrap();
+    });
+    let base = format!("http://{addr}");
+    let renderer = CamofoxRenderer::new("camofox", &base, None, Duration::from_secs(5));
+
+    let err = renderer
+        .fetch("https://example.com", &HashMap::new(), None, deadline())
+        .await
+        .expect_err("500 from /tabs must fail the fetch");
+    let msg = err.to_string();
+    assert!(msg.contains("camofox /tabs returned 500"), "{msg}");
+    assert!(
+        msg.contains("was created with Camoufox 135.0.1-beta.24"),
+        "{msg}"
     );
 }

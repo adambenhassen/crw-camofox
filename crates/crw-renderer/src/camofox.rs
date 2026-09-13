@@ -141,9 +141,10 @@ impl CamofoxRenderer {
         let fut = async {
             let resp = self.post_json(path, body).await?;
             if !resp.status().is_success() {
+                let status = resp.status();
+                let detail = error_detail(resp).await;
                 return Err(CrwError::RendererError(format!(
-                    "camofox {path} returned {}",
-                    resp.status()
+                    "camofox {path} returned {status}{detail}"
                 )));
             }
             resp.json::<T>()
@@ -154,6 +155,26 @@ impl CamofoxRenderer {
             Ok(r) => r,
             Err(_) => Err(CrwError::Timeout(budget.as_millis() as u64)),
         }
+    }
+}
+
+/// Cap on how much of a failed camofox response body is carried into the error.
+const ERROR_BODY_CAP: usize = 300;
+
+/// `: <message>` from a failed camofox response, or `""` when there is none.
+/// camofox reports the real cause in the body (`{"error":"Profile for user
+/// \"crw\" was created with Camoufox 135…"}`); a bare status hid it.
+async fn error_detail(resp: reqwest::Response) -> String {
+    let raw = resp.text().await.unwrap_or_default();
+    let msg = serde_json::from_str::<serde_json::Value>(&raw)
+        .ok()
+        .and_then(|v| v.get("error")?.as_str().map(str::to_string))
+        .unwrap_or(raw);
+    let msg: String = msg.trim().chars().take(ERROR_BODY_CAP).collect();
+    if msg.is_empty() {
+        String::new()
+    } else {
+        format!(": {msg}")
     }
 }
 
