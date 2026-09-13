@@ -11,7 +11,7 @@ use serde::Serialize;
 use serde_json::Value;
 use uuid::Uuid;
 
-use crw_core::types::{ChangeTrackingResult, CrawlState, CrawlStatus, ScrapeData};
+use crw_core::types::{ChangeTrackingResult, CrawlState, CrawlStatus, LlmUsage, ScrapeData};
 
 /// Firecrawl v2 `Document`. Field order/casing matches the live API.
 #[derive(Debug, Serialize)]
@@ -39,6 +39,11 @@ pub struct V2Document {
     pub change_tracking: Option<ChangeTrackingResult>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub warning: Option<String>,
+    /// Token usage for any LLM call this scrape triggered. Not a Firecrawl
+    /// field: `/v1` has always carried it (`ScrapeData::llm_usage`) and `/v2`
+    /// dropped it. Omitted when no LLM ran, so the Firecrawl shape is unchanged.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub llm_usage: Option<LlmUsage>,
     pub metadata: V2Metadata,
 }
 
@@ -125,6 +130,7 @@ pub fn to_v2_document(data: ScrapeData, proxy_used: &str, scrape_id: String) -> 
         warning: data
             .warning
             .or_else(|| data.block.as_ref().map(|b| b.reason.clone())),
+        llm_usage: data.llm_usage,
         metadata,
     }
 }
@@ -294,6 +300,56 @@ pub struct V2Link {
 mod tests {
     use super::*;
     use crw_core::types::PageMetadata;
+
+    /// An LLM scrape on /v2 carries its token usage, as /v1 does.
+    #[test]
+    fn v2_document_carries_llm_usage() {
+        let mut data = fake_doc("https://example.com/p");
+        data.json = Some(serde_json::json!({"name": "x"}));
+        data.llm_usage = Some(LlmUsage {
+            input_tokens: 631,
+            output_tokens: 45,
+            total_tokens: 676,
+            estimated_cost_usd: None,
+            model: "DeepSeek-V4-Pro".to_string(),
+            provider: "openai-compatible".to_string(),
+            cache_hit_input_tokens: None,
+            cache_miss_input_tokens: None,
+            truncated: false,
+            calls: 1,
+            executed_summaries: 0,
+            answer_executed: false,
+        });
+
+        let doc = to_v2_document(data, "basic", "sid".to_string());
+        let usage = doc
+            .llm_usage
+            .as_ref()
+            .expect("llm_usage must survive the v2 mapping");
+        assert_eq!(usage.input_tokens, 631);
+        assert_eq!(usage.output_tokens, 45);
+
+        // And it reaches the wire under the camelCase key.
+        let wire = serde_json::to_value(&doc).unwrap();
+        assert_eq!(wire["llmUsage"]["inputTokens"], 631);
+        assert_eq!(wire["llmUsage"]["outputTokens"], 45);
+    }
+
+    /// The frozen Firecrawl shape is unchanged when no LLM ran: `skip_serializing_if`
+    /// must keep the key out entirely rather than emitting `"llmUsage": null`.
+    #[test]
+    fn v2_document_omits_llm_usage_when_no_llm_ran() {
+        let doc = to_v2_document(
+            fake_doc("https://example.com/p"),
+            "basic",
+            "sid".to_string(),
+        );
+        let wire = serde_json::to_value(&doc).unwrap();
+        assert!(
+            wire.get("llmUsage").is_none(),
+            "non-LLM scrapes must not grow a new key"
+        );
+    }
 
     #[test]
     fn rfc3339_matches_known_epoch() {
