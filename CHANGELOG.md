@@ -7,6 +7,23 @@ and the project uses [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Added
+
+- **Renderer:** the Camofox tier now waits, on the open tab, for a Cloudflare
+  "Just a moment" challenge to clear (`renderer.camofox.challenge_wait_ms`,
+  default 20 s, always inside the request deadline) instead of snapshotting
+  the interstitial and reporting the page as blocked.
+- **Renderer:** after a Camofox render that earned a `cf_clearance` cookie,
+  the tab's cookies and user agent are cached per host and sent with the
+  HTTP-tier fetch on later scrapes of that host, so they skip the browser.
+  A repeat challenge drops the entry. Off with
+  `renderer.camofox.clearance_reuse = false`; never used through a proxy.
+
+### Fixed
+
+- **Renderer:** a caller-supplied `User-Agent` no longer travels with the
+  stealth mode's Chrome `Sec-Ch-Ua*` client hints.
+
 ### Changed
 
 - **Breaking:** `/metrics`, `/metrics/renderer-breakers`, and

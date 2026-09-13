@@ -489,12 +489,17 @@ impl FallbackRenderer {
         #[cfg(feature = "camofox")]
         if want(RendererMode::Camofox) {
             if let Some(cf) = &config.camofox {
-                js_renderers.push(Arc::new(camofox::CamofoxRenderer::new(
+                let mut tier = camofox::CamofoxRenderer::new(
                     "camofox",
                     &cf.base_url,
                     cf.api_key.clone(),
                     Duration::from_millis(config.chrome_timeout()),
-                )));
+                )
+                .with_challenge_wait(Duration::from_millis(cf.challenge_wait_ms));
+                if cf.clearance_reuse {
+                    tier = tier.with_clearance_cache(Arc::clone(&clearance));
+                }
+                js_renderers.push(Arc::new(tier));
             } else if matches!(config.mode, RendererMode::Camofox) {
                 return Err(CrwError::ConfigError(
                     "renderer.mode = \"camofox\" but [renderer.camofox] base_url is not \
@@ -2005,6 +2010,27 @@ mod tests {
             mode,
             ..Default::default()
         }
+    }
+
+    #[cfg(feature = "camofox")]
+    #[test]
+    fn camofox_tier_builds_with_clearance_and_challenge_config() {
+        use crw_core::config::CamofoxEndpoint;
+        let cfg = RendererConfig {
+            mode: RendererMode::Camofox,
+            camofox: Some(CamofoxEndpoint {
+                base_url: "http://127.0.0.1:1".into(),
+                api_key: None,
+                challenge_wait_ms: 5_000,
+                challenge_click: false,
+                clearance_reuse: false,
+            }),
+            ..Default::default()
+        };
+        let r = FallbackRenderer::new(&cfg, "crw-test", None, &StealthConfig::default())
+            .expect("camofox tier builds");
+        assert_eq!(r.js_renderer_names(), vec!["camofox"]);
+        assert!(r.clearance().is_empty());
     }
 
     #[test]
