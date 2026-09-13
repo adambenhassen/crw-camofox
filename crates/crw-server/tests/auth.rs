@@ -277,6 +277,33 @@ async fn cors_allowlist_echoes_configured_origin() {
 }
 
 #[tokio::test]
+async fn cors_allowlist_matches_entries_written_with_slash_or_uppercase() {
+    // A browser sends `Origin: https://app.example.com` — lowercase, no path. An
+    // entry copied from the address bar never matched it, silently.
+    for entry in [
+        "https://app.example.com/",
+        "HTTPS://App.Example.com",
+        " https://app.example.com ",
+    ] {
+        let server = test_app_with_cors(vec![entry.into()]);
+        let resp = server
+            .get("/health")
+            .add_header(
+                axum::http::header::ORIGIN,
+                HeaderValue::from_static("https://app.example.com"),
+            )
+            .await;
+        assert_eq!(
+            resp.headers()
+                .get(axum::http::header::ACCESS_CONTROL_ALLOW_ORIGIN)
+                .and_then(|v| v.to_str().ok()),
+            Some("https://app.example.com"),
+            "entry {entry:?}"
+        );
+    }
+}
+
+#[tokio::test]
 async fn cors_allowlist_rejects_unlisted_origin() {
     // The property that actually makes it an allowlist: an origin NOT on the
     // list is not echoed. Guards against a refactor to a mirror/permissive

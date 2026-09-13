@@ -159,9 +159,25 @@ fn build_cors_layer(origins: &[String]) -> Option<CorsLayer> {
                 );
                 return None;
             }
-            match HeaderValue::from_str(origin) {
-                Ok(value) => Some(value),
-                Err(_) => {
+            // Browsers send the origin serialization: lowercase scheme and host,
+            // no path. Normalize to it, or an entry written with a trailing slash
+            // or capitals never matches and CORS stays off without a word.
+            let serialized = match url::Url::parse(origin) {
+                Ok(u) if matches!(u.path(), "" | "/") && u.query().is_none() => {
+                    u.origin().ascii_serialization()
+                }
+                _ => {
+                    tracing::warn!(
+                        origin,
+                        "server.cors_allowed_origins: not an origin (expected \
+                         scheme://host[:port] with no path); ignoring entry"
+                    );
+                    return None;
+                }
+            };
+            match HeaderValue::from_str(&serialized) {
+                Ok(value) if serialized != "null" => Some(value),
+                _ => {
                     tracing::warn!(
                         origin,
                         "server.cors_allowed_origins: invalid origin, ignoring"
