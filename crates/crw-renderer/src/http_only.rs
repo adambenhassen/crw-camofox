@@ -310,10 +310,28 @@ fn build_client(
     match builder.build() {
         Ok(c) => c,
         Err(e) => {
-            tracing::error!("Failed to build HTTP client: {e}, using default");
-            reqwest::Client::new()
+            tracing::error!(
+                "Failed to build HTTP client: {}; using a minimal client without proxy or relaxed TLS",
+                crw_core::error::reqwest_message(e)
+            );
+            minimal_safe_client(request_timeout)
         }
     }
+}
+
+/// Fallback when the configured client cannot be built. Drops only the optional
+/// extras (user agent, proxy, relaxed TLS) and keeps what every fetch relies on:
+/// the SSRF-safe redirect policy and both timeouts. `reqwest::Client::new()`
+/// would follow redirects into internal addresses and never time out.
+fn minimal_safe_client(request_timeout: std::time::Duration) -> reqwest::Client {
+    reqwest::Client::builder()
+        .connect_timeout(HTTP_CONNECT_TIMEOUT)
+        .timeout(request_timeout)
+        .redirect(crw_core::url_safety::safe_redirect_policy())
+        .build()
+        // Same failure mode `reqwest::Client::new()` already had: this only
+        // fails if the TLS backend itself cannot initialise.
+        .expect("minimal reqwest client")
 }
 
 /// Stealth headers injected when stealth mode is enabled.
@@ -1170,6 +1188,29 @@ fn decode_html_bytes(bytes: &[u8], header_charset: Option<&str>) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The fallback client must keep the redirect guard: following a redirect to
+    /// the metadata endpoint is exactly what the configured client refuses.
+    #[tokio::test]
+    async fn minimal_safe_client_refuses_a_redirect_into_internal_space() {
+        use wiremock::matchers::method;
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+        let origin = MockServer::start().await;
+        Mock::given(method("GET"))
+            .respond_with(
+                ResponseTemplate::new(302)
+                    .insert_header("location", "http://169.254.169.254/latest/meta-data/"),
+            )
+            .mount(&origin)
+            .await;
+        let client = minimal_safe_client(std::time::Duration::from_secs(5));
+        let res = client.get(origin.uri()).send().await;
+        assert!(
+            res.is_err(),
+            "a redirect to 169.254.169.254 must be refused, got {:?}",
+            res.map(|r| r.status())
+        );
+    }
 
     // ── looks_binary ────────────────────────────────────────────────────
     #[test]
