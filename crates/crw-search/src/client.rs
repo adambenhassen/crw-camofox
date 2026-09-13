@@ -48,13 +48,13 @@ async fn read_capped(response: reqwest::Response, cap: usize) -> Result<Vec<u8>,
 
 #[derive(Debug, Error)]
 pub enum SearchError {
-    #[error("SearXNG request timed out")]
+    #[error("search backend request timed out")]
     Timeout,
-    #[error("SearXNG upstream error (status {status}): {body}")]
+    #[error("search backend upstream error (status {status}): {body}")]
     Upstream { status: u16, body: String },
-    #[error("SearXNG returned an invalid JSON response: {0}")]
+    #[error("search backend returned an invalid JSON response: {0}")]
     InvalidResponse(String),
-    #[error("SearXNG transport error: {0}")]
+    #[error("search backend transport error: {0}")]
     Transport(String),
 }
 

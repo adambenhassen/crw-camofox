@@ -1048,7 +1048,7 @@ fn validate_request(req: &SearchRequest, max_limit: u32) -> Result<(), CrwError>
 }
 
 /// Map a transport/timeout/upstream `SearchError` onto the HTTP `CrwError`.
-/// `base_url` is the configured SearXNG URL; the transport (`target_unreachable`)
+/// `base_url` is the configured search backend (camofox) URL; the transport (`target_unreachable`)
 /// arm names its **origin** (issue #90) so the operator sees *which* host failed
 /// — sanitized, so a credentialed URL never reaches the response. Timeouts keep
 /// `error_code: "timeout"`; the host is correlated via the startup log instead.
@@ -1056,14 +1056,14 @@ fn map_search_error(err: SearchError, timeout_ms: u64, base_url: &str) -> CrwErr
     match err {
         SearchError::Timeout => CrwError::Timeout(timeout_ms),
         SearchError::Upstream { status, body } => CrwError::HttpError(format!(
-            "SearXNG returned HTTP {status}: {}",
+            "search backend returned HTTP {status}: {}",
             body.chars().take(200).collect::<String>()
         )),
         SearchError::InvalidResponse(msg) => {
-            CrwError::HttpError(format!("SearXNG returned invalid JSON: {msg}"))
+            CrwError::HttpError(format!("search backend returned invalid JSON: {msg}"))
         }
         SearchError::Transport(msg) => CrwError::TargetUnreachable(format!(
-            "SearXNG ({}): {msg}",
+            "search backend ({}): {msg}",
             crate::diagnostics::sanitize_url_origin(base_url)
         )),
     }
