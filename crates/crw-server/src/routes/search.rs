@@ -129,6 +129,32 @@ use crate::error::AppError;
 use crate::state::AppState;
 
 const MAX_QUERY_CHARS: usize = 2000;
+const MAX_LANG_CHARS: usize = 35;
+
+/// A language tag (`en`, `pt-BR`, `zh-Hans-CN`, `es-419`, `en-u-ca`) or one of
+/// the `auto`/`all` sentinels the search backends already understand.
+///
+/// Not a full RFC 5646 grammar: it requires a 2-3 letter primary subtag, so
+/// private-use (`x-…`) and grandfathered (`i-klingon`) tags are rejected. Those
+/// are not search locales.
+///
+/// `lang` is forwarded verbatim as SearXNG's `language`, and a deployment may
+/// point that at a backend which interpolates it into a request line rather than
+/// a URL-encoded parameter, where a `\r\n` would split the request. Anything
+/// outside this shape is a caller mistake, so it is rejected here.
+fn is_valid_lang(lang: &str) -> bool {
+    if lang == "auto" || lang == "all" {
+        return true;
+    }
+    let mut subtags = lang.split('-');
+    let Some(primary) = subtags.next() else {
+        return false;
+    };
+    if !(2..=3).contains(&primary.len()) || !primary.bytes().all(|b| b.is_ascii_alphabetic()) {
+        return false;
+    }
+    subtags.all(|s| (1..=8).contains(&s.len()) && s.bytes().all(|b| b.is_ascii_alphanumeric()))
+}
 
 /// Max engines per `/v1/search` request. Camofox runs them sequentially on one
 /// warm tab, so the cap bounds worst-case latency (N engines ≈ N× a search).
@@ -1014,6 +1040,14 @@ fn validate_request(req: &SearchRequest, max_limit: u32) -> Result<(), CrwError>
             "limit must be between 1 and {max_limit} (got {l})"
         )));
     }
+    if let Some(l) = req.lang.as_deref().map(str::trim)
+        && !l.is_empty()
+        && (l.chars().count() > MAX_LANG_CHARS || !is_valid_lang(l))
+    {
+        return Err(CrwError::InvalidRequest(format!(
+            "lang must be a language tag such as 'en' or 'pt-BR' (got {l:?})"
+        )));
+    }
     if let Some(cats) = &req.categories
         && cats.len() > 5
     {
@@ -1424,6 +1458,59 @@ mod tests {
             SearchEngine::Github,
         ]);
         assert!(validate_request(&r, 20).is_ok());
+    }
+
+    #[test]
+    fn validate_rejects_malformed_lang() {
+        // `lang` is forwarded as SearXNG's `language`; a backend that builds a
+        // request line from it rather than a URL-encoded parameter would see the
+        // CRLF here as the end of the request line.
+        for bad in [
+            "a\r\nA:1",
+            "en\r\nA:1",
+            "e n",
+            "en;q=1",
+            "../x",
+            "e",
+            "toolongprimary",
+            "en-",
+            "en-toolongsubtag",
+        ] {
+            let mut r = req("rust");
+            r.lang = Some(bad.to_string());
+            assert!(
+                matches!(validate_request(&r, 20), Err(CrwError::InvalidRequest(_))),
+                "accepted malformed lang {bad:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn validate_accepts_real_language_tags_and_sentinels() {
+        // Looser than what the Google tier ultimately sends — the public contract
+        // is a language tag, and `auto`/`all` are documented values, so rejecting
+        // any of these would be a 400 for a legitimate caller.
+        for good in [
+            "en",
+            "pt-BR",
+            "zh-Hans-CN",
+            "nb-NO",
+            "auto",
+            "all",
+            "en-US",
+            // Real tags whose tail is not language-region: a Latin-American
+            // Spanish region code and a BCP-47 extension singleton.
+            "es-419",
+            "en-u-ca",
+            "",
+        ] {
+            let mut r = req("rust");
+            r.lang = Some(good.to_string());
+            assert!(
+                validate_request(&r, 20).is_ok(),
+                "rejected valid lang {good:?}"
+            );
+        }
     }
 
     #[test]
