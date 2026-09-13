@@ -32,7 +32,13 @@ async fn provider_dropping_first(dead_first: usize) -> (String, Arc<AtomicUsize>
             let n = counter.fetch_add(1, Ordering::SeqCst) + 1;
             if n <= dead_first {
                 // Close without answering: what a peer that already dropped the
-                // pooled connection looks like from our side.
+                // pooled connection looks like from our side. Read first: closing
+                // before the client has finished writing races its write, and the
+                // client then sees a connection reset instead of hyper's
+                // "connection closed before message completed", which made these
+                // tests flaky.
+                let mut buf = [0u8; 8192];
+                let _ = sock.read(&mut buf).await;
                 drop(sock);
                 continue;
             }
