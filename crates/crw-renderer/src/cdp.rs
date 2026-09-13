@@ -882,8 +882,14 @@ async fn outbound_block_label(req_url: &str, ctx: &OutboundCtx) -> Option<&'stat
             // resolver, so a brown-out otherwise reads as "the target is
             // unreachable", gets a 422 and a refund, and never trips the 5xx
             // watchdog.
-            ctx.unresolved
-                .store(true, std::sync::atomic::Ordering::Relaxed);
+            // Scoped to the navigated origin. A parked ad or analytics host that
+            // no longer resolves is common, and letting it relabel the render
+            // would deny a refund for an origin the caller really could not
+            // reach, and page us for something that was never ours.
+            if parsed.host_str().is_some_and(|h| h == ctx.doc_host) {
+                ctx.unresolved
+                    .store(true, std::sync::atomic::Ordering::Relaxed);
+            }
             Some(BLOCK_LABEL_UNRESOLVED)
         }
     }
@@ -896,6 +902,9 @@ struct OutboundCtx {
     render_limit: tokio::sync::Semaphore,
     /// Ceiling on one check, taken from the tier's navigation timeout.
     budget: Duration,
+    /// Host of the URL being navigated. Only this host's failures may relabel
+    /// the render as our own failure.
+    doc_host: String,
     /// Set when a check failed because our own resolver could not answer.
     unresolved: std::sync::atomic::AtomicBool,
 }
@@ -1052,15 +1061,26 @@ async fn run_intercept_pump(
                                 target_id = %child_target,
                                 "could not intercept a child target; closing it rather than                                  running it unvalidated"
                             );
-                            if !child_target.is_empty() {
-                                let _ = conn
+                            let closed = !child_target.is_empty()
+                                && conn
                                     .send_recv(
                                         "Target.closeTarget",
                                         serde_json::json!({ "targetId": child_target }),
                                         None,
                                         cmd_timeout,
                                     )
-                                    .await;
+                                    .await
+                                    .is_ok();
+                            if !closed {
+                                // Deliberately still not resumed: that would run
+                                // an unchecked target. The child stays frozen,
+                                // which costs this frame and at worst burns the
+                                // nav budget. Counted so the trade-off is visible
+                                // rather than silent.
+                                crw_core::metrics::metrics()
+                                    .chrome_blocked_requests_total
+                                    .with_label_values(&["child_stuck"])
+                                    .inc();
                             }
                             return;
                         }
@@ -1167,10 +1187,18 @@ async fn run_intercept_pump(
                 };
                 // Answer on the session the event arrived on, which for a child
                 // target is not ours.
-                let _ = conn
+                // Forget it only once the browser actually took the answer. A
+                // `failRequest` that timed out or hit a closed socket leaves the
+                // request paused, and dropping the record here would hand it to
+                // `Fetch.disable`, which continues paused requests: the same
+                // fail-open one layer down. Teardown re-answering an already
+                // answered id is harmless, CDP just reports an unknown
+                // interception id.
+                let answered = conn
                     .send_recv(method, params, Some(&event_session), cmd_timeout)
-                    .await;
-                if let Ok(mut o) = outstanding.lock() {
+                    .await
+                    .is_ok();
+                if answered && let Ok(mut o) = outstanding.lock() {
                     o.remove(&(event_session, request_id));
                 }
             }
@@ -2476,9 +2504,17 @@ impl CdpRenderer {
         let outbound_ctx = OutboundCtx {
             memo: Arc::new(StdMutex::new(HashMap::new())),
             render_limit: tokio::sync::Semaphore::new(PER_RENDER_RESOLVE_LIMIT),
-            // A verdict is worthless once `Page.navigate` has given up, so the
-            // check gets the tier's own ceiling and nothing more.
-            budget: self.page_timeout,
+            // A verdict is worthless once the navigation has given up, so the
+            // check gets that budget and nothing more. `nav_budget` is the right
+            // field, not `page_timeout`: on chrome the latter is the 30s outer
+            // ceiling while the navigation itself is capped at 12s, so using it
+            // would have made this looser rather than tighter. It defaults to
+            // `page_timeout` on the tiers that never set one.
+            budget: self.nav_budget.min(self.page_timeout),
+            doc_host: url::Url::parse(url)
+                .ok()
+                .and_then(|u| u.host_str().map(str::to_string))
+                .unwrap_or_default(),
             unresolved: std::sync::atomic::AtomicBool::new(false),
         };
         let outstanding: Outstanding = Arc::new(StdMutex::new(std::collections::HashSet::new()));
@@ -2533,18 +2569,33 @@ impl CdpRenderer {
             .lock()
             .map(|o| o.iter().cloned().collect())
             .unwrap_or_default();
-        for (sess, req_id) in leftover {
-            let _ = conn
-                .send_recv(
-                    "Fetch.failRequest",
-                    serde_json::json!({
-                        "requestId": req_id,
-                        "errorReason": "BlockedByClient",
-                    }),
-                    Some(&sess),
-                    Duration::from_secs(1),
-                )
-                .await;
+        if !leftover.is_empty() {
+            use futures::stream::{FuturesUnordered, StreamExt};
+            // Concurrent, under one overall cap. The pump has no in-flight limit
+            // by design, so this set is unbounded; failing them serially would
+            // run past the caller's remaining deadline, the outer timeout would
+            // fire mid-loop, and the `Fetch.disable` below would never run,
+            // poisoning a pooled slot for the rest of its life.
+            let mut pending: FuturesUnordered<_> = leftover
+                .into_iter()
+                .map(|(sess, req_id)| async move {
+                    let _ = conn
+                        .send_recv(
+                            "Fetch.failRequest",
+                            serde_json::json!({
+                                "requestId": req_id,
+                                "errorReason": "BlockedByClient",
+                            }),
+                            Some(&sess),
+                            Duration::from_secs(1),
+                        )
+                        .await;
+                })
+                .collect();
+            let _ = tokio::time::timeout(Duration::from_secs(2), async {
+                while pending.next().await.is_some() {}
+            })
+            .await;
         }
 
         // Cleanup: `Fetch.disable` auto-continues any still-paused requests
@@ -3033,6 +3084,7 @@ mod tests {
             memo: Default::default(),
             render_limit: tokio::sync::Semaphore::new(super::PER_RENDER_RESOLVE_LIMIT),
             budget: std::time::Duration::from_secs(5),
+            doc_host: String::new(),
             unresolved: std::sync::atomic::AtomicBool::new(false),
         }
     }

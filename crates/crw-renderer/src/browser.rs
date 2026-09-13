@@ -297,7 +297,7 @@ fn lightpanda_download_url() -> Option<String> {
 /// explicitly rather than assumed to be in LightPanda's private group.
 const LIGHTPANDA_EXTRA_BLOCK_CIDRS: &str = "0.0.0.0/8,100.64.0.0/10,224.0.0.0/4,240.0.0.0/4,\
 192.0.0.0/24,192.0.2.0/24,198.18.0.0/15,198.51.100.0/24,203.0.113.0/24,\
-fc00::/7,fe80::/10,fec0::/10,ff00::/8,::/96,64:ff9b:1::/48";
+fc00::/7,fe80::/10,fec0::/10,ff00::/8,::/96,64:ff9b:1::/48,2002::/16";
 
 async fn try_lightpanda_native() -> Option<(ManagedBrowser, String)> {
     let bin = find_or_download_lightpanda().await?;
