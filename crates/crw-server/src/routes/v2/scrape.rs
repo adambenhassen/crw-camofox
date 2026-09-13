@@ -302,6 +302,7 @@ mod tests {
             content_type: Some("text/html".into()),
             change_tracking: None,
             block: None,
+            truncated: false,
         };
         to_v2_document(data, "basic", "id".into())
     }

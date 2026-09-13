@@ -301,6 +301,10 @@ pub fn tool_definitions(proxy_mode: bool) -> Value {
                         "onlyMainContent": {
                             "type": "boolean",
                             "description": "Strip nav/footer/ads (default true)"
+                        },
+                        "timeout": {
+                            "type": "integer",
+                            "description": "ms, max 60000"
                         }
                     }
                 },

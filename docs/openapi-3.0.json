@@ -403,7 +403,7 @@
             "description": "Engine(s) to query (omit for Google). Multiple are merged/deduped by URL. Max 4."
           },
           "scrapeOptions": {
-            "$ref": "#/components/schemas/ScrapeOptions"
+            "$ref": "#/components/schemas/SearchScrapeOptions"
           }
         }
       },
@@ -460,6 +460,37 @@
             "items": {
               "$ref": "#/components/schemas/SearchResult"
             }
+          }
+        }
+      },
+      "SearchScrapeOptions": {
+        "type": "object",
+        "properties": {
+          "formats": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "enum": [
+                "markdown",
+                "html",
+                "rawHtml",
+                "links"
+              ]
+            },
+            "default": [
+              "markdown"
+            ]
+          },
+          "onlyMainContent": {
+            "type": "boolean",
+            "default": true
+          },
+          "timeout": {
+            "type": "integer",
+            "description": "Per-result scrape budget in ms. Default 15000. Search awaits every result, so this bounds the whole response; raise it for heavy JS pages.",
+            "minimum": 1,
+            "maximum": 60000,
+            "default": 15000
           }
         }
       },

@@ -353,6 +353,7 @@ mod tests {
             content_type: Some("text/html".into()),
             change_tracking: None,
             block: None,
+            truncated: false,
         }
     }
 

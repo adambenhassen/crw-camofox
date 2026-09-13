@@ -938,6 +938,8 @@ pub fn extract(opts: ExtractOptions<'_>) -> CrwResult<ScrapeData> {
         change_tracking: None,
         // Anti-bot verdict is stamped post-extract at the scrape choke.
         block: None,
+        // Copied post-extract from FetchResult.truncated, same as content_type.
+        truncated: false,
     })
 }
 
