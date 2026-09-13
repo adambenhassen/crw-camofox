@@ -528,6 +528,19 @@ impl AppState {
                 )
                 .await
                 {
+                    // A wall or an origin error page is not a completed
+                    // extraction: `scrape_url` skips the LLM call for it, so
+                    // counting it as `Ok` marked the job Completed with empty
+                    // data and charged for it.
+                    Ok(d) if d.block.is_some() || d.http_error().is_some() => {
+                        last_err = Some(
+                            d.block
+                                .as_ref()
+                                .map(|b| b.message())
+                                .or_else(|| d.http_error())
+                                .unwrap_or_else(|| "Blocked".into()),
+                        );
+                    }
                     Ok(d) => {
                         any_ok = true;
                         if let Some(serde_json::Value::Object(obj)) = d.json {
