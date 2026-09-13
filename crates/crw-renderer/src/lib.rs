@@ -1189,47 +1189,22 @@ impl FallbackRenderer {
             };
             match renderer.fetch(url, headers, wait_for_ms, deadline).await {
                 Ok(mut result) => {
-                    let text_len = html_body_text_len(&result.html);
-                    let is_placeholder = detector::looks_like_loading_placeholder(&result.html);
-                    let failed_render = detector::looks_like_failed_render(&result.html);
-                    let is_bot_wall = detector::looks_like_generic_bot_wall(&result.html);
-                    let vendor_block = detector::looks_like_vendor_block(&result.html);
-                    // Size-independent Cloudflare interstitial check: modern
-                    // managed challenges are 100-300KB with the challenge marker
-                    // deep in the body, which the size-capped detectors above
-                    // miss — the challenge text would be returned as content.
-                    let cf_challenge = detector::looks_like_cloudflare_challenge(&result.html);
-                    // Mirrors the HTTP-tier escalation set (lib.rs:658). A JS
-                    // renderer can return 200 with bot HTML or 403 with content
-                    // — without this check, both slip through as "valid".
-                    let is_status_blocked = matches!(
-                        result.status_code,
-                        401 | 403 | 404 | 405 | 406 | 410 | 412 | 429 | 451 | 500 | 503
-                    );
-                    // The comprehensive 3-tier antibot classifier. The
-                    // `detector` heuristics above only know a fixed phrase
-                    // list + 8 named vendors; `classify()` additionally
-                    // recognises Reddit-class WAF pages ("blocked by network
-                    // security") served with HTTP 200 that otherwise slip
-                    // through as success. Always runs for telemetry when
-                    // `enabled`; only forces escalation when
-                    // `escalate_in_failover` is on (the kill switch).
-                    let antibot = if self.antibot.enabled {
-                        crw_extract::antibot::classify(Some(result.status_code), &result.html)
-                    } else {
-                        crw_extract::antibot::AntibotResult::none()
-                    };
-                    let antibot_blocked =
-                        self.antibot.escalate_in_failover && antibot.signal.is_blocked();
-                    if text_len >= Self::MIN_RENDERED_TEXT_LEN
-                        && !is_placeholder
-                        && failed_render.is_none()
-                        && !is_bot_wall
-                        && vendor_block.is_none()
-                        && !cf_challenge
-                        && !is_status_blocked
-                        && !antibot_blocked
-                    {
+                    let body = JsBodyChecks::assess(&result, &self.antibot);
+                    let accepted = body.accepted();
+                    let body_site_blocked = body.site_blocked(result.status_code);
+                    let rejection = body.rejection_warning(renderer.name(), result.status_code);
+                    let JsBodyChecks {
+                        text_len,
+                        is_placeholder,
+                        failed_render,
+                        is_bot_wall,
+                        vendor_block,
+                        cf_challenge: _,
+                        is_status_blocked,
+                        antibot,
+                        antibot_blocked,
+                    } = body;
+                    if accepted {
                         // Capture the promotion state BEFORE record_success
                         // clears the latch — otherwise AutoPromoted decisions
                         // race against the success path and downgrade to AutoDefault.
@@ -1320,12 +1295,7 @@ impl FallbackRenderer {
                         // attempt so one tier's block cannot mask the next tier's
                         // genuine render failure. Omits 404/405/406/410/412/451/500 —
                         // those are not site-side blocks.
-                        let site_blocked = matches!(result.status_code, 401 | 403 | 429 | 503)
-                            || (520..=530).contains(&result.status_code)
-                            || is_bot_wall
-                            || vendor_block.is_some()
-                            || cf_challenge
-                            || antibot.signal.is_blocked();
+                        let site_blocked = body_site_blocked;
                         let outcome = classify_outcome(
                             false,
                             false,
@@ -1409,43 +1379,7 @@ impl FallbackRenderer {
                     // accumulating bodies), but stitch later renderers'
                     // warnings onto it so debug output reflects every attempt.
                     let mut annotated = result;
-                    let attempt_warning = if let Some(reason) = failed_render {
-                        format!(
-                            "{} returned a failed render ({})",
-                            renderer.name(),
-                            reason.as_str()
-                        )
-                    } else if is_placeholder {
-                        format!("{} returned a loading placeholder", renderer.name())
-                    } else if let Some(vendor) = vendor_block {
-                        format!(
-                            "{} returned a vendor anti-bot block ({vendor})",
-                            renderer.name()
-                        )
-                    } else if is_bot_wall {
-                        format!(
-                            "{} returned a generic anti-bot interstitial",
-                            renderer.name()
-                        )
-                    } else if is_status_blocked {
-                        format!(
-                            "{} returned HTTP {} (treated as blocked)",
-                            renderer.name(),
-                            annotated.status_code
-                        )
-                    } else if antibot_blocked {
-                        format!(
-                            "{} returned an anti-bot block ({}: {})",
-                            renderer.name(),
-                            antibot.signal.class_name(),
-                            antibot.reason
-                        )
-                    } else {
-                        format!(
-                            "{} returned thin content (text_len={text_len})",
-                            renderer.name()
-                        )
-                    };
+                    let attempt_warning = rejection;
                     if is_bot_wall || vendor_block.is_some() || is_status_blocked || antibot_blocked
                     {
                         // Surface bot-wall as a RendererError so, if every
@@ -1601,28 +1535,13 @@ impl FallbackRenderer {
                 let res = renderer.fetch(url, headers, wait_for_ms, deadline).await;
                 match res {
                     Ok(mut result) => {
-                        let text_len = html_body_text_len(&result.html);
-                        let is_placeholder = detector::looks_like_loading_placeholder(&result.html);
-                        let failed_render = detector::looks_like_failed_render(&result.html);
-                        let is_bot_wall = detector::looks_like_generic_bot_wall(&result.html);
-                        let vendor_block = detector::looks_like_vendor_block(&result.html);
-                        let cf_challenge = detector::looks_like_cloudflare_challenge(&result.html);
+                        let body = JsBodyChecks::assess(&result, &self.antibot);
                         let truncated = result.truncated;
-                        // A large CF challenge shell has body text > 50 and no
-                        // placeholder/failed marker, so guard it explicitly or it
-                        // would leak through this path as success. Same for a
-                        // generic bot wall (a Wikimedia ban shell clears the text
-                        // threshold) and a vendor block.
-                        let content_ok = text_len >= Self::MIN_RENDERED_TEXT_LEN
-                            && !is_placeholder
-                            && failed_render.is_none()
-                            && !is_bot_wall
-                            && vendor_block.is_none()
-                            && !cf_challenge;
+                        let content_ok = body.accepted();
                         // Same rule as the serial loop: a wall is not this tier's
                         // fault, so the leak arm must not advance the host window
                         // with it.
-                        let site_blocked = is_bot_wall || vendor_block.is_some() || cf_challenge;
+                        let site_blocked = body.site_blocked(result.status_code);
                         let outcome = classify_outcome(
                             content_ok,
                             truncated,
@@ -1650,10 +1569,15 @@ impl FallbackRenderer {
                         // this path used to return as `Ok` into a 5xx;
                         // `classify_block` downstream still surfaces it as blocked.
                         // The leak arm only runs when `thin_result` is None.
+                        let rejection = body.rejection_warning(renderer.name(), result.status_code);
                         last_error = Some(CrwError::RendererError(format!(
-                            "leak attempt on {} returned thin content (text_len={text_len})",
-                            renderer.name()
+                            "leak attempt: {rejection}"
                         )));
+                        result.warnings.push(rejection.clone());
+                        result.warning = Some(match result.warning.take() {
+                            Some(prev) => format!("{prev}; {rejection}"),
+                            None => rejection,
+                        });
                         thin_result = Some(result);
                         break;
                     }
@@ -1735,6 +1659,109 @@ impl FallbackRenderer {
             health.insert(r.name().to_string(), r.is_available().await);
         }
         health
+    }
+}
+
+/// The checks a JS tier's body must pass before the ladder accepts it. One
+/// definition for the serial loop and the leak-through arm: the leak arm used to
+/// carry its own copy without the status and classifier checks, and returned a
+/// 403 page as a clean render.
+struct JsBodyChecks {
+    text_len: usize,
+    is_placeholder: bool,
+    failed_render: Option<detector::FailedRenderReason>,
+    is_bot_wall: bool,
+    vendor_block: Option<&'static str>,
+    cf_challenge: bool,
+    is_status_blocked: bool,
+    antibot: crw_extract::antibot::AntibotResult,
+    antibot_blocked: bool,
+}
+
+impl JsBodyChecks {
+    fn assess(result: &FetchResult, antibot_cfg: &crw_core::config::AntibotConfig) -> Self {
+        let html = &result.html;
+        // The comprehensive 3-tier antibot classifier. The `detector` heuristics
+        // only know a fixed phrase list + 8 named vendors; `classify()`
+        // additionally recognises Reddit-class WAF pages ("blocked by network
+        // security") served with HTTP 200 that otherwise slip through as success.
+        // Always runs for telemetry when `enabled`; only forces escalation when
+        // `escalate_in_failover` is on (the kill switch).
+        let antibot = if antibot_cfg.enabled {
+            crw_extract::antibot::classify(Some(result.status_code), html)
+        } else {
+            crw_extract::antibot::AntibotResult::none()
+        };
+        let antibot_blocked = antibot_cfg.escalate_in_failover && antibot.signal.is_blocked();
+        Self {
+            text_len: html_body_text_len(html),
+            is_placeholder: detector::looks_like_loading_placeholder(html),
+            failed_render: detector::looks_like_failed_render(html),
+            is_bot_wall: detector::looks_like_generic_bot_wall(html),
+            vendor_block: detector::looks_like_vendor_block(html),
+            // Size-independent Cloudflare interstitial check: modern managed
+            // challenges are 100-300KB with the challenge marker deep in the
+            // body, which the size-capped detectors above miss — the challenge
+            // text would be returned as content.
+            cf_challenge: detector::looks_like_cloudflare_challenge(html),
+            // Mirrors the HTTP-tier escalation set. A JS renderer can return 200
+            // with bot HTML or 403 with content — without this check, both slip
+            // through as "valid".
+            is_status_blocked: matches!(
+                result.status_code,
+                401 | 403 | 404 | 405 | 406 | 410 | 412 | 429 | 451 | 500 | 503
+            ),
+            antibot,
+            antibot_blocked,
+        }
+    }
+
+    fn accepted(&self) -> bool {
+        self.text_len >= FallbackRenderer::MIN_RENDERED_TEXT_LEN
+            && !self.is_placeholder
+            && self.failed_render.is_none()
+            && !self.is_bot_wall
+            && self.vendor_block.is_none()
+            && !self.cf_challenge
+            && !self.is_status_blocked
+            && !self.antibot_blocked
+    }
+
+    /// Why the body was not accepted, for the result's warnings.
+    fn rejection_warning(&self, renderer: &str, status_code: u16) -> String {
+        if let Some(reason) = self.failed_render {
+            format!("{renderer} returned a failed render ({})", reason.as_str())
+        } else if self.is_placeholder {
+            format!("{renderer} returned a loading placeholder")
+        } else if let Some(vendor) = self.vendor_block {
+            format!("{renderer} returned a vendor anti-bot block ({vendor})")
+        } else if self.is_bot_wall {
+            format!("{renderer} returned a generic anti-bot interstitial")
+        } else if self.is_status_blocked {
+            format!("{renderer} returned HTTP {status_code} (treated as blocked)")
+        } else if self.antibot_blocked {
+            format!(
+                "{renderer} returned an anti-bot block ({}: {})",
+                self.antibot.signal.class_name(),
+                self.antibot.reason
+            )
+        } else {
+            format!(
+                "{renderer} returned thin content (text_len={})",
+                self.text_len
+            )
+        }
+    }
+
+    /// The origin refused us rather than the tier failing. Omits
+    /// 404/405/406/410/412/451/500 — those are not site-side blocks.
+    fn site_blocked(&self, status_code: u16) -> bool {
+        matches!(status_code, 401 | 403 | 429 | 503)
+            || (520..=530).contains(&status_code)
+            || self.is_bot_wall
+            || self.vendor_block.is_some()
+            || self.cf_challenge
+            || self.antibot.signal.is_blocked()
     }
 }
 
@@ -3224,6 +3251,57 @@ mod tests {
                 ..
             })
         ));
+    }
+
+    /// The leak-through arm judged a body with fewer checks than the serial loop:
+    /// a 403 page with enough text went back as a clean `AutoDefault` success,
+    /// where the serial loop rejects it as status-blocked.
+    #[tokio::test]
+    async fn leak_through_rejects_a_blocked_status_like_the_serial_loop() {
+        let lp = Arc::new(MockFetcher {
+            name: "lightpanda",
+            behavior: MockBehavior::OkStatus(403, rich_html("FORBIDDEN")),
+        }) as Arc<dyn PageFetcher>;
+        let mut r = make_renderer_with_mocks(vec![lp]);
+        r.breakers = Arc::new(BreakerRegistry::new(BreakerConfig {
+            base_cooldown: Duration::from_secs(300),
+            max_cooldown: Duration::from_secs(300),
+            ..BreakerConfig::default()
+        }));
+        // Trip the GLOBAL lightpanda breaker only; example.com's host breaker
+        // stays clean, which is exactly the leak-through precondition.
+        let global = r.breakers.global_for(RendererKind::Lightpanda);
+        for _ in 0..80 {
+            global.record_outcome(BreakerOutcome::RenderError);
+        }
+
+        let result = r
+            .fetch(
+                "https://example.com",
+                &HashMap::new(),
+                Some(true),
+                None,
+                None,
+                tdl(),
+            )
+            .await
+            .expect("the rejected body is still returned as the best candidate");
+        assert!(
+            !matches!(
+                result.render_decision,
+                Some(RenderDecision::AutoDefault { .. })
+            ),
+            "a 403 must not be accepted as a clean render, got {:?}",
+            result.render_decision
+        );
+        assert!(
+            result
+                .warning
+                .as_deref()
+                .is_some_and(|w| w.contains("HTTP 403")),
+            "the rejection must be visible, got {:?}",
+            result.warning
+        );
     }
 
     #[tokio::test]
