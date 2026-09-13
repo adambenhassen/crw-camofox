@@ -9,7 +9,8 @@
 //! so it slots into `FallbackRenderer`'s failover ladder unchanged.
 
 use std::collections::HashMap;
-use std::time::{Duration, Instant};
+use std::sync::Arc;
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use async_trait::async_trait;
 use crw_core::Deadline;
@@ -18,6 +19,8 @@ use crw_core::types::FetchResult;
 use serde::Deserialize;
 use serde_json::json;
 
+use crate::clearance::{CLEARANCE_COOKIE, Clearance, ClearanceCache, Cookie, cookie_matches_host};
+use crate::detector;
 use crate::traits::PageFetcher;
 
 /// Stable `userId` for all sessions opened by one renderer instance. The
@@ -124,6 +127,27 @@ pub struct CamofoxRenderer {
     challenge_wait: Duration,
     /// Sleep between challenge probes ([`CHALLENGE_POLL_INTERVAL`]).
     challenge_poll_interval: Duration,
+    /// Where a `cf_clearance` earned by a render is stored for the HTTP tier.
+    /// `None` = capture disabled (config `clearance_reuse = false`).
+    clearance: Option<Arc<ClearanceCache>>,
+}
+
+/// `GET /tabs/:id/cookies`: a bare array on current servers (measured live);
+/// a `{cookies: [...]}` wrapper is accepted too so a server change does not
+/// silently disable capture.
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum CookiesResponse {
+    List(Vec<Cookie>),
+    Wrapped { cookies: Vec<Cookie> },
+}
+
+impl CookiesResponse {
+    fn into_cookies(self) -> Vec<Cookie> {
+        match self {
+            Self::List(c) | Self::Wrapped { cookies: c } => c,
+        }
+    }
 }
 
 /// `POST /tabs` response — we only need the tab id.
@@ -191,6 +215,119 @@ impl CamofoxRenderer {
             create_lock: tokio::sync::Mutex::new(()),
             challenge_wait: DEFAULT_CHALLENGE_WAIT,
             challenge_poll_interval: CHALLENGE_POLL_INTERVAL,
+            clearance: None,
+        }
+    }
+
+    /// Enable clearance capture into `cache` (config `clearance_reuse`).
+    pub fn with_clearance_cache(mut self, cache: Arc<ClearanceCache>) -> Self {
+        self.clearance = Some(cache);
+        self
+    }
+
+    /// The tab's cookie jar, the whole round-trip bounded by `budget`. The jar
+    /// is the whole browser context's, every site this userId visited.
+    async fn tab_cookies(&self, tab_id: &str, budget: Duration) -> CrwResult<Vec<Cookie>> {
+        if budget.is_zero() {
+            return Err(CrwError::Timeout(0));
+        }
+        let fut = async {
+            let resp = self
+                .auth(
+                    // `USER_ID` is a fixed ASCII token, so it needs no encoding.
+                    self.client.get(format!(
+                        "{}/tabs/{tab_id}/cookies?userId={USER_ID}",
+                        self.base_url
+                    )),
+                )
+                .send()
+                .await
+                .map_err(|e| {
+                    CrwError::RendererError(format!(
+                        "camofox /cookies request failed: {}",
+                        crw_core::error::reqwest_message(e)
+                    ))
+                })?;
+            if !resp.status().is_success() {
+                let status = resp.status();
+                let detail = error_detail(resp).await;
+                return Err(CrwError::RendererError(format!(
+                    "camofox /cookies returned {status}{detail}"
+                )));
+            }
+            resp.json::<CookiesResponse>()
+                .await
+                .map(CookiesResponse::into_cookies)
+                .map_err(|e| {
+                    CrwError::RendererError(format!(
+                        "camofox /cookies bad response: {}",
+                        crw_core::error::reqwest_message(e)
+                    ))
+                })
+        };
+        match tokio::time::timeout(budget, fut).await {
+            Ok(r) => r,
+            Err(_) => Err(CrwError::Timeout(budget.as_millis() as u64)),
+        }
+    }
+
+    /// After a challenge-free render: if the tab holds a `cf_clearance` cookie
+    /// for this host, store this host's cookies + the user agent for the HTTP
+    /// tier. Best-effort: every failure logs at `debug` and returns.
+    async fn capture_clearance(&self, tab_id: &str, url: &str, deadline: Deadline) {
+        let Some(cache) = &self.clearance else {
+            return;
+        };
+        let Some(host) = url::Url::parse(url)
+            .ok()
+            .and_then(|u| u.host_str().map(str::to_owned))
+        else {
+            return;
+        };
+        if deadline.remaining() < MIN_EVAL_BUDGET {
+            tracing::debug!(url, "camofox: no budget left for clearance capture");
+            return;
+        }
+        let cookies: Vec<Cookie> = match self.tab_cookies(tab_id, deadline.remaining()).await {
+            // Only this host's cookies. The jar is context-wide, so a clearance
+            // earned on another site would otherwise be cached for this one.
+            Ok(c) => c
+                .into_iter()
+                .filter(|c| cookie_matches_host(&c.domain, &host) && !c.domain.trim().is_empty())
+                .collect(),
+            Err(e) => {
+                tracing::debug!(url, error = %e, "camofox: cookie export failed");
+                return;
+            }
+        };
+        if !cookies.iter().any(|c| c.name == CLEARANCE_COOKIE) {
+            return;
+        }
+        let ua = match self
+            .post_decode_within::<EvaluateResponse>(
+                &format!("/tabs/{tab_id}/evaluate"),
+                json!({ "userId": USER_ID, "expression": "navigator.userAgent" }),
+                deadline.remaining(),
+                deadline,
+            )
+            .await
+        {
+            Ok(r) => r.result.unwrap_or_default(),
+            Err(e) => {
+                tracing::debug!(url, error = %e, "camofox: user agent read failed");
+                return;
+            }
+        };
+        if ua.is_empty() {
+            return;
+        }
+        let now_unix = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|d| d.as_secs_f64())
+            .unwrap_or(0.0);
+        if let Some(clearance) = Clearance::from_browser(cookies, ua, now_unix) {
+            tracing::info!(host = %host, "camofox: cached cf_clearance for the HTTP tier");
+            cache.insert(&host, clearance).await;
         }
     }
 
@@ -875,6 +1012,15 @@ impl PageFetcher for CamofoxRenderer {
             Ok(r) => Ok(r.result.unwrap_or_default()),
             Err(e) => Err(e),
         };
+
+        // 4b. Clearance capture: only for a challenge-free document, only when a
+        //     cache is wired. Never fails the fetch.
+        if let Ok(h) = &html
+            && !h.is_empty()
+            && !detector::looks_like_cloudflare_challenge(h)
+        {
+            self.capture_clearance(&tab_id, url, deadline).await;
+        }
 
         // 5. Best-effort close — never fail the fetch on cleanup.
         self.close_tab(&tab_id).await;

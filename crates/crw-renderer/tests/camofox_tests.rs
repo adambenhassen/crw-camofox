@@ -883,3 +883,172 @@ async fn one_failed_probe_does_not_end_the_wait() {
     );
     assert!(probes(&st) >= 3, "the loop kept probing after the failure");
 }
+
+const FIREFOX_UA: &str = "Mozilla/5.0 (X11; Linux x86_64; rv:128.0) Gecko/20100101 Firefox/128.0";
+
+/// Evaluate that also answers `navigator.userAgent`.
+async fn evaluate_with_ua(Path(id): Path<String>, Json(body): Json<Value>) -> Json<Value> {
+    if body["expression"].as_str() == Some("navigator.userAgent") {
+        return Json(
+            json!({ "ok": true, "result": FIREFOX_UA, "resultType": "string", "truncated": false }),
+        );
+    }
+    evaluate(Path(id), Json(body)).await
+}
+
+async fn cookies_with_clearance(
+    Path(_id): Path<String>,
+    axum::extract::Query(q): axum::extract::Query<HashMap<String, String>>,
+) -> axum::response::Response {
+    if !q.contains_key("userId") {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({ "error": "userId required" })),
+        )
+            .into_response();
+    }
+    Json(json!([
+        { "name": "cf_clearance", "value": "abc123", "domain": ".example.com", "path": "/", "expires": 4_102_444_800.0 },
+        { "name": "__cf_bm", "value": "bm", "domain": ".example.com", "path": "/", "expires": -1 },
+        { "name": "cf_clearance", "value": "elsewhere", "domain": ".other.test", "path": "/", "expires": -1 }
+    ]))
+    .into_response()
+}
+
+async fn cookies_without_clearance(Path(_id): Path<String>) -> Json<Value> {
+    Json(json!([
+        { "name": "session", "value": "s", "domain": "example.com", "path": "/", "expires": -1 }
+    ]))
+}
+
+/// The browser context holds a `cf_clearance`, but for a different site.
+async fn cookies_clearance_for_other_site(Path(_id): Path<String>) -> Json<Value> {
+    Json(json!([
+        { "name": "cf_clearance", "value": "elsewhere", "domain": ".other.test", "path": "/", "expires": -1 }
+    ]))
+}
+
+/// Evaluate whose document is a challenge page (cookies present, but the html
+/// must veto the capture).
+async fn evaluate_challenge_html(Path(id): Path<String>, Json(body): Json<Value>) -> Json<Value> {
+    let expr = body["expression"].as_str().unwrap_or_default();
+    if expr == "navigator.userAgent" || expr.contains("location.href") {
+        return evaluate_with_ua(Path(id), Json(body)).await;
+    }
+    Json(
+        json!({ "ok": true, "result": CHALLENGE_HTML, "resultType": "string", "truncated": false }),
+    )
+}
+
+async fn spawn_cookie_mock(
+    evaluate_route: axum::routing::MethodRouter,
+    cookies_route: axum::routing::MethodRouter,
+) -> String {
+    let app = Router::new()
+        .route("/tabs", post(create_tab))
+        .route("/tabs/{id}/navigate", post(navigate))
+        .route("/tabs/{id}/wait", post(wait))
+        .route("/tabs/{id}/evaluate", evaluate_route)
+        .route("/tabs/{id}/cookies", cookies_route)
+        .route("/tabs/{id}", delete(close_tab))
+        .route("/health", get(health));
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        axum::serve(listener, app).await.unwrap();
+    });
+    format!("http://{addr}")
+}
+
+#[tokio::test]
+async fn clearance_cached_when_cf_clearance_present() {
+    use crw_renderer::clearance::ClearanceCache;
+    let base = spawn_cookie_mock(post(evaluate_with_ua), get(cookies_with_clearance)).await;
+    let cache = std::sync::Arc::new(ClearanceCache::with_defaults());
+    let renderer = CamofoxRenderer::new("camofox", &base, None, Duration::from_secs(10))
+        .with_clearance_cache(cache.clone());
+
+    renderer
+        .fetch(
+            "https://www.example.com/page",
+            &HashMap::new(),
+            None,
+            deadline(),
+        )
+        .await
+        .expect("fetch succeeds");
+
+    let entry = cache
+        .get("example.com")
+        .await
+        .expect("cf_clearance cached for the host");
+    assert_eq!(entry.user_agent, FIREFOX_UA);
+    // Only this site's cookies: the jar is context-wide, measured live.
+    assert_eq!(
+        entry.cookie_header("www.example.com"),
+        "cf_clearance=abc123; __cf_bm=bm"
+    );
+    assert_eq!(
+        entry.cookies.len(),
+        2,
+        "other sites' cookies are not stored"
+    );
+}
+
+#[tokio::test]
+async fn clearance_not_cached_without_cf_clearance() {
+    use crw_renderer::clearance::ClearanceCache;
+    let base = spawn_cookie_mock(post(evaluate_with_ua), get(cookies_without_clearance)).await;
+    let cache = std::sync::Arc::new(ClearanceCache::with_defaults());
+    let renderer = CamofoxRenderer::new("camofox", &base, None, Duration::from_secs(10))
+        .with_clearance_cache(cache.clone());
+
+    renderer
+        .fetch("https://example.com", &HashMap::new(), None, deadline())
+        .await
+        .expect("fetch succeeds");
+
+    assert!(cache.get("example.com").await.is_none());
+}
+
+/// The cookies endpoint returns every cookie in the browser context, so a
+/// clearance earned on another site must not be taken as this host's.
+#[tokio::test]
+async fn clearance_for_another_site_is_not_cached_for_this_host() {
+    use crw_renderer::clearance::ClearanceCache;
+    let base = spawn_cookie_mock(
+        post(evaluate_with_ua),
+        get(cookies_clearance_for_other_site),
+    )
+    .await;
+    let cache = std::sync::Arc::new(ClearanceCache::with_defaults());
+    let renderer = CamofoxRenderer::new("camofox", &base, None, Duration::from_secs(10))
+        .with_clearance_cache(cache.clone());
+
+    renderer
+        .fetch("https://example.com", &HashMap::new(), None, deadline())
+        .await
+        .expect("fetch succeeds");
+
+    assert!(cache.get("example.com").await.is_none());
+}
+
+#[tokio::test]
+async fn clearance_not_cached_on_challenge_html() {
+    use crw_renderer::clearance::ClearanceCache;
+    let base = spawn_cookie_mock(post(evaluate_challenge_html), get(cookies_with_clearance)).await;
+    let cache = std::sync::Arc::new(ClearanceCache::with_defaults());
+    let renderer = CamofoxRenderer::new("camofox", &base, None, Duration::from_secs(10))
+        .with_clearance_cache(cache.clone())
+        .with_challenge_wait(Duration::ZERO);
+
+    renderer
+        .fetch("https://example.com", &HashMap::new(), None, deadline())
+        .await
+        .expect("fetch returns the challenge html");
+
+    assert!(
+        cache.get("example.com").await.is_none(),
+        "a challenge page must not seed the cache"
+    );
+}
