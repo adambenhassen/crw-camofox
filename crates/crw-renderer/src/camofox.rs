@@ -232,9 +232,13 @@ impl CamofoxRenderer {
                 "camofox {path} returned {status}{detail}"
             )))
         };
-        match tokio::time::timeout(budget, fut).await {
-            Ok(Ok(())) => Ok(()),
-            Ok(Err(e)) if self.tab_left_blank(tab_id, deadline).await == Some(false) => {
+        let e = match tokio::time::timeout(budget, fut).await {
+            Ok(Ok(())) => return Ok(()),
+            Ok(Err(e)) => e,
+            Err(_) => return Err(CrwError::Timeout(budget.as_millis() as u64)),
+        };
+        match (e, self.tab_left_blank(tab_id, deadline).await) {
+            (e, Some(false)) => {
                 // camofox's navigate route builds an ARIA snapshot of the
                 // page after the navigation resolved (and after it recorded
                 // the navigation as successful), with its own 10 s timeout
@@ -251,8 +255,16 @@ impl CamofoxRenderer {
                 );
                 Ok(())
             }
-            Ok(Err(e)) => Err(e),
-            Err(_) => Err(CrwError::Timeout(budget.as_millis() as u64)),
+            // The browser answered and the tab never left about:blank: the page
+            // did not load. camofox-browser sanitizes the Firefox error
+            // (NS_ERROR_UNKNOWN_HOST, connection refused) to "Internal server
+            // error", so this is the only evidence. Say "navigation failed" so
+            // the ladder can pair it with the HTTP tier's `TargetUnreachable` and
+            // attribute a dead origin to the caller.
+            (CrwError::RendererError(msg), Some(true)) => Err(CrwError::RendererError(format!(
+                "camofox: navigation failed, page did not load: {msg}"
+            ))),
+            (e, _) => Err(e),
         }
     }
 

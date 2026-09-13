@@ -2649,6 +2649,37 @@ mod tests {
         );
     }
 
+    /// camofox reports a dead origin as a sanitized 500 on navigate with the tab
+    /// still blank; paired with the HTTP tier's `TargetUnreachable` that must
+    /// surface as 422, not camofox's 500.
+    #[tokio::test]
+    async fn unreachable_origin_beats_camofox_blank_tab_navigation_failure() {
+        let js = Arc::new(MockFetcher {
+            name: "camofox",
+            behavior: MockBehavior::Err(
+                "camofox: navigation failed, page did not load: camofox /tabs/t/navigate \
+                 returned 500 Internal Server Error: Internal server error"
+                    .to_string(),
+            ),
+        });
+        let mut r = make_renderer_with_mocks(vec![js]);
+        r.http = Arc::new(Unreachable);
+        r.render_js_default = None;
+
+        let err = r
+            .fetch(
+                "https://dead.example",
+                &HashMap::new(),
+                None,
+                None,
+                None,
+                tdl(),
+            )
+            .await
+            .expect_err("both tiers fail");
+        assert!(matches!(err, CrwError::TargetUnreachable(_)), "got {err:?}");
+    }
+
     #[tokio::test]
     async fn unreachable_origin_beats_js_renderer_error() {
         let js = Arc::new(MockFetcher {

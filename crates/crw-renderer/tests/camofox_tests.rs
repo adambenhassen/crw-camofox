@@ -557,6 +557,16 @@ async fn fetch_fails_when_navigate_failed_and_tab_stayed_blank() {
         .await
         .expect_err("a navigate failure with the tab still blank is a real failure");
     assert!(err.to_string().contains("navigate returned 500"), "{err}");
+    // camofox-browser sanitizes the Firefox error (NS_ERROR_UNKNOWN_HOST etc.)
+    // to "Internal server error", so the blank tab is the only evidence the
+    // page never loaded. The error must say so, or the ladder cannot attribute
+    // a dead origin to the caller (422) and books it as our 500.
+    assert!(
+        err.to_string()
+            .to_ascii_lowercase()
+            .contains("navigation failed"),
+        "a navigate that never left about:blank must read as a navigation failure: {err}"
+    );
 }
 
 /// A `/wait` that outlives the request deadline, so the evaluate after it finds
