@@ -633,4 +633,18 @@ mod tests {
         assert_eq!(AntibotSignal::Cloudflare.class_name(), "cloudflare");
         assert_eq!(AntibotSignal::None.class_name(), "none");
     }
+
+    /// `BlockOutcome::message()` words a structural failure differently from a
+    /// real vendor wall, and it selects on this exact string. The producer lives
+    /// here and the consumer lives in crw-core, which cannot depend on this
+    /// crate — so nothing but this test stops the two drifting apart. If they
+    /// do, the branch silently never fires and thin pages go back to being
+    /// reported as "Blocked by anti-bot".
+    #[test]
+    fn structural_failure_vendor_matches_classifier() {
+        assert_eq!(
+            AntibotSignal::StructuralFailure.class_name(),
+            crw_core::types::STRUCTURAL_FAILURE_VENDOR
+        );
+    }
 }

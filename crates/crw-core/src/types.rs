@@ -616,11 +616,33 @@ pub struct BlockOutcome {
     pub reason: String,
 }
 
+/// `AntibotSignal::StructuralFailure`'s `class_name()`. Not a vendor: it is the
+/// "we got a page but there is nothing usable in it" verdict, which the classifier
+/// keeps inside `AntibotSignal` because `is_blocked()` drives renderer escalation.
+/// See `message()` for why the customer-facing wording splits here.
+pub const STRUCTURAL_FAILURE_VENDOR: &str = "structural_failure";
+
 impl BlockOutcome {
     /// Standard anti-bot block error string shared by the v1 and v2 handlers so
     /// the two API surfaces label the same block identically.
+    ///
+    /// `structural_failure` is deliberately worded differently. It is not a
+    /// vendor wall — it fires on a thin or empty document (`antibot.rs` structural
+    /// arms), which is most often a broken TLS page, an error stub, or a JS shell
+    /// we could not hydrate. Reporting that as "Blocked by anti-bot" sent
+    /// customers to buy proxies and stealth for what was a certificate problem
+    /// (`wrong.host.badssl.com`: 21 visible characters, reported as a block).
+    ///
+    /// Wording only. The verdict stays inside `AntibotSignal`, `is_blocked()` is
+    /// untouched, and the escalation ladder behaves identically — a thin page must
+    /// still escalate to the next renderer tier, which is what `is_blocked()`
+    /// drives.
     pub fn message(&self) -> String {
-        format!("Blocked by anti-bot ({}): {}", self.vendor, self.reason)
+        if self.vendor == STRUCTURAL_FAILURE_VENDOR {
+            format!("No usable content could be extracted ({})", self.reason)
+        } else {
+            format!("Blocked by anti-bot ({}): {}", self.vendor, self.reason)
+        }
     }
 }
 
@@ -986,6 +1008,69 @@ mod tests {
     #[test]
     fn chrome_proxy_as_str() {
         assert_eq!(RendererKind::ChromeProxy.as_str(), "chrome_proxy");
+    }
+
+    #[test]
+    fn block_message_keeps_anti_bot_wording_for_a_real_vendor() {
+        let b = BlockOutcome {
+            vendor: "cloudflare".into(),
+            reason: "CF challenge".into(),
+        };
+        assert_eq!(
+            b.message(),
+            "Blocked by anti-bot (cloudflare): CF challenge"
+        );
+    }
+
+    /// A thin document is not a vendor wall. Reporting it as one sent customers
+    /// to buy proxies for what was a broken certificate — `wrong.host.badssl.com`
+    /// renders 21 visible characters and was labelled "Blocked by anti-bot".
+    #[test]
+    fn block_message_does_not_call_a_thin_page_a_block() {
+        let b = BlockOutcome {
+            // The LITERAL, not the constant. Building the fixture from
+            // `STRUCTURAL_FAILURE_VENDOR` would make this test pass even if the
+            // constant were a typo, since both sides would then be wrong
+            // together and the branch would silently never fire in production.
+            // The constant is pinned to its real producer separately, by
+            // `structural_failure_vendor_matches_classifier` in crw-extract.
+            vendor: "structural_failure".into(),
+            reason: "Structural: minimal_text on small page (500 bytes, 21 chars visible)".into(),
+        };
+        let m = b.message();
+        assert!(
+            !m.contains("Blocked by anti-bot"),
+            "structural failure must not read as a vendor block: {m}"
+        );
+        assert!(m.starts_with("No usable content could be extracted"), "{m}");
+        // The diagnostic detail still reaches the caller.
+        assert!(m.contains("21 chars visible"), "{m}");
+    }
+
+    /// Every other vendor string must keep the historical wording verbatim: it is
+    /// documented customer contract and is shared byte-for-byte with the
+    /// Firecrawl-compat surface.
+    #[test]
+    fn block_message_split_is_scoped_to_structural_failure_only() {
+        for vendor in [
+            "cloudflare",
+            "datadome",
+            "perimeterx",
+            "akamai",
+            "imperva",
+            "sucuri",
+            "kasada",
+            "vercel",
+            "network_security",
+            "rate_limited",
+            "generic_block",
+        ] {
+            let b = BlockOutcome {
+                vendor: vendor.into(),
+                reason: "r".into(),
+            };
+            assert_eq!(b.message(), format!("Blocked by anti-bot ({vendor}): r"));
+        }
     }
 }
 
