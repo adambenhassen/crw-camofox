@@ -238,20 +238,21 @@ pub(crate) async fn call_anthropic(
     };
 
     let client = shared_client();
-    let resp = client
-        .post(&url)
-        .header("x-api-key", &llm.api_key)
-        .header("anthropic-version", "2023-06-01")
-        .header("content-type", "application/json")
-        .json(&body)
-        .send()
-        .await
-        .map_err(|e| {
-            CrwError::ExtractionError(format!(
-                "Anthropic API request failed: {}",
-                crw_core::error::reqwest_message(e)
-            ))
-        })?;
+    let resp = crate::llm::send_provider_post(
+        client
+            .post(&url)
+            .header("x-api-key", &llm.api_key)
+            .header("anthropic-version", "2023-06-01")
+            .header("content-type", "application/json")
+            .json(&body),
+    )
+    .await
+    .map_err(|e| {
+        CrwError::ExtractionError(format!(
+            "Anthropic API request failed: {}",
+            crw_core::error::reqwest_message(e)
+        ))
+    })?;
 
     let status = resp.status();
     let text = resp.text().await.map_err(|e| {
@@ -488,19 +489,20 @@ pub(crate) async fn call_openai(
     };
 
     let client = shared_client();
-    let resp = client
-        .post(&url)
-        .header("Authorization", format!("Bearer {}", llm.api_key))
-        .header("content-type", "application/json")
-        .json(&body)
-        .send()
-        .await
-        .map_err(|e| {
-            CrwError::ExtractionError(format!(
-                "OpenAI API request failed: {}",
-                crw_core::error::reqwest_message(e)
-            ))
-        })?;
+    let resp = crate::llm::send_provider_post(
+        client
+            .post(&url)
+            .header("Authorization", format!("Bearer {}", llm.api_key))
+            .header("content-type", "application/json")
+            .json(&body),
+    )
+    .await
+    .map_err(|e| {
+        CrwError::ExtractionError(format!(
+            "OpenAI API request failed: {}",
+            crw_core::error::reqwest_message(e)
+        ))
+    })?;
 
     let status = resp.status();
     let text = resp.text().await.map_err(|e| {
