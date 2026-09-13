@@ -813,6 +813,12 @@ impl PageFetcher for HttpFetcher {
                 // property and no observed origin needs both.
                 Ok(Err(e))
                     if !use_proxy
+                        // Same rule as the 429 arm: `direct_rescue_used` means the
+                        // proxy already failed on this request, which is why we are
+                        // on direct. Going back to it spends the rest of the budget
+                        // on an egress known to be broken and reports its failure
+                        // instead of the origin refusing us.
+                        && !direct_rescue_used
                         && self.ratelimit_proxy_client.is_some()
                         && deadline.remaining() >= crate::MIN_TIER_BUDGET
                         && is_connection_failure(&e) =>
