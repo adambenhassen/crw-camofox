@@ -60,7 +60,7 @@ async fn crawl_reports_a_dead_origin_page_instead_of_dropping_it() {
         Some(crw_core::types::HTTP_ERROR_VENDOR)
     );
     assert!(
-        page.error.is_some(),
+        page.block.as_ref().is_some_and(|b| !b.reason.is_empty()),
         "the failure must carry a reason: {page:?}"
     );
 }

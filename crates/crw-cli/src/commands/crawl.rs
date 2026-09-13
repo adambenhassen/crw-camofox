@@ -130,7 +130,8 @@ pub async fn run(mut args: CrawlArgs) -> Result<(), CmdError> {
     };
 
     let crawl_req = CrawlRequest {
-        headers: Default::default(),
+        // No CLI flag for per-request headers, same as `crw scrape`.
+        headers: std::collections::HashMap::new(),
         url: args.url.clone(),
         max_depth: Some(args.depth),
         max_pages: Some(args.limit),
@@ -223,7 +224,19 @@ pub async fn run(mut args: CrawlArgs) -> Result<(), CmdError> {
         // Check if done
         match state.status {
             CrawlStatus::Completed => {
-                eprintln!("Crawl completed: {} pages", state.completed);
+                // `completed` counts every URL the crawl finished with, and
+                // that now includes the ones it could not read. Report the
+                // pages the caller actually got, and name the rest rather than
+                // folding them into the same number.
+                let scraped = state.completed.saturating_sub(state.blocked);
+                if state.blocked > 0 {
+                    eprintln!(
+                        "Crawl completed: {scraped} pages ({} unreadable)",
+                        state.blocked
+                    );
+                } else {
+                    eprintln!("Crawl completed: {scraped} pages");
+                }
                 break;
             }
             CrawlStatus::Failed => {

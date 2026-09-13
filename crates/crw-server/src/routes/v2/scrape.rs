@@ -283,7 +283,6 @@ mod tests {
             warnings: vec![],
             render_decision: None,
             credit_cost: 1,
-            error: None,
             metadata: PageMetadata {
                 title: None,
                 description: None,

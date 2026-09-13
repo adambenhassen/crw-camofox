@@ -566,8 +566,6 @@ pub struct ScrapeData {
     /// Credit cost attributed to this page (0 = not yet priced).
     #[serde(default, skip_serializing_if = "is_zero_u32")]
     pub credit_cost: u32,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub error: Option<String>,
     pub metadata: PageMetadata,
     /// Extraction debug trace; populated only when the request opts in.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -815,10 +813,13 @@ pub struct BlockOutcome {
 /// See `message()` for why the customer-facing wording splits here.
 pub const STRUCTURAL_FAILURE_VENDOR: &str = "structural_failure";
 
-/// `BlockOutcome::vendor` for "the origin answered with an error status and this
-/// is its error page". Not an anti-bot verdict, but the same consequence for the
-/// caller and for billing, and the crawl/batch surfaces have nowhere else to say
-/// it: they return an array of documents, not an envelope with an error code.
+/// `BlockOutcome::vendor` for an HTTP-level failure to get the page: the origin
+/// answered with an error status and this is its error page, its CDN answered
+/// that it could not reach the origin, or, on the crawl path, the request did
+/// not complete at all and `metadata.statusCode` is `0`. Not an anti-bot
+/// verdict, but the same consequence for the caller and for billing, and the
+/// crawl/batch surfaces have nowhere else to say it: they return an array of
+/// documents, not an envelope with an error code.
 pub const HTTP_ERROR_VENDOR: &str = "http_error";
 
 /// `BlockOutcome::vendor` for a registrar parking page, a domain-marketplace listing
@@ -965,7 +966,11 @@ pub struct CrawlRequest {
     /// every page fetched in this crawl. See `ScrapeRequest::country`.
     #[serde(default)]
     pub country: Option<String>,
-    /// Headers sent with every page fetch in the crawl.
+    /// Extra request headers applied to every page this crawl fetches, with the
+    /// same semantics as [`ScrapeRequest::headers`], including its warning: on
+    /// a browser render `Network.setExtraHTTPHeaders` decorates every request
+    /// the page makes, subresources included, so cross-origin-sensitive
+    /// credentials do not belong here.
     #[serde(default)]
     pub headers: std::collections::HashMap<String, String>,
 }
@@ -1040,7 +1045,6 @@ mod tests {
             warnings: vec!["blocked".into()],
             render_decision: None,
             credit_cost: 0,
-            error: None,
             metadata: PageMetadata {
                 title: None,
                 description: None,
@@ -1307,7 +1311,6 @@ mod tests {
             warnings: vec!["blocked".into()],
             render_decision: None,
             credit_cost: 0,
-            error: None,
             metadata: PageMetadata {
                 title: None,
                 description: None,
@@ -1390,6 +1393,23 @@ mod tests {
         let req: CrawlRequest = serde_json::from_value(json).unwrap();
         assert_eq!(req.render_js, Some(false));
         assert_eq!(req.wait_for, Some(1500));
+    }
+
+    #[test]
+    fn crawl_request_headers_round_trip_and_default_empty() {
+        let req: CrawlRequest = serde_json::from_value(serde_json::json!({
+            "url": "https://example.com",
+            "headers": { "X-Custom": "1", "User-Agent": "test" }
+        }))
+        .unwrap();
+        assert_eq!(req.headers.get("X-Custom"), Some(&"1".to_string()));
+        assert_eq!(req.headers.get("User-Agent"), Some(&"test".to_string()));
+
+        // Absent `headers` must stay an empty map, not a deserialize error, so
+        // every crawl body written before this field existed still parses.
+        let bare: CrawlRequest =
+            serde_json::from_value(serde_json::json!({ "url": "https://example.com" })).unwrap();
+        assert!(bare.headers.is_empty());
     }
 
     #[test]
@@ -2662,21 +2682,5 @@ mod search_engine_tests {
     fn search_request_empty_engines_string_is_none() {
         let r: SearchRequest = serde_json::from_str(r#"{"query":"rust","engines":""}"#).unwrap();
         assert!(r.engines.is_none());
-    }
-}
-
-#[cfg(test)]
-mod additional_tests {
-    use super::*;
-
-    #[test]
-    fn crawl_request_headers_round_trip() {
-        let json = serde_json::json!({
-            "url": "https://example.com",
-            "headers": { "X-Custom": "1", "User-Agent": "test" }
-        });
-        let req: CrawlRequest = serde_json::from_value(json).unwrap();
-        assert_eq!(req.headers.get("X-Custom"), Some(&"1".to_string()));
-        assert_eq!(req.headers.len(), 2);
     }
 }
