@@ -872,6 +872,15 @@ mod google_redirect_tests {
     use wiremock::matchers::{method, path};
     use wiremock::{Mock, MockServer, ResponseTemplate};
 
+    /// Item 12: the github engine's errors name the host it actually calls.
+    #[test]
+    fn github_api_base_is_the_rest_api_not_the_browser() {
+        let client =
+            CamofoxSearchClient::new("http://camofox:9377", None, None, Duration::from_secs(5));
+        assert_eq!(client.github_api_base(), "https://api.github.com");
+        assert_eq!(client.base_url(), "http://camofox:9377");
+    }
+
     #[test]
     fn google_redirect_links_are_recognised() {
         assert!(is_google_redirect(

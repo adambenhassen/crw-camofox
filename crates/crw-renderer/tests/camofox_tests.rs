@@ -1052,3 +1052,51 @@ async fn clearance_not_cached_on_challenge_html() {
         "a challenge page must not seed the cache"
     );
 }
+
+/// Evaluate whose document answers 404 in its Navigation Timing entry.
+async fn evaluate_not_found(Path(id): Path<String>, Json(body): Json<Value>) -> Json<Value> {
+    if body["expression"]
+        .as_str()
+        .is_some_and(|e| e.contains("performance.getEntriesByType"))
+    {
+        return Json(
+            json!({ "ok": true, "result": "404", "resultType": "string", "truncated": false }),
+        );
+    }
+    evaluate(Path(id), Json(body)).await
+}
+
+/// Item 3b: a camofox render reports the document's real HTTP status, not a
+/// synthetic 200.
+#[tokio::test]
+async fn fetch_reports_the_documents_real_status() {
+    let base = spawn_cookie_mock(post(evaluate_not_found), get(cookies_without_clearance)).await;
+    let renderer = CamofoxRenderer::new("camofox", &base, None, Duration::from_secs(10));
+
+    let result = renderer
+        .fetch(
+            "https://example.com/missing",
+            &HashMap::new(),
+            None,
+            deadline(),
+        )
+        .await
+        .expect("fetch succeeds");
+
+    assert_eq!(result.status_code, 404);
+}
+
+/// Without a usable status probe (an HTML answer, as older servers give for
+/// an unknown expression) the render keeps reporting 200, as before.
+#[tokio::test]
+async fn fetch_falls_back_to_200_when_the_status_probe_is_unusable() {
+    let base = spawn_camofox_mock().await;
+    let renderer = CamofoxRenderer::new("camofox", &base, None, Duration::from_secs(10));
+
+    let result = renderer
+        .fetch("https://example.com", &HashMap::new(), None, deadline())
+        .await
+        .expect("fetch succeeds");
+
+    assert_eq!(result.status_code, 200);
+}

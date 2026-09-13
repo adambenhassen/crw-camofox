@@ -18,6 +18,7 @@ struct Tier {
     name: &'static str,
     body: Result<String, String>,
     content_type: &'static str,
+    truncated: bool,
 }
 
 #[async_trait::async_trait]
@@ -44,7 +45,7 @@ impl PageFetcher for Tier {
             credit_cost: 0,
             warnings: Vec::new(),
             wall: None,
-            truncated: false,
+            truncated: self.truncated,
             deadline_exceeded: false,
             captured_responses: Vec::new(),
         })
@@ -68,6 +69,7 @@ fn tier(name: &'static str, body: Result<String, String>) -> Arc<dyn PageFetcher
         name,
         body,
         content_type: "text/html",
+        truncated: false,
     })
 }
 
@@ -192,6 +194,7 @@ async fn plain_text_body_ships_as_content() {
         name: "http",
         body: Ok(text.to_string()),
         content_type: "text/plain",
+        truncated: false,
     }) as Arc<dyn PageFetcher>;
     let r = renderer_with_http(
         http,
@@ -209,4 +212,21 @@ async fn plain_text_body_ships_as_content() {
         "{:?}",
         data.markdown
     );
+}
+
+/// Item 15: a render whose budget expired with nothing extracted fails as a
+/// timeout reporting the caller's budget, not the time spent.
+#[tokio::test]
+async fn empty_truncated_render_fails_with_the_requested_budget() {
+    let lightpanda = Arc::new(Tier {
+        name: "lightpanda",
+        body: Ok(String::new()),
+        content_type: "text/html",
+        truncated: true,
+    }) as Arc<dyn PageFetcher>;
+    let r = renderer(vec![lightpanda]);
+    match scrape(&r).await {
+        Err(CrwError::Timeout(ms)) => assert_eq!(ms, 30_000, "the requested budget"),
+        other => panic!("expected Timeout(30000), got {other:?}"),
+    }
 }
