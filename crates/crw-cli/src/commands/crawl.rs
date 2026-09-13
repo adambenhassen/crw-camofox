@@ -149,11 +149,16 @@ pub async fn run(mut args: CrawlArgs) -> Result<(), CmdError> {
         status: CrawlStatus::InProgress,
         total: 0,
         completed: 0,
+        blocked: 0,
         data: vec![],
         error: None,
     });
 
     // Spawn the crawl task
+    // The extraction knob the crawl has to match the single-scrape path on.
+    let crawl_extraction_cfg = crw_core::config::AppConfig::load()
+        .unwrap_or_default()
+        .extraction;
     let crawl_opts = CrawlOptions {
         id,
         req: crawl_req,
@@ -168,6 +173,7 @@ pub async fn run(mut args: CrawlArgs) -> Result<(), CmdError> {
         jitter_factor: 0.2,
         deadline_ms_per_page: args.timeout,
         per_host_max_concurrent: 1,
+        http_retry_threshold_bytes: crawl_extraction_cfg.http_retry_threshold_bytes,
     };
 
     let crawl_handle = tokio::spawn(async move {

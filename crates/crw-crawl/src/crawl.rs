@@ -44,6 +44,11 @@ pub struct CrawlOptions<'a> {
     /// Cap on concurrent in-flight requests per eTLD+1 host. `1` enforces
     /// strict politeness; raise via config when scraping owned infrastructure.
     pub per_host_max_concurrent: u32,
+    /// From `ExtractionConfig::http_retry_threshold_bytes`. `classify_block` takes
+    /// it, and a crawl that judged blocks differently from a single scrape of the
+    /// same URL would bill the customer for a wall on one surface and refund it
+    /// on the other.
+    pub http_retry_threshold_bytes: usize,
 }
 
 /// Validate that a URL is safe to fetch (scheme + host check).
@@ -59,6 +64,7 @@ fn send_failed(id: Uuid, state_tx: &tokio::sync::watch::Sender<CrawlState>, erro
         status: CrawlStatus::Failed,
         total: 0,
         completed: 0,
+        blocked: 0,
         data: vec![],
         error: Some(error),
     });
@@ -119,6 +125,7 @@ async fn run_crawl_inner(opts: CrawlOptions<'_>) {
         jitter_factor: _,
         deadline_ms_per_page,
         per_host_max_concurrent,
+        http_retry_threshold_bytes,
     } = opts;
 
     let max_depth = req.max_depth.unwrap_or(2).min(10);
@@ -201,6 +208,10 @@ async fn run_crawl_inner(opts: CrawlOptions<'_>) {
     // Why the most recent page could not be fetched. Reported only when no
     // page succeeded, so the crawl does not end as a success with zero pages.
     let mut last_fetch_error: Option<String> = None;
+    // How many completed pages came back a wall or an origin error page. The
+    // caller bills off `completed`, so it needs this to bill `completed - blocked`
+    // without walking the paginated array.
+    let mut blocked: u32 = 0;
 
     queue.push_back((req.url.clone(), 0));
     visited.insert(normalize_url(&req.url));
@@ -351,7 +362,69 @@ async fn run_crawl_inner(opts: CrawlOptions<'_>) {
         // POST /v1/change-tracking/diff, not inline here.
         data.content_type = fetch_result.content_type.clone();
 
+        // Same verdict a single scrape gets. Without this a crawl shipped the
+        // Cloudflare wall as the page's markdown, `success: true`, billed — the
+        // classifier was simply never called on this path.
+        //
+        // With one exception: `structural_failure` is not applied here. It means
+        // "we got a 200 and produced nothing", and `single::scrape_url` only
+        // reaches that verdict after a JS escalation has already failed to
+        // recover the page. A crawl does one fetch and no escalation, so the same
+        // verdict here would fail JS-hydrated pages that `/v1/scrape` recovers —
+        // the cross-surface divergence this change exists to remove, inverted.
+        data.block = crate::single::classify_block(
+            fetch_result.status_code,
+            fetch_result.content_type.as_deref(),
+            &fetch_result.html,
+            data.markdown.as_deref(),
+            http_retry_threshold_bytes,
+            &fetch_result.url,
+            fetch_result.final_url.as_deref(),
+        )
+        .filter(|b| b.vendor != crw_core::types::STRUCTURAL_FAILURE_VENDOR);
+        // The same two fallbacks `single::scrape_url` applies, so a crawled page
+        // and a single scrape of it get the same verdict: name the wall on an
+        // origin error page, then trust the renderer ladder's own wall verdict
+        // for a body no bigger than an error page.
+        if data.block.is_none() && data.http_error().is_some() {
+            data.block = crate::single::classify_error_page_wall(
+                fetch_result.status_code,
+                &fetch_result.html,
+            );
+        }
+        if data.block.is_none() && data.is_error_page_sized() {
+            data.block = fetch_result.wall.clone();
+        }
+        // An origin error page is not the page that was asked for either. One
+        // helper, so `/v1/scrape` and a crawl of the same URL agree. It is
+        // stamped onto `block` because a crawl returns documents, not an
+        // envelope with an error code — and the caller's billing filters on
+        // exactly this field.
+        let is_wall = data.block.is_some();
+        if !is_wall && let Some(reason) = data.http_error() {
+            data.block = Some(crw_core::types::BlockOutcome {
+                vendor: crw_core::types::HTTP_ERROR_VENDOR.to_string(),
+                reason,
+            });
+        }
+        if data.block.is_some() {
+            // Only a wall loses its body, matching `/v1/scrape`: there the
+            // challenge shell is dropped and the origin's error page is kept for
+            // the caller to read. Either way the page is marked and not billed.
+            if is_wall {
+                data.clear_body();
+            }
+            blocked += 1;
+        }
+
+        // Never send a refused page to the model. A wall dodges this by accident
+        // (`clear_body()` nulled the markdown); an origin error page keeps its
+        // body on purpose, so without the check a crawl with a `jsonSchema` over
+        // a 404-heavy site makes one real provider call per error page — pages
+        // that are then counted `blocked` and not billed, so we pay and nobody
+        // is charged.
         if let (Some(schema), Some(llm)) = (&req.json_schema, llm_config)
+            && data.block.is_none()
             && let Some(md) = &data.markdown
         {
             match crw_extract::structured::extract_structured_with_usage(md, schema, llm, None)
@@ -379,6 +452,7 @@ async fn run_crawl_inner(opts: CrawlOptions<'_>) {
             status: CrawlStatus::InProgress,
             total: visited.len() as u32,
             completed: results.len() as u32,
+            blocked,
             data: vec![],
             error: None,
         });
@@ -397,6 +471,7 @@ async fn run_crawl_inner(opts: CrawlOptions<'_>) {
         status: CrawlStatus::Completed,
         total: visited.len() as u32,
         completed: results.len() as u32,
+        blocked,
         data: results,
         error: None,
     });

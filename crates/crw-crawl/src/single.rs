@@ -880,7 +880,7 @@ fn change_tracking_mode_label(
 /// is safe where it is not ahead of the guard: the page already fails, and only
 /// its label changes. A structural verdict is not a wall, so it stays an HTTP
 /// error.
-fn classify_error_page_wall(status: u16, html: &str) -> Option<BlockOutcome> {
+pub(crate) fn classify_error_page_wall(status: u16, html: &str) -> Option<BlockOutcome> {
     let r = crw_extract::antibot::classify(Some(status), html);
     if !r.signal.is_blocked() || r.signal == crw_extract::antibot::AntibotSignal::StructuralFailure
     {
@@ -1179,7 +1179,7 @@ fn looks_like_parked_domain(markdown: &str, requested_url: &str, final_url: Opti
 ///    (anti-over-trigger): an accepted JS escalation guarantees markdown >=
 ///    `threshold`, so a stale block-shell `html` cannot mislabel it.
 /// 3. Reuse the trusted `crw_extract::antibot::classify` detector.
-fn classify_block(
+pub(crate) fn classify_block(
     status: u16,
     content_type: Option<&str>,
     html: &str,

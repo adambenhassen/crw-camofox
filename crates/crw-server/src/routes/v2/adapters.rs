@@ -129,6 +129,11 @@ pub struct V2CrawlStatus {
     pub status: &'static str,
     pub total: u32,
     pub completed: u32,
+    /// How many of `completed` came back a block or an origin error page.
+    /// Additive to the Firecrawl envelope (their SDKs ignore unknown keys) and
+    /// load-bearing: the SaaS bills off `completed`, and without this the
+    /// blocked-page billing fix would be inert on every `/v2` status surface.
+    pub blocked: u32,
     pub credits_used: u32,
     pub expires_at: String,
     /// Pagination cursor; `null` once the job is `completed` and no further
@@ -207,9 +212,16 @@ pub fn build_crawl_status(
         None
     };
 
+    // A blocked page is not billed, so it must not be counted here either.
+    // Note this is a lower bound rather than the exact charge on the batch path:
+    // `completed` also advances for a URL whose scrape returned `Err` and pushed
+    // no document, and the SaaS bills `completed - blocked`. Pre-existing; fixing
+    // it means changing what `completed` counts, which the job-completion gate
+    // depends on.
     let credits_used: u32 = state
         .data
         .iter()
+        .filter(|d| d.block.is_none())
         .map(|d| if d.credit_cost == 0 { 1 } else { d.credit_cost })
         .sum();
 
@@ -218,6 +230,7 @@ pub fn build_crawl_status(
         status: status_str(state.status),
         total: state.total.max(total_docs as u32),
         completed: state.completed,
+        blocked: state.blocked,
         credits_used,
         expires_at: expires_at_rfc3339(created_at, job_ttl_secs),
         next,
@@ -326,6 +339,7 @@ mod tests {
             status,
             total,
             completed,
+            blocked: 0,
             data: (0..n)
                 .map(|i| fake_doc(&format!("https://x/{i}")))
                 .collect(),

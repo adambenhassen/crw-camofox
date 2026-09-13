@@ -1588,6 +1588,13 @@ pub struct CrawlState {
     pub status: CrawlStatus,
     pub total: u32,
     pub completed: u32,
+    /// How many of `completed` came back a block or an origin error page rather
+    /// than the requested page. Counted here because a caller billing per page
+    /// reads this envelope, not the paginated `data` array — and a walled page
+    /// must not be charged. Additive: `#[serde(default)]` keeps an older client
+    /// and an older engine interoperable in both directions.
+    #[serde(default)]
+    pub blocked: u32,
     pub data: Vec<ScrapeData>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
