@@ -55,7 +55,14 @@ regex = "1"
 # dep of `crw-extract` only, behind its default-on `pdf` feature. No system
 # libraries — preserves the single-static-binary story. The open-core
 # boundary gate asserts lopdf/ttf-parser are ABSENT when `pdf` is disabled.
-pdf-inspector = "0.1"
+#
+# Was held at 0.1.6 because 0.1.7 gutted pages 6-11 of arXiv 1412.6980. Measured
+# again over 29 real PDFs (papers, IRS forms, RFCs, 10-K, the 756-page PDF spec)
+# scoring word recall against poppler as ground truth: 1.17.0 reaches 98.15% vs
+# 0.1.6's 97.72%, better on 23 of 29 documents, and every page of 1412.6980 now
+# comes back at 97-100%. The raw character count drops slightly only because
+# 1.17.0 rejoins hyphenated line breaks and stops duplicating table rows.
+pdf-inspector = "=1.17.0"
 
 # Diffing (change-tracking / monitor). Myers diff over lines; the parse-diff
 # AST and the unified text surface are both derived from its op stream.
@@ -99,7 +106,7 @@ uuid = { version = "1", features = ["v4", "serde"] }
 url = { version = "2", features = ["serde"] }
 sha2 = "0.10"
 hex = "0.4"
-base64 = "0.22"
+base64 = "0.23"
 
 # Self-host monitor mode (feature-gated, default OFF). These are optional deps
 # of `crw-monitor` only and MUST NOT leak into the default `crw-server` build —
