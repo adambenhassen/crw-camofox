@@ -754,11 +754,16 @@ fn build_auth_response(request_id: &str, creds: Option<(&str, &str)>) -> serde_j
 /// This pump answers `Fetch.authRequired` only. `Fetch.requestPaused` is owned
 /// by [`run_intercept_pump`], which now runs on every navigation, so answering
 /// paused requests here too would double-continue them.
+///
+/// A failed `Fetch.continueWithAuth` leaves that request paused until the
+/// navigation times out, so the first failure is kept in `auth_failed` for
+/// [`attribute_auth_failure`] to name.
 async fn run_auth_pump(
     conn: &CdpConnection,
     mut rx: broadcast::Receiver<CdpEvent>,
     creds: Option<(String, String)>,
     session_id: &str,
+    auth_failed: &StdMutex<Option<String>>,
 ) {
     let cmd_timeout = Duration::from_secs(2);
     loop {
@@ -784,14 +789,32 @@ async fn run_auth_pump(
         }
         let creds_ref = creds.as_ref().map(|(u, p)| (u.as_str(), p.as_str()));
         let payload = build_auth_response(&request_id, creds_ref);
-        let _ = conn
+        if let Err(e) = conn
             .send_recv(
                 "Fetch.continueWithAuth",
                 payload,
                 Some(session_id),
                 cmd_timeout,
             )
-            .await;
+            .await
+        {
+            tracing::warn!(error = %e, "CDP: could not answer a proxy authentication challenge");
+            if let Ok(mut slot) = auth_failed.lock() {
+                slot.get_or_insert_with(|| e.to_string());
+            }
+        }
+    }
+}
+
+/// A timeout after an unanswered proxy authentication challenge is that
+/// failure, not a slow page: the challenged request stayed paused until the
+/// budget ran out. Other errors pass through unchanged.
+fn attribute_auth_failure(err: CrwError, auth_failed: Option<String>) -> CrwError {
+    match (err, auth_failed) {
+        (CrwError::Timeout(ms), Some(reason)) => CrwError::RendererError(format!(
+            "proxy authentication could not be answered ({reason}); timed out after {ms}ms"
+        )),
+        (err, _) => err,
     }
 }
 
@@ -2599,9 +2622,15 @@ impl CdpRenderer {
             &outbound_ctx,
             &outstanding,
         );
+        let auth_failed: StdMutex<Option<String>> = StdMutex::new(None);
         let outcome = if auth_active {
-            let auth_pump =
-                run_auth_pump(conn, conn.subscribe(), effective_creds.clone(), &session_id);
+            let auth_pump = run_auth_pump(
+                conn,
+                conn.subscribe(),
+                effective_creds.clone(),
+                &session_id,
+                &auth_failed,
+            );
             tokio::select! {
                 biased;
                 res = work => res,
@@ -2701,6 +2730,8 @@ impl CdpRenderer {
             }
             other => other,
         };
+        let auth_failure = || auth_failed.lock().ok().and_then(|slot| slot.clone());
+        let outcome = outcome.map_err(|e| attribute_auth_failure(e, auth_failure()));
 
         // Capture final URL after any redirects, before tearing down the target.
         // Best-effort: failures map to None and never propagate.
@@ -2716,7 +2747,10 @@ impl CdpRenderer {
         let (html, status_code, truncated) = outcome?;
 
         if html.is_empty() && truncated {
-            return Err(CrwError::Timeout(nav_budget.as_millis() as u64));
+            return Err(attribute_auth_failure(
+                CrwError::Timeout(nav_budget.as_millis() as u64),
+                auth_failure(),
+            ));
         }
 
         if !truncated
@@ -2890,9 +2924,35 @@ fn is_spa_text_ready(text_len: i64) -> bool {
 #[cfg(test)]
 mod tests {
     use super::{
-        CdpRenderer, build_auth_response, is_content_stable, lightpanda_safe_ua,
-        outbound_block_label,
+        CdpRenderer, attribute_auth_failure, build_auth_response, is_content_stable,
+        lightpanda_safe_ua, outbound_block_label,
     };
+    use crw_core::error::CrwError;
+
+    #[test]
+    fn timeout_after_unanswered_proxy_auth_names_the_auth_failure() {
+        let e = attribute_auth_failure(
+            CrwError::Timeout(2500),
+            Some("CDP command timed out".into()),
+        );
+        match e {
+            CrwError::RendererError(msg) => {
+                assert!(msg.contains("proxy authentication"), "{msg}");
+                assert!(msg.contains("CDP command timed out"), "{msg}");
+            }
+            other => panic!("expected RendererError, got {other:?}"),
+        }
+        // No auth failure: a timeout stays a timeout.
+        assert!(matches!(
+            attribute_auth_failure(CrwError::Timeout(2500), None),
+            CrwError::Timeout(2500)
+        ));
+        // Other errors are not re-attributed.
+        assert!(matches!(
+            attribute_auth_failure(CrwError::RendererError("x".into()), Some("y".into())),
+            CrwError::RendererError(m) if m == "x"
+        ));
+    }
 
     #[test]
     fn budget_truncated_warning_names_the_tier_that_ran_out() {
