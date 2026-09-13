@@ -45,6 +45,7 @@ pub mod camofox;
 pub mod cdp;
 #[cfg(feature = "cdp")]
 pub mod cdp_conn;
+pub mod clearance;
 pub mod detector;
 pub mod egress;
 #[cfg(feature = "cdp")]
