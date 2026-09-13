@@ -344,6 +344,26 @@ impl CamofoxRenderer {
         ))
     }
 
+    /// The HTTP status of the tab's document, or `None` when the probe fails
+    /// or the browser does not report one.
+    async fn nav_status(&self, tab_id: &str, deadline: Deadline) -> Option<u16> {
+        match self
+            .post_decode_within::<EvaluateResponse>(
+                &format!("/tabs/{tab_id}/evaluate"),
+                json!({ "userId": USER_ID, "expression": NAV_STATUS_EXPR }),
+                deadline.remaining().min(Duration::from_secs(5)),
+                deadline,
+            )
+            .await
+        {
+            Ok(r) => parse_nav_status(r.result.as_deref()),
+            Err(e) => {
+                tracing::debug!(tab_id, error = %e, "camofox: navigation status probe failed");
+                None
+            }
+        }
+    }
+
     /// Retrieve the document's outerHTML in slices, for pages whose HTML
     /// exceeds camofox's single-result cap. Slices are taken by UTF-16 offset
     /// (JS string semantics); the expression never ends a slice on a lone
@@ -533,6 +553,20 @@ async fn error_detail(resp: reqwest::Response) -> String {
 const TAB_LOCATION_EXPR: &str = "(/^about:(neterror|certerror|blocked)/.test(document.documentURI) \
      ? document.documentURI : location.href)";
 
+/// The document's HTTP status from its Navigation Timing entry. camofox-browser's
+/// navigate route returns no status, but Firefox records it here: `404` for a
+/// GitHub not-found page, measured live. `0` when there is no entry.
+const NAV_STATUS_EXPR: &str =
+    "String((performance.getEntriesByType('navigation')[0] || {}).responseStatus || 0)";
+
+fn parse_nav_status(result: Option<&str>) -> Option<u16> {
+    result?
+        .trim()
+        .parse::<u16>()
+        .ok()
+        .filter(|s| (100..=599).contains(s))
+}
+
 /// What the tab is showing, from [`TAB_LOCATION_EXPR`].
 #[derive(Debug, PartialEq, Eq)]
 enum TabLocation {
@@ -636,6 +670,9 @@ impl PageFetcher for CamofoxRenderer {
             return Err(e);
         }
 
+        // Best-effort: without it the page is reported as a 200, as before.
+        let status_code = self.nav_status(&tab_id, deadline).await.unwrap_or(200);
+
         // 4. Evaluate the rendered DOM, send + body decode bounded by the budget.
         //    A document larger than camofox's 1 MiB result cap comes back as a
         //    placeholder; fetch those in slices instead of treating the
@@ -668,16 +705,15 @@ impl PageFetcher for CamofoxRenderer {
 
         // The camofox-browser REST API exposes only `tabId` and the evaluated
         // `result` — it returns no navigation status code, final URL, or response
-        // content-type. So these three are best-effort synthetic values, NOT
-        // observed from the wire: a camofox-rendered 404 or redirect is reported
-        // here as a 200. Downstream anti-bot/block classification still runs on
-        // the returned `html` (see crw_crawl::single::classify_block), which is
-        // the real signal for this tier; surfacing true status/final_url needs an
-        // API that returns them.
+        // content-type. The status comes from the page's Navigation Timing entry
+        // (`nav_status`); final URL and content-type are synthetic, NOT observed
+        // from the wire: a camofox-rendered redirect is reported without its
+        // final URL. Downstream anti-bot/block classification still runs on the
+        // returned `html` (see crw_crawl::single::classify_block).
         Ok(FetchResult {
             url: url.to_string(),
             final_url: None,
-            status_code: 200,
+            status_code,
             html,
             content_type: Some("text/html".to_string()),
             raw_bytes: None,
@@ -716,7 +752,18 @@ impl PageFetcher for CamofoxRenderer {
 
 #[cfg(test)]
 mod tests {
-    use super::TabLocation;
+    use super::{TabLocation, parse_nav_status};
+
+    #[test]
+    fn nav_status_reads_the_document_status() {
+        assert_eq!(parse_nav_status(Some("404")), Some(404));
+        assert_eq!(parse_nav_status(Some("200")), Some(200));
+        // No navigation entry, or a browser without `responseStatus`.
+        assert_eq!(parse_nav_status(Some("0")), None);
+        assert_eq!(parse_nav_status(Some("undefined")), None);
+        assert_eq!(parse_nav_status(None), None);
+        assert_eq!(parse_nav_status(Some("<html></html>")), None);
+    }
 
     #[test]
     fn tab_location_reads_firefox_error_pages() {
