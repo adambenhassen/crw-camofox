@@ -426,75 +426,89 @@ async fn scrape_url_inner(
                     // is a soft signal, not a content gate.
                     let js_status = js_fetch.status_code;
                     let js_warning = derive_target_warning(&js_fetch);
-                    if let Ok(js_data) =
-                        crate::extract_pool::extract_offloaded(build_owned_extract_input(
-                            &js_fetch,
-                            req,
-                            extraction_cfg,
-                            debug_enabled,
-                            debug_sink.clone(),
-                        ))
-                        .await
+                    match crate::extract_pool::extract_offloaded(build_owned_extract_input(
+                        &js_fetch,
+                        req,
+                        extraction_cfg,
+                        debug_enabled,
+                        debug_sink.clone(),
+                    ))
+                    .await
                     {
-                        let js_md_len = js_data
-                            .markdown
-                            .as_deref()
-                            .map(|s| s.trim().len())
-                            .unwrap_or(0);
-                        let js_md_quality = js_data
-                            .markdown
-                            .as_deref()
-                            .map(crw_extract::quality::analyze_md_only);
-                        let js_score = js_md_quality.as_ref().map(|q| q.score).unwrap_or(0.0);
-                        let before_score = md_quality.as_ref().map(|q| q.score).unwrap_or(0.0);
-                        let http_was_thin = md_is_byte_thin;
-                        let accept = accept_js_escalation(
-                            md_bytes,
-                            http_was_thin,
-                            before_score,
-                            js_md_len,
-                            js_score,
-                            retry_threshold,
-                        );
-                        if accept {
-                            data = js_data;
-                            // `classify_block` below reads `fetch_result.html`, and
-                            // leaving the DISCARDED tier's shell there means a
-                            // challenge we just solved still carries `_cf_chl_opt`
-                            // into CF_STRONG_MARKERS — which runs ahead of the
-                            // markdown guard and would clear the page this
-                            // escalation just recovered. `content_type` is
-                            // deliberately NOT swapped: browser tiers leave it
-                            // `None`, and it is read later for `data.content_type`.
-                            fetch_result.html = std::mem::take(&mut js_fetch.html);
-                            // Replace the original "Target returned 4xx" with the JS
-                            // fetch's warning (which is None for a clean 2xx render),
-                            // so a successful escalation doesn't leak the original
-                            // soft-block status into the response top-level warning.
-                            effective_warning = js_warning;
-                            tracing::info!(
+                        Err(e) => {
+                            tracing::warn!(
                                 url = %req.url,
-                                from_status = fetch_result.status_code,
-                                to_status = js_status,
-                                md_len = js_md_len,
-                                quality_score_before = before_score,
-                                quality_score_after = js_score,
-                                "JS escalation recovered content"
+                                "JS escalation rendered the page but extraction failed, keeping the prior tier's result: {e}"
                             );
-                        } else {
-                            tracing::info!(
-                                url = %req.url,
+                        }
+                        Ok(js_data) => {
+                            let js_md_len = js_data
+                                .markdown
+                                .as_deref()
+                                .map(|s| s.trim().len())
+                                .unwrap_or(0);
+                            let js_md_quality = js_data
+                                .markdown
+                                .as_deref()
+                                .map(crw_extract::quality::analyze_md_only);
+                            let js_score = js_md_quality.as_ref().map(|q| q.score).unwrap_or(0.0);
+                            let before_score = md_quality.as_ref().map(|q| q.score).unwrap_or(0.0);
+                            let http_was_thin = md_is_byte_thin;
+                            let accept = accept_js_escalation(
                                 md_bytes,
+                                http_was_thin,
+                                before_score,
                                 js_md_len,
-                                before = before_score,
-                                after = js_score,
-                                "JS escalation added no content, keeping the prior tier's result",
+                                js_score,
+                                retry_threshold,
                             );
+                            if accept {
+                                data = js_data;
+                                // `classify_block` below reads `fetch_result.html`, and
+                                // leaving the DISCARDED tier's shell there means a
+                                // challenge we just solved still carries `_cf_chl_opt`
+                                // into CF_STRONG_MARKERS — which runs ahead of the
+                                // markdown guard and would clear the page this
+                                // escalation just recovered. `content_type` is
+                                // deliberately NOT swapped: browser tiers leave it
+                                // `None`, and it is read later for `data.content_type`.
+                                fetch_result.html = std::mem::take(&mut js_fetch.html);
+                                // Replace the original "Target returned 4xx" with the JS
+                                // fetch's warning (which is None for a clean 2xx render),
+                                // so a successful escalation doesn't leak the original
+                                // soft-block status into the response top-level warning.
+                                effective_warning = js_warning;
+                                tracing::info!(
+                                    url = %req.url,
+                                    from_status = fetch_result.status_code,
+                                    to_status = js_status,
+                                    md_len = js_md_len,
+                                    quality_score_before = before_score,
+                                    quality_score_after = js_score,
+                                    "JS escalation recovered content"
+                                );
+                            } else {
+                                tracing::info!(
+                                    url = %req.url,
+                                    md_bytes,
+                                    js_md_len,
+                                    before = before_score,
+                                    after = js_score,
+                                    "JS escalation added no content, keeping the prior tier's result",
+                                );
+                            }
                         }
                     }
                 }
                 Err(e) => {
                     tracing::warn!(url = %req.url, "JS escalation after empty markdown failed: {e}");
+                    // The caller gets the thin prior page; say why it is not the
+                    // rendered one.
+                    let failed = format!("{} {e}", crw_renderer::JS_ESCALATION_FAILED);
+                    effective_warning = Some(match effective_warning {
+                        Some(w) => format!("{w}; {failed}"),
+                        None => failed,
+                    });
                 }
             }
         }
@@ -569,7 +583,8 @@ async fn scrape_url_inner(
             elapsed_ms = fetch_result.elapsed_ms,
             "render budget expired with no extractable content; failing instead of returning an empty page"
         );
-        return Err(crw_core::error::CrwError::Timeout(fetch_result.elapsed_ms));
+        // The caller's budget, not the elapsed time: see `Deadline::requested_ms`.
+        return Err(crw_core::error::CrwError::Timeout(deadline.requested_ms()));
     }
 
     // Phase 4: LLM structured extraction
