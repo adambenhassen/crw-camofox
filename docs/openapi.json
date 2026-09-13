@@ -397,7 +397,7 @@
           "url":      { "type": "string", "format": "uri" },
           "maxPages": { "type": "integer", "minimum": 1, "default": 100 },
           "maxDepth": { "type": "integer", "minimum": 0, "default": 2 },
-          "headers":  { "type": "object", "additionalProperties": { "type": "string" }, "description": "Custom HTTP request headers applied to every page the crawl fetches over HTTP. A User-Agent here overrides the default." },
+          "headers":  { "type": "object", "additionalProperties": { "type": "string" }, "description": "Custom HTTP request headers applied to every page the crawl fetches, on the HTTP and LightPanda render paths (camofox renders do not apply them). A User-Agent here overrides the default." },
           "scrapeOptions": { "$ref": "#/components/schemas/ScrapeOptions" }
         }
       },
