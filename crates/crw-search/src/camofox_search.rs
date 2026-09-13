@@ -619,7 +619,14 @@ impl CamofoxSearchClient {
             .to_str()
             .ok()?;
         let target = url::Url::parse(location).ok()?;
-        matches!(target.scheme(), "http" | "https").then(|| target.to_string())
+        // Google answers a rate-limited or cookieless request with a redirect to
+        // its own interstitial, which is not the result.
+        let interstitial = match target.host_str() {
+            Some("consent.google.com") => true,
+            Some("www.google.com" | "google.com") => target.path().starts_with("/sorry"),
+            _ => false,
+        };
+        (matches!(target.scheme(), "http" | "https") && !interstitial).then(|| target.to_string())
     }
 
     /// Search GitHub repositories via the REST Search API. Used instead of the
@@ -946,6 +953,14 @@ mod google_redirect_tests {
             .respond_with(ResponseTemplate::new(200))
             .mount(&server)
             .await;
+        Mock::given(method("GET"))
+            .and(path("/sorry"))
+            .respond_with(ResponseTemplate::new(302).insert_header(
+                "location",
+                "https://www.google.com/sorry/index?continue=https://www.google.com/goto",
+            ))
+            .mount(&server)
+            .await;
 
         let client = CamofoxSearchClient::new("http://unused", None, None, Duration::from_secs(5));
         let base = server.uri();
@@ -965,6 +980,11 @@ mod google_redirect_tests {
             None
         );
         assert_eq!(client.resolve_redirect(&format!("{base}/ok")).await, None);
+        // A rate-limit interstitial is not the result.
+        assert_eq!(
+            client.resolve_redirect(&format!("{base}/sorry")).await,
+            None
+        );
     }
 }
 
