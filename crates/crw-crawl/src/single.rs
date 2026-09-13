@@ -318,21 +318,50 @@ async fn scrape_url_inner(
 
         let escalate_for_quality =
             !md_is_byte_thin && md_is_low_quality && fetch_result.html.len() > 5000;
+        // If the prior tier was lightpanda (returned 200 with thin/no content that
+        // fooled the renderer-level thinness check), escalate to the next tier the
+        // pool holds. A pinned name the pool does not hold is a hard error, so the
+        // old literal "chrome" failed every escalation on this fork's ladder and
+        // camofox was never reached. `None` means there is nothing above
+        // lightpanda: skip rather than dispatch, because "auto" would re-render the
+        // same tier for the same thin result.
+        // Otherwise (http tier), pass the caller's pin through, or `None` so the
+        // chain decides.
+        let escalation_target: Option<&str> = if prior_renderer == Some("lightpanda") {
+            renderer.lightpanda_escalation_target()
+        } else {
+            pinned
+        };
+        let has_escalation_target =
+            escalation_target.is_some() || prior_renderer != Some("lightpanda");
         let should_escalate = (md_is_byte_thin || escalate_for_quality)
             && used_low_tier
             && should_escalate_status
-            && escalation_eligible;
+            && escalation_eligible
+            && has_escalation_target;
+        if (md_is_byte_thin || escalate_for_quality)
+            && used_low_tier
+            && should_escalate_status
+            && escalation_eligible
+            && !has_escalation_target
+        {
+            tracing::debug!(
+                url = %req.url,
+                pool = ?renderer.js_renderer_names(),
+                "skipping JS escalation: no tier above lightpanda in this pool"
+            );
+            // Say so on the response as well. The thin body ships as a success,
+            // and without this nothing tells the operator the deployment has no
+            // stronger tier to render the page with.
+            let skip_warning = "JS escalation skipped: no camofox tier is configured above \
+                                lightpanda; add one for full SPA rendering"
+                .to_string();
+            effective_warning = Some(match effective_warning {
+                Some(w) => format!("{w}; {skip_warning}"),
+                None => skip_warning,
+            });
+        }
         if should_escalate {
-            // If the prior tier was lightpanda (returned 200 with thin/no content
-            // that fooled the renderer-level thinness check), force chrome on the
-            // escalation. Falling back to "auto" would just hit lightpanda again.
-            // Otherwise (http tier), let the chain decide so chrome can be reached
-            // through the existing failover path.
-            let escalation_target: Option<&str> = if prior_renderer == Some("lightpanda") {
-                Some("chrome")
-            } else {
-                pinned
-            };
             let quality_score_before = md_quality.as_ref().map(|q| q.score);
             tracing::info!(
                 url = %req.url,

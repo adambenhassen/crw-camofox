@@ -478,6 +478,20 @@ impl FallbackRenderer {
         self.js_renderers.iter().map(|r| r.name()).collect()
     }
 
+    /// Which tier a post-LightPanda escalation should aim at, or `None` when
+    /// this pool has nothing above lightpanda and the escalation should be
+    /// skipped rather than dispatched.
+    ///
+    /// A pinned name the pool does not hold is a hard error, not a fallback, so
+    /// the target must come from the tiers actually constructed. On this fork
+    /// that is camofox when configured.
+    pub fn lightpanda_escalation_target(&self) -> Option<&str> {
+        self.js_renderers
+            .iter()
+            .map(|r| r.name())
+            .find(|name| *name != "lightpanda")
+    }
+
     /// Fetch a URL with smart mode: HTTP first, then JS if needed.
     ///
     /// When `render_js` is `None` (auto-detect), the renderer also escalates to
@@ -1494,6 +1508,48 @@ mod tests {
         let r = FallbackRenderer::new(&cfg, "crw-test", None, &StealthConfig::default()).unwrap();
         assert!(r.js_renderer_names().is_empty());
         assert_eq!(r.render_js_default, None);
+    }
+
+    /// The escalation after a thin LightPanda body must name a tier the pool
+    /// holds. Pinning a name it does not hold is a hard error, so the old
+    /// literal "chrome" failed every escalation on this fork's ladder.
+    #[cfg(all(feature = "cdp", feature = "camofox"))]
+    #[test]
+    fn lightpanda_escalation_target_picks_a_tier_the_pool_actually_holds() {
+        let target = |cfg: &RendererConfig| {
+            let r =
+                FallbackRenderer::new(cfg, "crw-test", None, &StealthConfig::default()).unwrap();
+            r.lightpanda_escalation_target().map(str::to_string)
+        };
+        let lp = || {
+            Some(CdpEndpoint {
+                ws_url: "ws://127.0.0.1:9222/".into(),
+            })
+        };
+
+        // Fork ladder: lightpanda then camofox. The escalation lands on camofox.
+        assert_eq!(
+            target(&RendererConfig {
+                mode: RendererMode::Auto,
+                lightpanda: lp(),
+                camofox: Some(crw_core::config::CamofoxEndpoint {
+                    base_url: "http://127.0.0.1:9377".into(),
+                    api_key: None,
+                }),
+                ..Default::default()
+            }),
+            Some("camofox".to_string())
+        );
+
+        // Nothing above lightpanda: no target, so no unsatisfiable pin.
+        assert_eq!(
+            target(&RendererConfig {
+                mode: RendererMode::Auto,
+                lightpanda: lp(),
+                ..Default::default()
+            }),
+            None
+        );
     }
 
     #[test]
