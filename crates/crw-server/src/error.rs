@@ -45,6 +45,7 @@ impl IntoResponse for AppError {
             CrwError::HttpError(_) => StatusCode::BAD_GATEWAY,
             CrwError::TargetUnreachable(_) => StatusCode::UNPROCESSABLE_ENTITY,
             CrwError::ExtractionError(_) => StatusCode::UNPROCESSABLE_ENTITY,
+            CrwError::UnsupportedContentType(_) => StatusCode::UNPROCESSABLE_ENTITY,
             CrwError::RateLimited => StatusCode::TOO_MANY_REQUESTS,
             CrwError::SearchDisabled(_) => StatusCode::SERVICE_UNAVAILABLE,
             _ => StatusCode::INTERNAL_SERVER_ERROR,
@@ -72,6 +73,16 @@ mod tests {
         assert_eq!(
             status_for(CrwError::InvalidRequest("bad".into())),
             StatusCode::BAD_REQUEST
+        );
+    }
+
+    #[test]
+    fn app_error_unsupported_content_type_422_not_500() {
+        // Must be an explicit arm: the `_` fallback would report a .docx as a
+        // 500, blaming the server for the origin's media type.
+        assert_eq!(
+            status_for(CrwError::UnsupportedContentType("application/zip".into())),
+            StatusCode::UNPROCESSABLE_ENTITY
         );
     }
 

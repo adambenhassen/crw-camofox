@@ -672,7 +672,7 @@ impl PageFetcher for HttpFetcher {
             .get("content-type")
             .and_then(|v| v.to_str().ok())
             .map(|s| s.to_string());
-        let content_type = content_type_header
+        let mut content_type = content_type_header
             .as_deref()
             .map(|s| s.split(';').next().unwrap_or(s).trim().to_lowercase());
         // Charset from the Content-Type header (P1-1): pages served as Latin-1 /
@@ -705,8 +705,29 @@ impl PageFetcher for HttpFetcher {
             )));
         }
 
-        let (html, raw_bytes) = if is_pdf {
+        // Route on the actual bytes, not only on the declared type. Keying the
+        // PDF branch on `content_type == "application/pdf"` and treating
+        // EVERYTHING else as text means a body that is neither HTML nor a
+        // correctly-labelled PDF gets UTF-8-lossy'd and handed to the HTML
+        // extractor: a .docx/.xlsx/.pptx comes back as `markdown` beginning
+        // "PK\u{3}\u{4}...[Content_Types].xml" under `success: true`, which a
+        // caller cannot tell apart from a real scrape.
+        let sniffed_pdf = bytes.starts_with(b"%PDF-");
+        if sniffed_pdf && !is_pdf {
+            // A PDF served as octet-stream (or text/html). Relabel it so the
+            // downstream PDF branch in crw-crawl — which gates on the same
+            // content type — engages, instead of extracting an empty body.
+            content_type = Some("application/pdf".to_string());
+        }
+        let (html, raw_bytes) = if is_pdf || sniffed_pdf {
             (String::new(), Some(bytes.to_vec()))
+        } else if looks_binary(&bytes, header_charset.as_deref()) {
+            return Err(CrwError::UnsupportedContentType(format!(
+                "{} ({} bytes): not HTML and not a PDF, \
+                 so there is nothing to extract",
+                content_type.as_deref().unwrap_or("no content-type"),
+                bytes.len()
+            )));
         } else {
             (decode_html_bytes(&bytes, header_charset.as_deref()), None)
         };
@@ -792,6 +813,24 @@ fn sniff_meta_charset(bytes: &[u8]) -> Option<String> {
     (!label.is_empty()).then(|| label.to_string())
 }
 
+/// True when a response body is binary rather than text. A NUL byte in the
+/// first 1KB is the standard heuristic (it is the one git uses): no HTML, JSON,
+/// XML, CSV or plain-text document in a single-byte or UTF-8 encoding carries
+/// one, while ZIP containers (.docx/.xlsx/.pptx), images and archives hit one
+/// within a few bytes.
+///
+/// UTF-16/32 documents are legitimately NUL-rich, so a declared wide charset
+/// opts out — `decode_html_bytes` handles those correctly.
+fn looks_binary(bytes: &[u8], header_charset: Option<&str>) -> bool {
+    if let Some(label) = header_charset {
+        let label = label.to_ascii_lowercase();
+        if label.contains("utf-16") || label.contains("utf-32") || label.contains("ucs-") {
+            return false;
+        }
+    }
+    bytes[..bytes.len().min(1024)].contains(&0)
+}
+
 /// Decode fetched HTML bytes to a `String` honoring the declared charset
 /// (P1-1): HTTP `Content-Type` charset first, then a `<meta charset>` sniff,
 /// then UTF-8. Without this, a Latin-1 / Windows-1252 page has every 0x80–0xFF
@@ -813,6 +852,29 @@ fn decode_html_bytes(bytes: &[u8], header_charset: Option<&str>) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // ── looks_binary ────────────────────────────────────────────────────
+    #[test]
+    fn looks_binary_flags_a_zip_container() {
+        // Opening bytes of any .docx/.xlsx/.pptx.
+        assert!(looks_binary(b"PK\x03\x04\x14\x00\x08\x00\x00\x00", None));
+    }
+
+    #[test]
+    fn looks_binary_passes_html_and_empty_bodies() {
+        assert!(!looks_binary(
+            b"<!doctype html><html><body>hi</body></html>",
+            None
+        ));
+        assert!(!looks_binary(b"", None));
+    }
+
+    #[test]
+    fn looks_binary_respects_a_declared_wide_charset() {
+        // UTF-16LE "hi": NUL-rich, but genuinely text.
+        assert!(!looks_binary(b"h\x00i\x00", Some("utf-16le")));
+        assert!(looks_binary(b"h\x00i\x00", None));
+    }
 
     #[test]
     fn should_arm_proxy_truth_table() {

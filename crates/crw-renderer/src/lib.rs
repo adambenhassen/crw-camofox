@@ -654,7 +654,15 @@ impl FallbackRenderer {
                 // 502'd here without ever reaching camofox.
                 let mut http_result = match self.http.fetch(url, headers, None, deadline).await {
                     Ok(r) => r,
-                    Err(e) if !self.js_renderers.is_empty() => {
+                    // `UnsupportedContentType` is excluded on purpose: the body is
+                    // not a web page at all (a .docx ZIP, an image), which no
+                    // renderer can fix. Escalating one costs a full ladder climb
+                    // and still fails, with the precise content type lost behind
+                    // the ladder's generic "no usable content".
+                    Err(e)
+                        if !self.js_renderers.is_empty()
+                            && !matches!(e, CrwError::UnsupportedContentType(_)) =>
+                    {
                         return self
                             .escalate_after_http_failure(
                                 e,
@@ -764,7 +772,15 @@ impl FallbackRenderer {
                 // "unreachable" + 5/147 "http_502" map to this branch.
                 let mut result = match self.http.fetch(url, headers, None, deadline).await {
                     Ok(r) => r,
-                    Err(e) if !self.js_renderers.is_empty() => {
+                    // `UnsupportedContentType` is excluded on purpose: the body is
+                    // not a web page at all (a .docx ZIP, an image), which no
+                    // renderer can fix. Escalating one costs a full ladder climb
+                    // and still fails, with the precise content type lost behind
+                    // the ladder's generic "no usable content".
+                    Err(e)
+                        if !self.js_renderers.is_empty()
+                            && !matches!(e, CrwError::UnsupportedContentType(_)) =>
+                    {
                         return self
                             .escalate_after_http_failure(
                                 e,

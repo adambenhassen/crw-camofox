@@ -20,6 +20,14 @@ pub enum CrwError {
     #[error("Extraction error: {0}")]
     ExtractionError(String),
 
+    /// The origin returned a body that is neither HTML nor a document crw can
+    /// parse (a ZIP-container office file, an image, an archive). Distinct from
+    /// `HttpError` because it must NOT escalate to the JS renderer ladder: no
+    /// browser turns a .docx into a page, so climbing the ladder only burns a
+    /// Chromium/Camoufox session before failing anyway.
+    #[error("Unsupported content type: {0}")]
+    UnsupportedContentType(String),
+
     #[error("Crawl error: {0}")]
     CrawlError(String),
 
@@ -55,6 +63,7 @@ impl CrwError {
             CrwError::InvalidRequest(_) => "invalid_request",
             CrwError::RendererError(_) => "renderer_error",
             CrwError::ExtractionError(_) => "extraction_error",
+            CrwError::UnsupportedContentType(_) => "unsupported_content_type",
             CrwError::CrawlError(_) => "crawl_error",
             CrwError::Timeout(_) => "timeout",
             CrwError::ConfigError(_) => "config_error",
