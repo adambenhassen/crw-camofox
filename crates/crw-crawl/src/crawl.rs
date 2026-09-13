@@ -245,6 +245,20 @@ async fn run_crawl_inner(opts: CrawlOptions<'_>) {
             }
         };
 
+        // The CDN answered for a dead origin, so this page has no content and no
+        // links worth following — its body is the CDN's error page. Skipped like
+        // any other failed fetch (the `continue` above) rather than counted as a
+        // crawled page: a crawl of a site whose origin is down was reporting
+        // `completed: 1` with Cloudflare's apology as the page.
+        if crate::single::is_cdn_origin_error(fetch_result.status_code) {
+            tracing::warn!(
+                url,
+                status = fetch_result.status_code,
+                "Crawl: CDN could not reach the origin"
+            );
+            continue;
+        }
+
         // Extract links for further crawling.
         if depth < max_depth {
             enqueue_discovered_links(
