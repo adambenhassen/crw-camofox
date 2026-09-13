@@ -5,7 +5,7 @@ use crw_core::types::{
     CrawlRequest, CrawlState, CrawlStatus, RequestedRenderer, ScrapeRequest,
     resolve_pinned_renderer, resolve_render_js,
 };
-use crw_crawl::crawl::{CrawlOptions, run_crawl};
+use crw_crawl::crawl::{CrawlOptions, failed_page, run_crawl};
 use crw_crawl::single::scrape_url;
 use crw_renderer::FallbackRenderer;
 use crw_search::{CamofoxSearchClient, SearchError, SearxngParams, SearxngResponse};
@@ -459,38 +459,38 @@ impl AppState {
                             render_js_default,
                             deadline,
                         )
-                        .await
-                        .ok();
+                        .await;
                         // Mutate the shared status in place — push one document and
                         // bump the counter without cloning the whole accumulated Vec
                         // on every completion (avoids O(n^2) copying on large
-                        // batches). A failed scrape still advances `completed`.
+                        // batches). A failed scrape still advances `completed`, and
+                        // is retained as a blocked placeholder carrying the reason
+                        // instead of vanishing from the results.
                         tx.send_modify(|st| {
-                            if let Some(mut d) = scraped {
-                                // `scrape_url` stamps the verdict but this path used
-                                // to push it through untouched, so a wall shipped as
-                                // an ordinary batch document (and `/v2`'s adapter
-                                // drops `block`, hiding it completely). Clear the
-                                // shell and count it, exactly as the single scrape
-                                // route does.
-                                let is_wall = d.block.is_some();
-                                if !is_wall && let Some(reason) = d.http_error() {
-                                    d.block = Some(crw_core::types::BlockOutcome {
-                                        vendor: crw_core::types::HTTP_ERROR_VENDOR.to_string(),
-                                        reason,
-                                    });
-                                }
-                                if d.block.is_some() {
-                                    // Same split as `/v1/scrape` and the crawl loop: a
-                                    // wall loses its shell, an origin error page stays
-                                    // readable.
-                                    if is_wall {
-                                        d.clear_body();
-                                    }
-                                    st.blocked += 1;
-                                }
-                                st.data.push(d);
+                            let mut d = scraped
+                                .unwrap_or_else(|err| failed_page(&req.url, 0, err.to_string()));
+                            // `scrape_url` stamps the verdict but this path used to
+                            // push it through untouched, so a wall shipped as an
+                            // ordinary batch document (and `/v2`'s adapter drops
+                            // `block`, hiding it completely). Clear the shell and
+                            // count it, exactly as the single scrape route does.
+                            let is_wall = d.block.is_some();
+                            if !is_wall && let Some(reason) = d.http_error() {
+                                d.block = Some(crw_core::types::BlockOutcome {
+                                    vendor: crw_core::types::HTTP_ERROR_VENDOR.to_string(),
+                                    reason,
+                                });
                             }
+                            if d.block.is_some() {
+                                // Same split as `/v1/scrape` and the crawl loop: a
+                                // wall loses its shell, an origin error page stays
+                                // readable.
+                                if is_wall {
+                                    d.clear_body();
+                                }
+                                st.blocked += 1;
+                            }
+                            st.data.push(d);
                             st.completed += 1;
                             if st.completed >= total {
                                 st.status = CrawlStatus::Completed;
