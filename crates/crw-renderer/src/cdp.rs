@@ -3374,6 +3374,164 @@ mod tests {
         );
     }
 
+    /// Mock CDP endpoint that records every inbound `(method, params)` and
+    /// answers with `reply(method)`: `Some(result)` sends a result, `None` an
+    /// error. `events` are pushed as soon as the client connects.
+    async fn spawn_recording_cdp(
+        events: Vec<serde_json::Value>,
+        reply: fn(&str) -> Option<serde_json::Value>,
+    ) -> (
+        String,
+        std::sync::Arc<std::sync::Mutex<Vec<(String, serde_json::Value)>>>,
+    ) {
+        use futures::{SinkExt, StreamExt};
+        use tokio_tungstenite::accept_async;
+        use tokio_tungstenite::tungstenite::Message;
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let recorded = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let rec = recorded.clone();
+        tokio::spawn(async move {
+            loop {
+                let Ok((stream, _)) = listener.accept().await else {
+                    return;
+                };
+                let Ok(ws) = accept_async(stream).await else {
+                    continue;
+                };
+                let (mut w, mut r) = ws.split();
+                for ev in &events {
+                    let _ = w.send(Message::Text(ev.to_string().into())).await;
+                }
+                let rec = rec.clone();
+                tokio::spawn(async move {
+                    while let Some(Ok(msg)) = r.next().await {
+                        let Ok(txt) = msg.to_text() else { continue };
+                        let Ok(v) = serde_json::from_str::<serde_json::Value>(txt) else {
+                            continue;
+                        };
+                        let method = v["method"].as_str().unwrap_or_default().to_string();
+                        rec.lock()
+                            .unwrap()
+                            .push((method.clone(), v["params"].clone()));
+                        let out = match reply(&method) {
+                            Some(result) => serde_json::json!({"id": v["id"], "result": result}),
+                            None => serde_json::json!({
+                                "id": v["id"],
+                                "error": {"code": -32000, "message": "Invalid InterceptionId."}
+                            }),
+                        };
+                        let _ = w.send(Message::Text(out.to_string().into())).await;
+                    }
+                });
+            }
+        });
+        (format!("ws://{addr}"), recorded)
+    }
+
+    /// Item 13: a failed `Fetch.continueWithAuth` is recorded, so the timeout
+    /// that follows can be reported as the proxy-auth failure it is.
+    #[tokio::test]
+    async fn auth_pump_records_a_failed_continue_with_auth() {
+        use crate::cdp_conn::CdpConnection;
+        let challenge = serde_json::json!({
+            "method": "Fetch.authRequired",
+            "sessionId": "PAGE",
+            "params": {"requestId": "interception-1"},
+        });
+        let (ws, recorded) = spawn_recording_cdp(vec![challenge], |m| {
+            (m != "Fetch.continueWithAuth").then(|| serde_json::json!({}))
+        })
+        .await;
+        let conn = CdpConnection::connect(&ws, std::time::Duration::from_secs(2))
+            .await
+            .expect("connect to mock CDP ws");
+        let auth_failed = std::sync::Mutex::new(None);
+        let rx = conn.subscribe();
+        let _ = tokio::time::timeout(
+            std::time::Duration::from_millis(800),
+            super::run_auth_pump(
+                &conn,
+                rx,
+                Some(("user".into(), "pass".into())),
+                "PAGE",
+                &auth_failed,
+            ),
+        )
+        .await;
+
+        assert!(
+            recorded
+                .lock()
+                .unwrap()
+                .iter()
+                .any(|(m, _)| m == "Fetch.continueWithAuth"),
+            "the pump must answer the challenge"
+        );
+        let reason = auth_failed.lock().unwrap().clone();
+        assert!(
+            reason
+                .as_deref()
+                .is_some_and(|r| r.contains("Invalid InterceptionId")),
+            "the failure must be kept for the timeout attribution, got {reason:?}"
+        );
+    }
+
+    /// C10/C11: caller headers reach a CDP render. `User-Agent` drives
+    /// `setUserAgentOverride`, everything else goes to `setExtraHTTPHeaders`,
+    /// and a render with no caller headers sends no extra-headers call at all.
+    #[tokio::test]
+    async fn caller_headers_reach_the_cdp_render() {
+        fn reply(method: &str) -> Option<serde_json::Value> {
+            Some(match method {
+                "Target.createTarget" => serde_json::json!({"targetId": "T1"}),
+                "Target.attachToTarget" => serde_json::json!({"sessionId": "S1"}),
+                _ => serde_json::json!({}),
+            })
+        }
+        let run = |headers: std::collections::HashMap<String, String>| async move {
+            let (ws, recorded) = spawn_recording_cdp(Vec::new(), reply).await;
+            let r = CdpRenderer::new("lightpanda", &ws, 1_500, 1);
+            let _ = crate::traits::PageFetcher::fetch(
+                &r,
+                "https://example.com/",
+                &headers,
+                None,
+                crw_core::Deadline::now_plus(std::time::Duration::from_secs(2)),
+            )
+            .await;
+            recorded.lock().unwrap().clone()
+        };
+
+        let mut headers = std::collections::HashMap::new();
+        headers.insert("X-Probe".to_string(), "v1".to_string());
+        headers.insert("user-agent".to_string(), "Probe/2.0".to_string());
+        let calls = run(headers).await;
+        let extra = calls
+            .iter()
+            .find(|(m, _)| m == "Network.setExtraHTTPHeaders")
+            .unwrap_or_else(|| panic!("no setExtraHTTPHeaders; saw {calls:?}"));
+        assert_eq!(extra.1["headers"]["X-Probe"], "v1");
+        assert!(
+            extra.1["headers"].get("user-agent").is_none(),
+            "UA is not an extra header"
+        );
+        let ua = calls
+            .iter()
+            .find(|(m, _)| m == "Network.setUserAgentOverride")
+            .expect("UA override sent");
+        assert_eq!(ua.1["userAgent"], "Probe/2.0");
+
+        let calls = run(std::collections::HashMap::new()).await;
+        assert!(
+            calls
+                .iter()
+                .all(|(m, _)| m != "Network.setExtraHTTPHeaders"),
+            "no caller headers, no extra-headers call; saw {calls:?}"
+        );
+    }
+
     #[tokio::test]
     async fn ws_fetch_guard_reaps_target_on_cancel() {
         use crate::cdp_conn::CdpConnection;
