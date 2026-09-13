@@ -21,6 +21,11 @@ and the project uses [Semantic Versioning](https://semver.org/).
   page") now fails as a navigation failure instead of returning that page.
 - CORS is no longer permissive. Browser callers need their origin listed in
   `server.cors_allowed_origins`; the default sends no CORS headers.
+- **Breaking:** a malformed proxy URL is refused instead of ignored. A bad
+  `crawler.proxy` (or CLI `--proxy`) fails startup, and a bad per-request
+  `proxy` returns 400. Before, the value was logged and dropped, and traffic
+  went out directly from the server's own address.
+- An unreachable search backend now answers 502 instead of 422.
 
 ## [1.3.0] - 2026-09-13
 

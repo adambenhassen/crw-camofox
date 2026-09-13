@@ -108,6 +108,11 @@ async fn scrape_url_inner(
     // (b) per-request stealth differs from what the shared renderer was built with.
     let needs_temp_fetcher =
         req.proxy.is_some() || req.stealth.is_some_and(|s| s != default_stealth);
+    // A per-request proxy the client cannot use would otherwise be dropped with a
+    // log line and the page fetched from the server's own address.
+    if let Some(p) = req.proxy.as_deref().filter(|p| !p.trim().is_empty()) {
+        crw_core::validate_proxy_url(p).map_err(crw_core::error::CrwError::InvalidRequest)?;
+    }
 
     let mut fetch_result = if needs_temp_fetcher {
         let proxy = req.proxy.as_deref();

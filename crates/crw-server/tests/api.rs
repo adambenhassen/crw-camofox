@@ -46,6 +46,29 @@ async fn scrape_endpoint_invalid_url() {
 }
 
 #[tokio::test]
+async fn scrape_endpoint_invalid_proxy_is_rejected_not_ignored() {
+    // A proxy the HTTP client cannot use used to be logged and dropped, and the
+    // page was fetched from the server's own address.
+    let server = test_app();
+    let resp = server
+        .post("/v1/scrape")
+        .json(&json!({
+            "url": "https://1.1.1.1/",
+            "renderJs": false,
+            "proxy": "http://user:hunter2@[not-a-host",
+        }))
+        .await;
+    resp.assert_status(axum::http::StatusCode::BAD_REQUEST);
+    let json: serde_json::Value = resp.json();
+    let error = json["error"].as_str().unwrap_or_default();
+    assert!(error.contains("Invalid proxy URL"), "{error}");
+    assert!(
+        !error.contains("hunter2"),
+        "must not echo credentials: {error}"
+    );
+}
+
+#[tokio::test]
 async fn scrape_endpoint_ftp_url_rejected() {
     let server = test_app();
     let resp = server

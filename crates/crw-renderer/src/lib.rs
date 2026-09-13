@@ -376,6 +376,11 @@ impl FallbackRenderer {
         proxy: Option<&str>,
         stealth: &StealthConfig,
     ) -> CrwResult<Self> {
+        // Refuse a malformed proxy here rather than let the HTTP client drop it
+        // and send the traffic out directly. Empty means "no proxy".
+        if let Some(p) = proxy.filter(|p| !p.trim().is_empty()) {
+            crw_core::validate_proxy_url(p).map_err(CrwError::InvalidRequest)?;
+        }
         let effective_ua = pick_ua(user_agent, stealth);
         let inject_headers = stealth.enabled && stealth.inject_headers;
         let http_concrete = http_only::HttpFetcher::with_timeout(
@@ -1869,6 +1874,26 @@ mod tests {
             mode,
             ..Default::default()
         }
+    }
+
+    #[test]
+    fn new_refuses_a_malformed_proxy_instead_of_going_direct() {
+        let cfg = base_cfg(RendererMode::None);
+        let Err(err) = FallbackRenderer::new(
+            &cfg,
+            "crw-test",
+            Some("http://user:hunter2@[not-a-host"),
+            &StealthConfig::default(),
+        ) else {
+            panic!("a malformed proxy must fail construction");
+        };
+        let msg = err.to_string();
+        assert!(msg.contains("Invalid proxy URL"), "{msg}");
+        assert!(!msg.contains("hunter2"), "{msg}");
+        // Empty still means "no proxy".
+        assert!(
+            FallbackRenderer::new(&cfg, "crw-test", Some(" "), &StealthConfig::default()).is_ok()
+        );
     }
 
     #[test]

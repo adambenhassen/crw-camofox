@@ -27,9 +27,39 @@ pub fn redact_proxy_url(raw: &str) -> String {
     }
 }
 
+/// Check that a proxy URL is one the HTTP client accepts. A malformed value
+/// used to be logged and dropped, so traffic meant for the proxy went out
+/// directly from the server's own address. The error redacts credentials.
+pub fn validate_proxy_url(raw: &str) -> Result<(), String> {
+    reqwest::Proxy::all(raw.trim()).map(|_| ()).map_err(|e| {
+        format!(
+            "Invalid proxy URL '{}': {}",
+            redact_proxy_url(raw),
+            crate::error::reqwest_message(e)
+        )
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn validate_proxy_url_accepts_supported_schemes() {
+        assert!(validate_proxy_url("http://proxy:8080").is_ok());
+        assert!(validate_proxy_url("socks5://user:pass@proxy:1080").is_ok());
+    }
+
+    #[test]
+    fn validate_proxy_url_rejects_without_quoting_credentials() {
+        let err = validate_proxy_url("http://user:hunter2@[not-a-host").unwrap_err();
+        assert!(err.contains("Invalid proxy URL"), "{err}");
+        assert!(
+            !err.contains("hunter2"),
+            "must not leak the password: {err}"
+        );
+        assert!(!err.contains("user:"), "must not leak the username: {err}");
+    }
 
     #[test]
     fn redact_proxy_url_masks_userinfo() {
