@@ -384,7 +384,8 @@
             "properties": {
               "links": { "type": "array", "items": { "type": "string", "format": "uri" } },
               "droppedActionCount":    { "type": "integer" },
-              "strippedTrackingCount": { "type": "integer" }
+              "strippedTrackingCount": { "type": "integer" },
+              "sitemaps": { "type": "array", "items": { "type": "string", "format": "uri" }, "description": "Sitemap documents discovered and parsed while mapping the site (e.g. /sitemap.xml). Not included in links, because a sitemap file is not a page." }
             }
           }
         }
