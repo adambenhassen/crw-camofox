@@ -513,6 +513,9 @@ async fn scrape_url_inner(
         &fetch_result.url,
         fetch_result.final_url.as_deref(),
     );
+    if data.block.is_none() && data.http_error().is_some() {
+        data.block = classify_error_page_wall(fetch_result.status_code, &fetch_result.html);
+    }
     // Surface redirect mismatch as warning. Helps detect cases like
     // northernair.ca/history.htm silently 302'ing to the homepage — extraction
     // looks "successful" but the user got the wrong page.
@@ -839,6 +842,26 @@ fn change_tracking_mode_label(
 /// non-root resource (e.g. `/history.htm`) but the final URL collapsed to the
 /// site root (`/` or empty). Pure same-origin path tweaks (trailing slash,
 /// query string changes) are ignored.
+/// Names the wall on an error page that `ScrapeData::http_error` already fails.
+///
+/// `classify_block` stops at its markdown guard, so a vendor wall with enough
+/// prose (PerimeterX "Press & Hold") surfaced as `http_error` while a thinner
+/// wall from another vendor surfaced as `anti_bot`. Running the classifier here
+/// is safe where it is not ahead of the guard: the page already fails, and only
+/// its label changes. A structural verdict is not a wall, so it stays an HTTP
+/// error.
+fn classify_error_page_wall(status: u16, html: &str) -> Option<BlockOutcome> {
+    let r = crw_extract::antibot::classify(Some(status), html);
+    if !r.signal.is_blocked() || r.signal == crw_extract::antibot::AntibotSignal::StructuralFailure
+    {
+        return None;
+    }
+    Some(BlockOutcome {
+        vendor: r.signal.class_name().to_string(),
+        reason: r.reason,
+    })
+}
+
 /// Whether a JS escalation's markdown replaces the lower tier's.
 ///
 /// A thin prior is replaced by any result with more markdown: the escalation
@@ -1317,6 +1340,41 @@ mod tests {
     #[test]
     fn js_escalation_keeps_more_content_from_a_thin_prior_below_threshold() {
         assert!(accept_js_escalation(45, true, 0.005, 624, 0.4, 2000));
+    }
+
+    /// zillow.com, live: a 403 PerimeterX "Press & Hold" page extracts to more than
+    /// the markdown guard, so `classify_block` never names the vendor and the
+    /// response said `http_error`, while g2's thinner DataDome wall said `anti_bot`.
+    #[test]
+    fn error_page_wall_names_the_vendor_when_markdown_passes_the_guard() {
+        let html = r#"<html><head><script>window._pxAppId = 'PXHYx10rg3';</script></head>
+            <body><h1>Access to this page has been denied</h1>
+            <p>Press &amp; Hold to confirm you are a human (and not a bot).</p>
+            <p>Reference ID 1a2b3c4d-0000-11ef-8f00-000000000000</p></body></html>"#;
+        let md = "# Access to this page has been denied\n\nPress & Hold to confirm you are \
+                  a human (and not a bot).\n\nReference ID 1a2b3c4d-0000-11ef-8f00-000000000000";
+        assert!(
+            classify_block(
+                403,
+                Some("text/html"),
+                html,
+                Some(md),
+                THRESH,
+                "https://www.zillow.com/",
+                None
+            )
+            .is_none(),
+            "precondition: the markdown guard hides this wall from classify_block"
+        );
+        let b = classify_error_page_wall(403, html).expect("vendor wall must be named");
+        assert_eq!(b.vendor, "perimeterx");
+    }
+
+    #[test]
+    fn error_page_wall_leaves_plain_error_pages_alone() {
+        let html = "<html><body><h1>404 Not Found</h1><p>The page you requested does not \
+                    exist on this server. Check the address and try again.</p></body></html>";
+        assert!(classify_error_page_wall(404, html).is_none());
     }
 
     #[test]
