@@ -102,6 +102,13 @@ services:
   # request falls through to Camofox — defeating the lightweight tier.
   lightpanda:
     image: lightpanda/browser:latest
+    # LightPanda sends usage telemetry to a third-party endpoint by default.
+    # Disable it so the default stack makes no unexpected outbound connections —
+    # important for air-gapped / compliance deployments. Air-gapped operators who
+    # need byte-for-byte reproducibility should additionally pin this image to a
+    # digest (`lightpanda/browser@sha256:...`) instead of the `:latest` tag.
+    environment:
+      - LIGHTPANDA_DISABLE_TELEMETRY=true
     restart: unless-stopped
     healthcheck:
       test: ["CMD", "bash", "-c", "exec 3<>/dev/tcp/127.0.0.1/9222"]

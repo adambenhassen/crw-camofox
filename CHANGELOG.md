@@ -5,6 +5,16 @@ camofox-first, anti-detection variant of crw; entries below cover the fork's own
 `v1.x` line. The format follows [Keep a Changelog](https://keepachangelog.com/),
 and the project uses [Semantic Versioning](https://semver.org/).
 
+## [Unreleased]
+
+### Changed
+
+- **Breaking:** `/metrics`, `/metrics/renderer-breakers`, and
+  `/admin/breakers/reset` now sit behind the API-key auth boundary. When
+  `[auth].api_keys` is set, Prometheus scrapes must send a Bearer token.
+- CORS is no longer permissive. Browser callers need their origin listed in
+  `server.cors_allowed_origins`; the default sends no CORS headers.
+
 ## [1.3.0] - 2026-09-13
 
 A robustness release for the Camofox tier: search and render recover from the
