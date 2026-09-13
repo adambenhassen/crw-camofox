@@ -804,7 +804,7 @@ async fn run_auth_pump(
 /// destinations can be checked. This is the CDP equivalent of what
 /// [`crw_core::url_safety::safe_redirect_policy`] already does for the
 /// HTTP-only tier.
-async fn outbound_block_label(req_url: &str, memo: &ResolveMemo) -> Option<&'static str> {
+async fn outbound_block_label(req_url: &str, ctx: &OutboundCtx) -> Option<&'static str> {
     let Ok(parsed) = url::Url::parse(req_url) else {
         // Chrome sends absolute, normalised URLs; anything we cannot parse is
         // anomalous, so fail closed.
@@ -843,21 +843,31 @@ async fn outbound_block_label(req_url: &str, memo: &ResolveMemo) -> Option<&'sta
     // resolver failure (SERVFAIL under load is the common failure mode, not a
     // stall), and latching that would block a legitimate host for the rest of
     // the render with no retry.
-    if memo.lock().ok().and_then(|m| m.get(&key).copied()) == Some(true) {
+    if ctx.memo.lock().ok().and_then(|m| m.get(&key).copied()) == Some(true) {
         return None;
     }
     // Bounded end to end. `RESOLVE_LIMIT` is process-wide and FIFO-fair, so an
     // unbounded wait here would be a hang one layer below the pump: the handler
     // never answers its paused request and the page stalls to the nav budget.
     // Fails closed on expiry, which costs one subresource rather than the page.
-    let resolved = tokio::time::timeout(OUTBOUND_CHECK_BUDGET, async {
+    //
+    // The budget is the tier's own navigation timeout, not a fixed constant. A
+    // verdict that arrives after `Page.navigate` has already timed out cannot
+    // help anyone: on the LightPanda tier that ceiling is 2.5s, so a longer
+    // budget only converts renders that would have succeeded into failures.
+    let resolved = tokio::time::timeout(ctx.budget, async {
+        // Two gates: a per-render one so a single page with hundreds of unique
+        // hosts cannot occupy the whole process-wide pool and force fail-closed
+        // denials in every other concurrent render, and the global one that
+        // bounds total resolver load.
+        let _render_permit = ctx.render_limit.acquire().await;
         let _permit = RESOLVE_LIMIT.acquire().await;
         crw_core::url_safety::validate_safe_host_resolved(&parsed).await
     })
     .await;
     match resolved {
         Ok(Ok(())) => {
-            if let Ok(mut m) = memo.lock() {
+            if let Ok(mut m) = ctx.memo.lock() {
                 m.insert(key, true);
             }
             None
@@ -866,24 +876,45 @@ async fn outbound_block_label(req_url: &str, memo: &ResolveMemo) -> Option<&'sta
         // resolver that errored or ran out of budget is not, and the two have
         // very different causes in production. Separate labels so a DNS
         // brown-out is distinguishable from an actual attempt.
-        Ok(Err(_)) | Err(_) => Some(BLOCK_LABEL_UNRESOLVED),
+        Ok(Err(_)) | Err(_) => {
+            // Remember that WE could not answer, so the caller-facing error is
+            // not laundered into an origin failure. Both tiers share one
+            // resolver, so a brown-out otherwise reads as "the target is
+            // unreachable", gets a 422 and a refund, and never trips the 5xx
+            // watchdog.
+            ctx.unresolved
+                .store(true, std::sync::atomic::Ordering::Relaxed);
+            Some(BLOCK_LABEL_UNRESOLVED)
+        }
     }
+}
+
+/// Per-render state the destination check needs.
+struct OutboundCtx {
+    memo: ResolveMemo,
+    /// One render's share of [`RESOLVE_LIMIT`].
+    render_limit: tokio::sync::Semaphore,
+    /// Ceiling on one check, taken from the tier's navigation timeout.
+    budget: Duration,
+    /// Set when a check failed because our own resolver could not answer.
+    unresolved: std::sync::atomic::AtomicBool,
 }
 
 /// Host verdicts already decided during one render. See [`outbound_allowed`].
 type ResolveMemo = Arc<StdMutex<HashMap<String, bool>>>;
+
+/// Paused requests the pump has not answered yet, as `(session id, request id)`.
+type Outstanding = Arc<StdMutex<std::collections::HashSet<(String, String)>>>;
 
 /// The destination is inside a range or on a host we refuse to reach.
 const BLOCK_LABEL_POLICY: &str = "outbound";
 /// The destination could not be proved safe: resolver error or budget expiry.
 const BLOCK_LABEL_UNRESOLVED: &str = "outbound_unresolved";
 
-/// Ceiling on one destination check, queueing included. Above
-/// `url_safety::DNS_RESOLVE_TIMEOUT` (8s) so a legitimately slow resolver — a
-/// CNAME chain needing a UDP retry, the case that bound was chosen for — can
-/// still finish, and under the navigation budget so a stalled check cannot own
-/// the page.
-const OUTBOUND_CHECK_BUDGET: Duration = Duration::from_secs(10);
+/// One render's share of [`RESOLVE_LIMIT`]. Small enough that a page with
+/// hundreds of unique hosts cannot park the whole global pool, large enough
+/// that an ordinary page's handful of distinct hosts never queues.
+const PER_RENDER_RESOLVE_LIMIT: usize = 8;
 
 /// Process-wide ceiling on concurrent destination lookups.
 ///
@@ -919,6 +950,8 @@ async fn run_intercept_pump(
     mut rx: broadcast::Receiver<CdpEvent>,
     blocklist: Option<&Blocklist>,
     session_id: &str,
+    ctx: &OutboundCtx,
+    outstanding: &Outstanding,
 ) {
     use futures::future::{BoxFuture, FutureExt};
     use futures::stream::{FuturesUnordered, StreamExt};
@@ -934,7 +967,6 @@ async fn run_intercept_pump(
     // shared with other concurrent scrapes, and answering their paused
     // requests would double-continue them.
     let mut child_sessions: std::collections::HashSet<String> = std::collections::HashSet::new();
-    let memo: ResolveMemo = Arc::new(StdMutex::new(HashMap::new()));
 
     loop {
         // No hard in-flight cap: a cap that makes this loop stop calling
@@ -986,22 +1018,52 @@ async fn run_intercept_pump(
             if let Some(child) = ev.params.get("sessionId").and_then(|v| v.as_str()) {
                 child_sessions.insert(child.to_string());
                 let child = child.to_string();
+                let child_target = ev
+                    .params
+                    .get("targetInfo")
+                    .and_then(|t| t.get("targetId"))
+                    .and_then(|v| v.as_str())
+                    .unwrap_or_default()
+                    .to_string();
                 in_flight.push(
                     async move {
                         // The child is attached paused, so its FIRST request —
                         // the one that matters, an out-of-process iframe's own
-                        // navigation — cannot outrun this. Resume it only after
-                        // interception is on, and resume it unconditionally so a
-                        // browser that rejected `Fetch.enable` is not left
-                        // frozen.
-                        let _ = conn
+                        // navigation — cannot outrun this. It is resumed only
+                        // once interception is on; if interception could not be
+                        // turned on, the target is closed instead of resumed,
+                        // because resuming it would run an unvalidated frame and
+                        // leaving it paused would stall the render.
+                        let enabled = conn
                             .send_recv(
                                 "Fetch.enable",
                                 serde_json::json!({ "patterns": [{ "urlPattern": "*" }] }),
                                 Some(&child),
                                 cmd_timeout,
                             )
-                            .await;
+                            .await
+                            .is_ok();
+                        if !enabled {
+                            crw_core::metrics::metrics()
+                                .chrome_blocked_requests_total
+                                .with_label_values(&["child_unguarded"])
+                                .inc();
+                            tracing::warn!(
+                                target_id = %child_target,
+                                "could not intercept a child target; closing it rather than                                  running it unvalidated"
+                            );
+                            if !child_target.is_empty() {
+                                let _ = conn
+                                    .send_recv(
+                                        "Target.closeTarget",
+                                        serde_json::json!({ "targetId": child_target }),
+                                        None,
+                                        cmd_timeout,
+                                    )
+                                    .await;
+                            }
+                            return;
+                        }
                         // Auto-attach does not cascade, so ask the child to
                         // attach ITS children too; otherwise an iframe nested
                         // inside an out-of-process iframe never surfaces.
@@ -1060,6 +1122,15 @@ async fn run_intercept_pump(
             .unwrap_or("")
             .to_string();
 
+        // Every paused request is recorded before a handler takes it, and
+        // removed once answered. Teardown fails whatever is left: dropping a
+        // handler mid-check would otherwise leave the request paused, and
+        // `Fetch.disable` auto-continues paused requests, turning an unfinished
+        // check into an allow.
+        if let Ok(mut o) = outstanding.lock() {
+            o.insert((event_session.clone(), request_id.clone()));
+        }
+
         // Blocklist first: a blocked request never leaves the browser, so there
         // is no destination to validate and no lookup to pay for.
         let blocked_by_list = blocklist
@@ -1069,12 +1140,11 @@ async fn run_intercept_pump(
                 BlockReason::Host => "host",
             });
 
-        let memo = memo.clone();
         in_flight.push(
             async move {
                 let block_label = match blocked_by_list {
                     Some(label) => Some(label),
-                    None => outbound_block_label(&req_url, &memo).await,
+                    None => outbound_block_label(&req_url, ctx).await,
                 };
                 let (method, params) = match block_label {
                     Some(label) => {
@@ -1100,6 +1170,9 @@ async fn run_intercept_pump(
                 let _ = conn
                     .send_recv(method, params, Some(&event_session), cmd_timeout)
                     .await;
+                if let Ok(mut o) = outstanding.lock() {
+                    o.remove(&(event_session, request_id));
+                }
             }
             .boxed(),
         );
@@ -2311,6 +2384,13 @@ impl CdpRenderer {
                 self.page_timeout,
             )
             .await;
+        // Not repeated at browser scope. Service workers and shared workers are
+        // not children of the page target, so this does not reach them, and
+        // their `fetch` is the one remaining path that can carry a response back
+        // into the page. Browser-scope auto-attach would deliver those events
+        // with no `sessionId`, and accepting them on a pooled connection means
+        // answering paused requests that belong to another concurrent scrape.
+        // Left as a known gap rather than traded for cross-render interference.
 
         // Network-idle tracker fed by a sibling pump (spawned below in the
         // select!). Created before the `work` future because `work` borrows
@@ -2393,8 +2473,23 @@ impl CdpRenderer {
 
         // The intercept pump always runs; only the blocklist half is optional.
         let pump_blocklist = intercept_active.then_some(&self.blocklist);
-        let intercept_pump =
-            run_intercept_pump(conn, conn.subscribe(), pump_blocklist, &session_id);
+        let outbound_ctx = OutboundCtx {
+            memo: Arc::new(StdMutex::new(HashMap::new())),
+            render_limit: tokio::sync::Semaphore::new(PER_RENDER_RESOLVE_LIMIT),
+            // A verdict is worthless once `Page.navigate` has given up, so the
+            // check gets the tier's own ceiling and nothing more.
+            budget: self.page_timeout,
+            unresolved: std::sync::atomic::AtomicBool::new(false),
+        };
+        let outstanding: Outstanding = Arc::new(StdMutex::new(std::collections::HashSet::new()));
+        let intercept_pump = run_intercept_pump(
+            conn,
+            conn.subscribe(),
+            pump_blocklist,
+            &session_id,
+            &outbound_ctx,
+            &outstanding,
+        );
         let outcome = if auth_active {
             let auth_pump =
                 run_auth_pump(conn, conn.subscribe(), effective_creds.clone(), &session_id);
@@ -2430,6 +2525,28 @@ impl CdpRenderer {
             }
         };
 
+        // Any request whose check was still running when the pump was dropped is
+        // still paused, and `Fetch.disable` below auto-continues paused requests
+        // per CDP docs. Continuing an unfinished check is an allow, so fail them
+        // explicitly first: the guard has to stay fail-closed through teardown.
+        let leftover: Vec<(String, String)> = outstanding
+            .lock()
+            .map(|o| o.iter().cloned().collect())
+            .unwrap_or_default();
+        for (sess, req_id) in leftover {
+            let _ = conn
+                .send_recv(
+                    "Fetch.failRequest",
+                    serde_json::json!({
+                        "requestId": req_id,
+                        "errorReason": "BlockedByClient",
+                    }),
+                    Some(&sess),
+                    Duration::from_secs(1),
+                )
+                .await;
+        }
+
         // Cleanup: `Fetch.disable` auto-continues any still-paused requests
         // per CDP docs, which avoids leaks if the pump was cancelled mid-flight.
         // Unconditional, matching `Fetch.enable` above: pooled connections are
@@ -2444,6 +2561,24 @@ impl CdpRenderer {
                 Duration::from_secs(2),
             )
             .await;
+        // A denial the guard could not decide is our failure, not the origin's.
+        // Both tiers resolve through the same resolver, so leaving this as a
+        // navigation failure lets a DNS brown-out be reported as an unreachable
+        // target: refunded, and invisible to the 5xx watchdog.
+        let outcome = match outcome {
+            Err(err)
+                if outbound_ctx
+                    .unresolved
+                    .load(std::sync::atomic::Ordering::Relaxed) =>
+            {
+                tracing::warn!(url, tier = %self.name, "outbound destination check unavailable");
+                Err(CrwError::RendererError(format!(
+                    "outbound destination check unavailable ({err})"
+                )))
+            }
+            other => other,
+        };
+
         // Capture final URL after any redirects, before tearing down the target.
         // Best-effort: failures map to None and never propagate.
         let final_href = match outcome.as_ref() {
@@ -2893,43 +3028,52 @@ mod tests {
         );
     }
 
+    fn test_ctx() -> super::OutboundCtx {
+        super::OutboundCtx {
+            memo: Default::default(),
+            render_limit: tokio::sync::Semaphore::new(super::PER_RENDER_RESOLVE_LIMIT),
+            budget: std::time::Duration::from_secs(5),
+            unresolved: std::sync::atomic::AtomicBool::new(false),
+        }
+    }
+
     #[tokio::test]
     async fn outbound_guard_rejects_internal_destinations() {
-        let memo: super::ResolveMemo = Default::default();
+        let ctx = test_ctx();
         // Literal addresses the route-layer check would have rejected, arriving
         // here because a redirect or in-page navigation produced them.
         assert!(
-            outbound_block_label("http://169.254.169.254/latest/meta-data/", &memo)
+            outbound_block_label("http://169.254.169.254/latest/meta-data/", &ctx)
                 .await
                 .is_some()
         );
         assert!(
-            outbound_block_label("http://10.0.0.1/", &memo)
+            outbound_block_label("http://10.0.0.1/", &ctx)
                 .await
                 .is_some()
         );
         assert!(
-            outbound_block_label("http://192.168.1.1/admin", &memo)
+            outbound_block_label("http://192.168.1.1/admin", &ctx)
                 .await
                 .is_some()
         );
         assert!(
-            outbound_block_label("http://[::1]:8080/", &memo)
+            outbound_block_label("http://[::1]:8080/", &ctx)
                 .await
                 .is_some()
         );
         assert!(
-            outbound_block_label("http://localhost:5432/", &memo)
+            outbound_block_label("http://localhost:5432/", &ctx)
                 .await
                 .is_some()
         );
         // Unparseable is anomalous; fail closed.
-        assert!(outbound_block_label("not a url", &memo).await.is_some());
+        assert!(outbound_block_label("not a url", &ctx).await.is_some());
     }
 
     #[tokio::test]
     async fn outbound_guard_allows_ordinary_and_non_network_requests() {
-        let memo: super::ResolveMemo = Default::default();
+        let ctx = test_ctx();
         // No assertion on a real public host: that path resolves DNS and the
         // check fails closed, so it would fail on an offline runner rather than
         // testing anything. The reject cases above are all literal or
@@ -2938,12 +3082,12 @@ mod tests {
         // Never reaches a socket, and `validate_safe_url` would reject the
         // scheme, so it has to short-circuit before that check.
         assert!(
-            outbound_block_label("data:image/png;base64,iVBORw0KGgo=", &memo)
+            outbound_block_label("data:image/png;base64,iVBORw0KGgo=", &ctx)
                 .await
                 .is_none()
         );
         assert!(
-            outbound_block_label("blob:https://example.com/1234", &memo)
+            outbound_block_label("blob:https://example.com/1234", &ctx)
                 .await
                 .is_none()
         );

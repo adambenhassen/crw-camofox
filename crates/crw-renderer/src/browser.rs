@@ -288,14 +288,16 @@ fn lightpanda_download_url() -> Option<String> {
 /// Ranges [`crw_core::url_safety`] rejects that LightPanda's own
 /// `--block-private-networks` group does not cover, so the browser we launch
 /// enforces the same policy the rest of the pipeline does.
-/// The v6 translation prefixes are blocked wholesale here rather than decoded
-/// like [`crw_core::url_safety`] does, because a CIDR list cannot express
-/// "carrying a private IPv4". Both are effectively dead protocols, so
-/// over-blocking them costs nothing and this flag is the only control covering
-/// websockets and worker targets.
+/// Deliberately omits `64:ff9b::/96` and `2002::/16`, which
+/// [`crw_core::url_safety`] decodes rather than blocks: a CIDR list cannot
+/// express "carrying a private IPv4", and on an IPv6-only network with a
+/// DNS64/NAT64 resolver every v4-only site resolves inside `64:ff9b::/96`, so
+/// blocking the prefix would take out the whole v4 web. `64:ff9b:1::/48` stays
+/// because RFC 8215 reserves it for local use. ULA and v6 link-local are listed
+/// explicitly rather than assumed to be in LightPanda's private group.
 const LIGHTPANDA_EXTRA_BLOCK_CIDRS: &str = "0.0.0.0/8,100.64.0.0/10,224.0.0.0/4,240.0.0.0/4,\
 192.0.0.0/24,192.0.2.0/24,198.18.0.0/15,198.51.100.0/24,203.0.113.0/24,\
-fec0::/10,ff00::/8,::/96,64:ff9b::/96,64:ff9b:1::/48,2002::/16";
+fc00::/7,fe80::/10,fec0::/10,ff00::/8,::/96,64:ff9b:1::/48";
 
 async fn try_lightpanda_native() -> Option<(ManagedBrowser, String)> {
     let bin = find_or_download_lightpanda().await?;
