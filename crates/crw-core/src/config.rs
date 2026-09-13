@@ -1007,9 +1007,9 @@ pub struct CamofoxEndpoint {
     /// request deadline.
     #[serde(default = "default_challenge_wait_ms")]
     pub challenge_wait_ms: u64,
-    /// After the passive wait gives up, click the Turnstile checkbox once
-    /// and wait again. Needs a camofox-browser build with the coordinate
-    /// click patch; off by default.
+    /// Reserved: click the Turnstile checkbox once after the passive wait
+    /// gives up. Not implemented yet (needs a camofox-browser build with the
+    /// coordinate click patch); setting it only logs a startup warning.
     #[serde(default)]
     pub challenge_click: bool,
     /// After a successful render that earned a `cf_clearance` cookie, cache

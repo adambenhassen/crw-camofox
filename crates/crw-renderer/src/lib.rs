@@ -501,6 +501,12 @@ impl FallbackRenderer {
                     Duration::from_millis(config.chrome_timeout()),
                 )
                 .with_challenge_wait(Duration::from_millis(cf.challenge_wait_ms));
+                if cf.challenge_click {
+                    tracing::warn!(
+                        "renderer.camofox.challenge_click is set but not implemented yet; \
+                         the Camofox tier only waits for challenges to clear"
+                    );
+                }
                 if cf.clearance_reuse {
                     tier = tier.with_clearance_cache(Arc::clone(&clearance));
                 }
