@@ -562,12 +562,14 @@ impl AppState {
                 if !any_ok && last_err.is_some() {
                     rec.status = ExtractStatus::Failed;
                     rec.error = last_err;
+                    // Nothing was extracted, so nothing is charged.
+                    rec.credits_used = credits;
                 } else {
                     rec.status = ExtractStatus::Completed;
                     rec.data = Some(serde_json::Value::Object(merged));
+                    rec.credits_used = credits.max(1);
                 }
                 rec.tokens_used = tokens;
-                rec.credits_used = credits.max(1);
             }
         });
 

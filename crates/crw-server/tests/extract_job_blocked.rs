@@ -45,6 +45,7 @@ async fn extract_job_fails_an_origin_error_page_instead_of_completing() {
 
     let mut status = ExtractStatus::Processing;
     let mut error = None;
+    let mut credits = None;
     for _ in 0..100 {
         tokio::time::sleep(Duration::from_millis(50)).await;
         let jobs = state.extract_jobs.read().await;
@@ -52,6 +53,7 @@ async fn extract_job_fails_an_origin_error_page_instead_of_completing() {
         if !matches!(rec.status, ExtractStatus::Processing) {
             status = rec.status;
             error = rec.error.clone();
+            credits = Some(rec.credits_used);
             break;
         }
     }
@@ -61,4 +63,5 @@ async fn extract_job_fails_an_origin_error_page_instead_of_completing() {
         "an origin error page must fail the extract job, got {status:?} (error {error:?})"
     );
     assert!(error.is_some(), "the failure must carry a reason");
+    assert_eq!(credits, Some(0), "a failed extract job must not charge");
 }
