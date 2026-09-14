@@ -38,7 +38,7 @@ vs. upstream — all **additive and config-toggled**:
 
 | Area | Upstream `crw` | This fork |
 |------|----------------|-----------|
-| Default JS render ladder | `HTTP → LightPanda → Chrome` (CDP) | `HTTP → LightPanda → Camofox` (Firefox) |
+| Default JS render ladder | `HTTP → LightPanda → Chrome` (CDP) | `HTTP → LightPanda → Camofox` (Firefox) `→ Byparr` (Cloudflare challenges only) |
 | Stealth tier | browserless Chromium (SSPL); opt-in in-process Camoufox tier | **Camofox** ([camofox-browser](https://github.com/redf0x1/camofox-browser), REST-driven) — engine-level fingerprint evasion, the default tier, shared by render *and* search |
 | `/v1/search` backend | SearXNG sidecar | **8 engines built in** — Google, Bing, DuckDuckGo, Wikipedia, YouTube, Reddit, Amazon, GitHub (no sidecar) |
 | Interactive MCP | `crw-browse` (CDP, 2 tools) | Upstream **[`camofox-mcp`](https://github.com/redf0x1/camofox-mcp)** wired into the Docker stack — 47 tools over Camofox REST |
@@ -61,6 +61,11 @@ vs. upstream — all **additive and config-toggled**:
   Google, Bing, DuckDuckGo, Wikipedia, YouTube, Reddit, Amazon, and GitHub in a single call
   (run sequentially, so latency scales with engine count), deduping by URL and agreement-ranking
   the merged results — where upstream is tied to one SearXNG instance.
+- **Cloudflare Turnstile challenges get solved.** When a page comes back as a managed
+  challenge that Camofox cannot clear, the ladder hands it to a bundled
+  [Byparr](https://github.com/ThePhaseless/Byparr) solver, which clicks the checkbox. The
+  `cf_clearance` cookie it earns is cached per host, so later scrapes of that host go out over
+  plain HTTP (about 1 s instead of a browser render).
 
 **Field notes — used in production by Hermes.** This fork backs the **Hermes**
 agent over MCP, with Hermes' built-in `web` and `browser` tools **disabled** so
@@ -92,7 +97,7 @@ most-cited alternatives. Descriptive shape, not a benchmark.
 |---|---|---|---|---|---|
 | Language | Rust | Rust | Node.js + Playwright | Python + Playwright | Rust |
 | License | AGPL-3.0 | AGPL-3.0 (commercial avail.) | AGPL-3.0 (commercial avail.) | Apache-2.0 | Source-available / commercial ([spider.cloud](https://spider.cloud)) |
-| Self-host footprint | Static binary (~8 MB) + one browser container | Static binary (~8 MB) + browser + SearXNG sidecar | Multi-container (~500 MB+ image) | ~2 GB image (browser bundled) | Managed-first; self-host via crate |
+| Self-host footprint | Static binary (~8 MB) + Camofox container (+ Byparr challenge solver) | Static binary (~8 MB) + browser + SearXNG sidecar | Multi-container (~500 MB+ image) | ~2 GB image (browser bundled) | Managed-first; self-host via crate |
 | Memory baseline (idle) | ~50 MB | ~50 MB | Large (Chromium heap) | Large (Chromium heap) | Light (Rust) |
 | Stealth tier | **Anti-detect by default** (Camofox/Firefox) | browserless Chromium (SSPL), opt-in | Playwright Chromium | Playwright Chromium | — |
 | Search backend | **8 engines** (Google, Bing, DuckDuckGo, Wikipedia, YouTube, Reddit, Amazon, GitHub) | SearXNG sidecar | Built-in | Built-in | Built-in |
@@ -110,12 +115,13 @@ is the qualitative architectural shape, not a comparison number.
 Self-host the full stack with one command — no auth:
 
 ```bash
-docker compose up -d        # crw + lightpanda + camofox + camofox-mcp
+docker compose up -d        # crw + lightpanda + camofox + byparr + camofox-mcp
 ```
 
 This brings up the REST API on `localhost:3000` plus the real render ladder
-(HTTP → LightPanda → Camofox) and Camofox-driven search, so JS-heavy pages and
-web search work out of the box.
+(HTTP → LightPanda → Camofox, then Byparr for Cloudflare challenges) and
+Camofox-driven search, so JS-heavy pages, challenge-walled pages and web search
+work out of the box.
 
 The full REST surface (`/v1/*` + `/v2/*`) is listed under
 [API endpoints](#api-endpoints) below.
