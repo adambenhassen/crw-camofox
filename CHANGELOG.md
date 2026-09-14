@@ -30,7 +30,7 @@ and the project uses [Semantic Versioning](https://semver.org/).
   its reason. `/v2/scrape` honours `renderJs` and turns `location.languages`
   into an `Accept-Language` header. v2 documents carry `llmUsage` when an LLM
   ran, as `/v1` does.
-- **Map:** responses include a `sitemaps` array of the sitemap documents that
+- **Map:** `/v1/map` responses include a `sitemaps` array of the sitemap documents that
   answered with parseable content (kept out of `links`).
 - **Search:** `scrapeOptions.timeout` (1–60000 ms) sets the per-result scrape
   budget; the default is 15 s instead of the full renderer ladder. Results
