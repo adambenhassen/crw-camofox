@@ -520,7 +520,7 @@ const REGISTRY_TTL: Duration = Duration::from_secs(24 * 60 * 60);
 #[derive(Clone)]
 pub struct BreakerRegistry {
     config: BreakerConfig,
-    global: Arc<[(RendererKind, Arc<CircuitBreaker>); 5]>,
+    global: Arc<[(RendererKind, Arc<CircuitBreaker>); 6]>,
     host: Cache<(String, RendererKind), Arc<CircuitBreaker>>,
 }
 
@@ -538,6 +538,7 @@ impl BreakerRegistry {
                 Arc::new(CircuitBreaker::new(config)),
             ),
             (RendererKind::Camofox, Arc::new(CircuitBreaker::new(config))),
+            (RendererKind::Byparr, Arc::new(CircuitBreaker::new(config))),
         ]);
         let host = Cache::builder()
             .max_capacity(REGISTRY_CAPACITY)
@@ -564,7 +565,9 @@ impl BreakerRegistry {
                 return Arc::clone(breaker);
             }
         }
-        unreachable!("RendererKind is closed: Http | Lightpanda | Chrome | ChromeProxy | Camofox")
+        unreachable!(
+            "RendererKind is closed: Http | Lightpanda | Chrome | ChromeProxy | Camofox | Byparr"
+        )
     }
 
     pub async fn host_for(&self, host: &str, renderer: RendererKind) -> Arc<CircuitBreaker> {
@@ -899,6 +902,7 @@ mod tests {
             RendererKind::Chrome,
             RendererKind::ChromeProxy,
             RendererKind::Camofox,
+            RendererKind::Byparr,
         ] {
             let _ = reg.global_for(kind); // must not panic
         }

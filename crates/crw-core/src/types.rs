@@ -2233,6 +2233,7 @@ pub enum RendererKind {
     #[serde(rename = "chrome_proxy")]
     ChromeProxy,
     Camofox,
+    Byparr,
 }
 
 impl RendererKind {
@@ -2243,6 +2244,7 @@ impl RendererKind {
             RendererKind::Chrome => "chrome",
             RendererKind::ChromeProxy => "chrome_proxy",
             RendererKind::Camofox => "camofox",
+            RendererKind::Byparr => "byparr",
         }
     }
 }

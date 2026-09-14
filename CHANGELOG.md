@@ -37,8 +37,12 @@ and the project uses [Semantic Versioning](https://semver.org/).
   carry `truncated`.
 - **Docker:** `CRW_HOST_PORT` and `CRW_BIND_ADDRESS` set the published port
   and host interface.
-- **Config:** `renderer.camofox.challenge_click` is reserved for a Turnstile
-  click. It is not implemented yet and only logs a startup warning.
+- **Renderer:** a Byparr challenge-solver tier (`[renderer.byparr]`). The
+  ladder calls it last, and only when the HTTP tier or an earlier browser tier
+  returned an anti-bot challenge or wall. It clicks the Cloudflare Turnstile
+  checkbox, and the `cf_clearance` it earns feeds the same per-host cache as
+  Camofox (`renderer.byparr.clearance_reuse`). Pages that end on an internal
+  address are refused. Docker Compose runs Byparr by default.
 
 ### Fixed
 

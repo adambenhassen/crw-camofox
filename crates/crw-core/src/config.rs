@@ -586,6 +586,10 @@ pub struct RendererConfig {
     /// LightPanda. See [`CamofoxEndpoint`].
     #[serde(default)]
     pub camofox: Option<CamofoxEndpoint>,
+    /// Byparr challenge-solver tier, tried after every other JS tier and only
+    /// on an anti-bot challenge. See [`ByparrEndpoint`].
+    #[serde(default)]
+    pub byparr: Option<ByparrEndpoint>,
     /// Residential-proxy Chrome tier (opt-in 4th renderer). Same Chromium
     /// browser as `chrome`, but egress routed through a forwarder that adds
     /// upstream proxy auth (e.g. DataImpulse). Tried after Chrome fails —
@@ -837,6 +841,7 @@ impl Default for RendererConfig {
             playwright: None,
             chrome: None,
             camofox: None,
+            byparr: None,
             chrome_proxy: None,
             chrome_proxy_timeout_ms: None,
             chrome_intercept_resources: false,
@@ -954,6 +959,11 @@ impl RendererConfig {
         // when mode is `None` (no fetching at all).
         if !matches!(self.mode, RendererMode::None) {
             sum = sum.saturating_add(self.http_timeout());
+            // Byparr is plain HTTP (no `cdp` feature), runs one solve per
+            // request at most, and carries no CDP overhead.
+            if let Some(b) = &self.byparr {
+                sum = sum.saturating_add(b.timeout_ms);
+            }
         }
 
         // CDP tiers only contribute when the binary was built with the `cdp`
@@ -1007,11 +1017,6 @@ pub struct CamofoxEndpoint {
     /// request deadline.
     #[serde(default = "default_challenge_wait_ms")]
     pub challenge_wait_ms: u64,
-    /// Reserved: click the Turnstile checkbox once after the passive wait
-    /// gives up. Not implemented yet (needs a camofox-browser build with the
-    /// coordinate click patch); setting it only logs a startup warning.
-    #[serde(default)]
-    pub challenge_click: bool,
     /// After a successful render that earned a `cf_clearance` cookie, cache
     /// the tab's cookies + user agent per host so the HTTP tier can reuse
     /// them and skip the browser on the next scrape of that host.
@@ -1021,6 +1026,34 @@ pub struct CamofoxEndpoint {
 
 fn default_challenge_wait_ms() -> u64 {
     20_000
+}
+
+/// HTTP endpoint for the Byparr challenge-solver tier (a FlareSolverr-compatible
+/// server, e.g. `http://byparr:8191`). The ladder calls it last, and only when
+/// an earlier attempt came back as an anti-bot challenge or wall. Byparr has no
+/// auth: never expose it beyond the internal network.
+#[derive(Debug, Clone, Deserialize)]
+pub struct ByparrEndpoint {
+    pub base_url: String,
+    /// Longest one Byparr solve may take (sent as `maxTimeout`). Always
+    /// clamped to the request deadline.
+    #[serde(default = "default_byparr_timeout_ms")]
+    pub timeout_ms: u64,
+    /// Concurrent solves. Each one launches its own browser.
+    #[serde(default = "default_byparr_max_concurrent")]
+    pub max_concurrent: usize,
+    /// Cache the `cf_clearance` cookies + user agent Byparr returns so the HTTP
+    /// tier can reuse them on the next scrape of that host.
+    #[serde(default = "default_clearance_reuse")]
+    pub clearance_reuse: bool,
+}
+
+fn default_byparr_timeout_ms() -> u64 {
+    30_000
+}
+
+fn default_byparr_max_concurrent() -> usize {
+    2
 }
 
 fn default_clearance_reuse() -> bool {
@@ -1598,16 +1631,36 @@ mod tests {
         let ep: CamofoxEndpoint =
             toml::from_str("base_url = \"http://camofox:9377\"").expect("minimal endpoint parses");
         assert_eq!(ep.challenge_wait_ms, 20_000);
-        assert!(!ep.challenge_click);
         assert!(ep.clearance_reuse);
 
         let ep: CamofoxEndpoint = toml::from_str(
-            "base_url = \"http://camofox:9377\"\nchallenge_wait_ms = 0\nchallenge_click = true\nclearance_reuse = false",
+            "base_url = \"http://camofox:9377\"\nchallenge_wait_ms = 0\nclearance_reuse = false",
         )
         .expect("explicit values parse");
         assert_eq!(ep.challenge_wait_ms, 0);
-        assert!(ep.challenge_click);
         assert!(!ep.clearance_reuse);
+    }
+
+    #[test]
+    fn byparr_endpoint_defaults() {
+        let ep: ByparrEndpoint =
+            toml::from_str("base_url = \"http://byparr:8191\"").expect("minimal endpoint parses");
+        assert_eq!(ep.timeout_ms, 30_000);
+        assert_eq!(ep.max_concurrent, 2);
+        assert!(ep.clearance_reuse);
+    }
+
+    #[test]
+    fn byparr_timeout_extends_the_full_ladder_budget() {
+        let mut r = RendererConfig::default();
+        let without = r.min_deadline_for_full_ladder_ms();
+        r.byparr = Some(ByparrEndpoint {
+            base_url: "http://byparr:8191".into(),
+            timeout_ms: 30_000,
+            max_concurrent: 2,
+            clearance_reuse: true,
+        });
+        assert_eq!(r.min_deadline_for_full_ladder_ms(), without + 30_000);
     }
 
     /// Env var tests modify process-wide state; serialize them to avoid cross-test

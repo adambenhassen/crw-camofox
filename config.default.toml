@@ -54,7 +54,16 @@ ws_url = "ws://127.0.0.1:9222/"
 # base_url = "http://127.0.0.1:9377"
 # api_key = "..."                 # only if the camofox server runs with auth
 # challenge_wait_ms = 20000       # wait for a Cloudflare "Just a moment" page to clear; 0 = off
-# challenge_click = false         # reserved, not implemented yet (logs a warning)
+# clearance_reuse = true          # cache cf_clearance + UA per host, reuse on the HTTP tier
+
+# Byparr (FlareSolverr-compatible challenge solver, e.g. ghcr.io/thephaseless/byparr).
+# Tried last, and only when an earlier attempt came back as an anti-bot challenge
+# or wall; each solve launches a browser. Byparr has no auth: keep it off public
+# interfaces.
+# [renderer.byparr]
+# base_url = "http://127.0.0.1:8191"
+# timeout_ms = 30000              # longest one solve may take, inside the request deadline
+# max_concurrent = 2              # concurrent solves
 # clearance_reuse = true          # cache cf_clearance + UA per host, reuse on the HTTP tier
 
 [crawler]

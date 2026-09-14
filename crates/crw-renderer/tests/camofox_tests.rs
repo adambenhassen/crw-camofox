@@ -553,7 +553,6 @@ async fn render_js_true_escalates_when_http_tier_fails() {
             base_url: camofox,
             api_key: None,
             challenge_wait_ms: 20_000,
-            challenge_click: false,
             clearance_reuse: true,
         }),
         http_timeout_ms: Some(300),

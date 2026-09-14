@@ -54,7 +54,16 @@ ws_url = "ws://127.0.0.1:9222/"
 # base_url = "http://127.0.0.1:9377"
 # api_key = "..."                 # only if the camofox server runs with auth
 # challenge_wait_ms = 20000       # wait for a Cloudflare "Just a moment" page to clear; 0 = off
-# challenge_click = false         # reserved, not implemented yet (logs a warning)
+# clearance_reuse = true          # cache cf_clearance + UA per host, reuse on the HTTP tier
+
+# Byparr (FlareSolverr-compatible challenge solver, e.g. ghcr.io/thephaseless/byparr).
+# Tried last, and only when an earlier attempt came back as an anti-bot challenge
+# or wall; each solve launches a browser. Byparr has no auth: keep it off public
+# interfaces.
+# [renderer.byparr]
+# base_url = "http://127.0.0.1:8191"
+# timeout_ms = 30000              # longest one solve may take, inside the request deadline
+# max_concurrent = 2              # concurrent solves
 # clearance_reuse = true          # cache cf_clearance + UA per host, reuse on the HTTP tier
 
 [search]
@@ -134,8 +143,11 @@ Use the `CRW_` prefix with `__` as a nesting separator:
 | `renderer.camofox.base_url` | `CRW_RENDERER__CAMOFOX__BASE_URL` |
 | `renderer.camofox.api_key` | `CRW_RENDERER__CAMOFOX__API_KEY` |
 | `renderer.camofox.challenge_wait_ms` | `CRW_RENDERER__CAMOFOX__CHALLENGE_WAIT_MS` |
-| `renderer.camofox.challenge_click` | `CRW_RENDERER__CAMOFOX__CHALLENGE_CLICK` |
 | `renderer.camofox.clearance_reuse` | `CRW_RENDERER__CAMOFOX__CLEARANCE_REUSE` |
+| `renderer.byparr.base_url` | `CRW_RENDERER__BYPARR__BASE_URL` |
+| `renderer.byparr.timeout_ms` | `CRW_RENDERER__BYPARR__TIMEOUT_MS` |
+| `renderer.byparr.max_concurrent` | `CRW_RENDERER__BYPARR__MAX_CONCURRENT` |
+| `renderer.byparr.clearance_reuse` | `CRW_RENDERER__BYPARR__CLEARANCE_REUSE` |
 | `search.searxng_url` | `CRW_SEARCH__SEARXNG_URL` |
 | `search.github_token` | `CRW_SEARCH__GITHUB_TOKEN` |
 | `extraction.llm.api_key` | `CRW_EXTRACTION__LLM__API_KEY` |

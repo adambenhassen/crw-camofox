@@ -39,6 +39,7 @@ pub mod breaker;
 pub mod browser;
 #[cfg(feature = "cdp")]
 pub mod browser_pool;
+pub mod byparr;
 #[cfg(feature = "camofox")]
 pub mod camofox;
 #[cfg(feature = "cdp")]
@@ -89,6 +90,7 @@ fn renderer_kind_for(name: &str) -> Option<RendererKind> {
         "chrome" => Some(RendererKind::Chrome),
         "chrome_proxy" => Some(RendererKind::ChromeProxy),
         "camofox" => Some(RendererKind::Camofox),
+        "byparr" => Some(RendererKind::Byparr),
         _ => None,
     }
 }
@@ -136,6 +138,12 @@ fn tier_timeouts_from(
         RendererKind::ChromeProxy,
         std::time::Duration::from_millis(config.chrome_proxy_timeout()),
     );
+    if let Some(b) = &config.byparr {
+        m.insert(
+            RendererKind::Byparr,
+            std::time::Duration::from_millis(b.timeout_ms),
+        );
+    }
     m
 }
 
@@ -151,6 +159,8 @@ fn credit_for(kind: RendererKind) -> u32 {
         RendererKind::ChromeProxy => 2,
         // Camofox is the heavy/stealth tier — same internal cost as Chrome.
         RendererKind::Camofox => 2,
+        // A full browser solve, like Camofox.
+        RendererKind::Byparr => 2,
     }
 }
 
@@ -305,7 +315,7 @@ fn is_soft_block_status(status_code: u16) -> bool {
 pub const MIN_TIER_BUDGET: Duration = Duration::from_millis(500);
 
 /// True when SOME tier can plausibly clear an IP-reputation block: the camofox
-/// stealth tier, or a usable fallback HTTP proxy.
+/// stealth tier, the byparr solver, or a usable fallback HTTP proxy.
 ///
 /// Every input is the REAL constructed thing, never a config flag or an env var:
 /// a `camofox` entry present in `js_renderers`, and the concrete fetcher's
@@ -315,7 +325,10 @@ fn has_recovery_tier(
     js_renderers: &[Arc<dyn PageFetcher>],
     http_fallback_proxy_ready: bool,
 ) -> bool {
-    js_renderers.iter().any(|r| r.name() == "camofox") || http_fallback_proxy_ready
+    js_renderers
+        .iter()
+        .any(|r| matches!(r.name(), "camofox" | "byparr"))
+        || http_fallback_proxy_ready
 }
 
 /// Composite renderer that tries multiple backends in order.
@@ -501,12 +514,6 @@ impl FallbackRenderer {
                     Duration::from_millis(config.chrome_timeout()),
                 )
                 .with_challenge_wait(Duration::from_millis(cf.challenge_wait_ms));
-                if cf.challenge_click {
-                    tracing::warn!(
-                        "renderer.camofox.challenge_click is set but not implemented yet; \
-                         the Camofox tier only waits for challenges to clear"
-                    );
-                }
                 if cf.clearance_reuse {
                     tier = tier.with_clearance_cache(Arc::clone(&clearance));
                 }
@@ -519,6 +526,21 @@ impl FallbackRenderer {
                 ));
             }
         }
+        // Byparr (challenge solver) goes last: `fetch_with_js` only runs it once
+        // an attempt came back as an anti-bot challenge. Plain HTTP, so it is
+        // not feature-gated and joins whatever mode is pinned.
+        if let Some(b) = &config.byparr {
+            let mut tier = byparr::ByparrRenderer::new(
+                &b.base_url,
+                Duration::from_millis(b.timeout_ms),
+                b.max_concurrent,
+            );
+            if b.clearance_reuse {
+                tier = tier.with_clearance_cache(Arc::clone(&clearance));
+            }
+            js_renderers.push(Arc::new(tier));
+        }
+
         #[cfg(not(feature = "camofox"))]
         if matches!(config.mode, RendererMode::Camofox) {
             return Err(CrwError::ConfigError(
@@ -789,8 +811,18 @@ impl FallbackRenderer {
                     // to tell they did not get one.
                     let is_auth_blocked = is_soft_block_status(http_result.status_code);
                     let started_at = std::time::Instant::now();
+                    let challenged = http_result.warning.as_deref() == Some("cloudflare_mitigated")
+                        || detector::looks_like_cloudflare_challenge(&http_result.html)
+                        || detector::looks_like_generic_bot_wall(&http_result.html);
                     match self
-                        .fetch_with_js(url, headers, wait_for_ms, requested_renderer, deadline)
+                        .fetch_with_js(
+                            url,
+                            headers,
+                            wait_for_ms,
+                            requested_renderer,
+                            challenged,
+                            deadline,
+                        )
                         .await
                     {
                         Ok(js_result) => Ok(js_result),
@@ -967,7 +999,14 @@ impl FallbackRenderer {
                         );
                     }
                     match self
-                        .fetch_with_js(url, headers, wait_for_ms, requested_renderer, deadline)
+                        .fetch_with_js(
+                            url,
+                            headers,
+                            wait_for_ms,
+                            requested_renderer,
+                            is_blocked,
+                            deadline,
+                        )
                         .await
                     {
                         Ok(js_result) => Ok(js_result),
@@ -1114,34 +1153,46 @@ impl FallbackRenderer {
             error = %http_err,
             "HTTP fetch failed, escalating to JS renderer"
         );
-        self.fetch_with_js(url, headers, wait_for_ms, requested_renderer, deadline)
-            .await
-            .map_err(|js_err| {
-                tracing::warn!("Both HTTP and JS failed: http={http_err}, js={js_err}");
-                // When the HTTP tier could not reach the origin AND the JS tier
-                // failed navigating to that same origin, the origin is the root
-                // cause: surface TargetUnreachable (422 — the caller handed us a
-                // dead target) instead of the JS tier's RendererError, which
-                // falls through to a 500 and reads as "our server broke".
-                //
-                // A JS failure can also be OUR fault (pool exhausted, CDP
-                // discovery failed, pinned renderer missing). Those keep their
-                // own error, or we would blame the caller for our outage.
-                match (&http_err, &js_err) {
-                    (CrwError::TargetUnreachable(_), js) if is_origin_navigation_failure(js) => {
-                        http_err
-                    }
-                    _ => js_err,
+        // No body to judge, so no evidence of a challenge.
+        self.fetch_with_js(
+            url,
+            headers,
+            wait_for_ms,
+            requested_renderer,
+            false,
+            deadline,
+        )
+        .await
+        .map_err(|js_err| {
+            tracing::warn!("Both HTTP and JS failed: http={http_err}, js={js_err}");
+            // When the HTTP tier could not reach the origin AND the JS tier
+            // failed navigating to that same origin, the origin is the root
+            // cause: surface TargetUnreachable (422 — the caller handed us a
+            // dead target) instead of the JS tier's RendererError, which
+            // falls through to a 500 and reads as "our server broke".
+            //
+            // A JS failure can also be OUR fault (pool exhausted, CDP
+            // discovery failed, pinned renderer missing). Those keep their
+            // own error, or we would blame the caller for our outage.
+            match (&http_err, &js_err) {
+                (CrwError::TargetUnreachable(_), js) if is_origin_navigation_failure(js) => {
+                    http_err
                 }
-            })
+                _ => js_err,
+            }
+        })
     }
 
+    /// Run the JS ladder. `challenge_hint` says the HTTP tier's body was an
+    /// anti-bot challenge or wall; it (or an earlier JS body that was one) is
+    /// what lets the Byparr solver run, since every solve launches a browser.
     async fn fetch_with_js(
         &self,
         url: &str,
         headers: &HashMap<String, String>,
         wait_for_ms: Option<u64>,
         requested_renderer: Option<&str>,
+        challenge_hint: bool,
         deadline: crw_core::Deadline,
     ) -> CrwResult<FetchResult> {
         let host = host_of(url);
@@ -1199,6 +1250,7 @@ impl FallbackRenderer {
         let mut last_error = None;
         let mut last_failover_reason: Option<FailoverErrorKind> = None;
         let mut thin_result: Option<FetchResult> = None;
+        let mut challenge_seen = challenge_hint;
         // Snapshot for the leak-through fallback below. The main loop
         // consumes `renderers`; we keep a parallel reference list so a
         // single skipped renderer can still get a shot when its host
@@ -1207,6 +1259,14 @@ impl FallbackRenderer {
 
         for renderer in renderers {
             let kind = renderer_kind_for(renderer.name());
+
+            if kind == Some(RendererKind::Byparr) && !challenge_seen {
+                tracing::debug!(
+                    url,
+                    "no anti-bot challenge seen, skipping the byparr solver"
+                );
+                continue;
+            }
 
             // Skip empty hosts: don't pollute breaker/preference caches
             // with the "" key when URL parsing failed.
@@ -1325,7 +1385,7 @@ impl FallbackRenderer {
                         failed_render,
                         is_bot_wall,
                         vendor_block,
-                        cf_challenge: _,
+                        cf_challenge,
                         is_status_blocked,
                         antibot,
                         antibot_blocked,
@@ -1409,6 +1469,8 @@ impl FallbackRenderer {
                         None => FailoverErrorKind::PlaceholderContent,
                     };
                     last_failover_reason = Some(err_kind.clone());
+                    challenge_seen |=
+                        cf_challenge || is_bot_wall || vendor_block.is_some() || antibot_blocked;
                     if let Some(k) = trackable {
                         // Thin/placeholder/failed render → classify against
                         // attempt context so deadline-clamped attempts don't
@@ -2048,7 +2110,6 @@ mod tests {
                 base_url: "http://127.0.0.1:1".into(),
                 api_key: None,
                 challenge_wait_ms: 5_000,
-                challenge_click: false,
                 clearance_reuse: false,
             }),
             ..Default::default()
@@ -2113,7 +2174,6 @@ mod tests {
                     base_url: "http://127.0.0.1:9377".into(),
                     api_key: None,
                     challenge_wait_ms: 20_000,
-                    challenge_click: false,
                     clearance_reuse: true,
                 }),
                 ..Default::default()
@@ -2325,6 +2385,7 @@ mod tests {
                 &HashMap::new(),
                 None,
                 None,
+                false,
                 crw_core::Deadline::from_request_ms(0),
             )
             .await
@@ -2588,6 +2649,7 @@ mod tests {
                 &HashMap::new(),
                 None,
                 None,
+                false,
                 crw_core::Deadline::from_request_ms(1_500),
             )
             .await
@@ -2635,6 +2697,7 @@ mod tests {
                 &HashMap::new(),
                 None,
                 None,
+                false,
                 crw_core::Deadline::from_request_ms(1_500),
             )
             .await
@@ -3081,7 +3144,14 @@ mod tests {
         let r = make_renderer_with_mocks(vec![mock]);
 
         let res = r
-            .fetch_with_js("https://example.com", &HashMap::new(), None, None, tdl())
+            .fetch_with_js(
+                "https://example.com",
+                &HashMap::new(),
+                None,
+                None,
+                false,
+                tdl(),
+            )
             .await
             .expect("healthy budget must render");
         assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 1);
@@ -3816,6 +3886,117 @@ mod tests {
             result.html.contains("CHROME-"),
             "expected chrome output after lightpanda vendor block"
         );
+    }
+
+    fn cf_challenge_html() -> String {
+        format!(
+            "<html><head><title>Just a moment...</title><script src=\"/cdn-cgi/challenge-platform/h/g/orchestrate/chl_page/v1\"></script></head><body>{}</body></html>",
+            "x".repeat(200)
+        )
+    }
+
+    /// Byparr launches a browser per solve, so a tier failure that is not a
+    /// challenge must not reach it.
+    #[tokio::test]
+    async fn byparr_is_skipped_without_a_challenge() {
+        let camofox = Arc::new(MockFetcher {
+            name: "camofox",
+            behavior: MockBehavior::Err("navigation failed: boom".into()),
+        }) as Arc<dyn PageFetcher>;
+        let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let byparr = Arc::new(CountingFetcher {
+            name: "byparr",
+            calls: calls.clone(),
+        }) as Arc<dyn PageFetcher>;
+        let r = make_renderer_with_mocks(vec![camofox, byparr]);
+
+        let _ = r
+            .fetch_with_js(
+                "https://example.com",
+                &HashMap::new(),
+                None,
+                None,
+                false,
+                tdl(),
+            )
+            .await;
+
+        assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn byparr_solves_after_a_js_tier_returns_a_challenge() {
+        let camofox = Arc::new(MockFetcher {
+            name: "camofox",
+            behavior: MockBehavior::Ok(cf_challenge_html()),
+        }) as Arc<dyn PageFetcher>;
+        let byparr = Arc::new(MockFetcher {
+            name: "byparr",
+            behavior: MockBehavior::Ok(rich_html("BYPARR-")),
+        }) as Arc<dyn PageFetcher>;
+        let r = make_renderer_with_mocks(vec![camofox, byparr]);
+
+        let result = r
+            .fetch_with_js(
+                "https://example.com",
+                &HashMap::new(),
+                None,
+                None,
+                false,
+                tdl(),
+            )
+            .await
+            .expect("byparr clears the challenge");
+
+        assert_eq!(result.rendered_with.as_deref(), Some("byparr"));
+        assert!(result.html.contains("BYPARR-"));
+    }
+
+    /// The HTTP tier saw the challenge; the JS tier before byparr only errored.
+    #[tokio::test]
+    async fn byparr_solves_on_an_http_tier_challenge_hint() {
+        let camofox = Arc::new(MockFetcher {
+            name: "camofox",
+            behavior: MockBehavior::Timeout,
+        }) as Arc<dyn PageFetcher>;
+        let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let byparr = Arc::new(CountingFetcher {
+            name: "byparr",
+            calls: calls.clone(),
+        }) as Arc<dyn PageFetcher>;
+        let r = make_renderer_with_mocks(vec![camofox, byparr]);
+
+        let result = r
+            .fetch_with_js(
+                "https://example.com",
+                &HashMap::new(),
+                None,
+                None,
+                true,
+                tdl(),
+            )
+            .await
+            .expect("byparr renders");
+
+        assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 1);
+        assert_eq!(result.rendered_with.as_deref(), Some("byparr"));
+    }
+
+    #[test]
+    fn byparr_endpoint_registers_last_and_counts_as_recovery() {
+        let cfg = RendererConfig {
+            mode: RendererMode::Auto,
+            byparr: Some(crw_core::config::ByparrEndpoint {
+                base_url: "http://byparr:8191".into(),
+                timeout_ms: 30_000,
+                max_concurrent: 2,
+                clearance_reuse: true,
+            }),
+            ..Default::default()
+        };
+        let r = FallbackRenderer::new(&cfg, "crw-test", None, &StealthConfig::default()).unwrap();
+        assert_eq!(r.js_renderer_names().last(), Some(&"byparr"));
+        assert!(r.has_recovery_tier());
     }
 
     #[tokio::test]
