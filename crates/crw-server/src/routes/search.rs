@@ -275,6 +275,11 @@ pub async fn search_inner(
     // legs further down. `llm_path` = this request enters LLM mode.
     let server_llm = state.config.extraction.llm.clone();
     let byok_llm = build_byok_search_llm_config(&req, server_llm.as_ref());
+    if let (Some(base_url), Some(_)) = (&req.base_url, &byok_llm) {
+        crw_core::url_safety::validate_llm_base_url(base_url)
+            .await
+            .map_err(|e| CrwError::InvalidRequest(format!("baseUrl: {e}")))?;
+    }
     let effective_llm = byok_llm.as_ref().or(server_llm.as_ref());
     let llm_path = req.answer.unwrap_or(false) || req.summarize_results.unwrap_or(false);
 

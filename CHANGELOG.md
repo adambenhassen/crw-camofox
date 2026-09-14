@@ -95,6 +95,11 @@ and the project uses [Semantic Versioning](https://semver.org/).
   with `--block-private-networks`. Error strings no longer contain internal
   URLs or proxy credentials. PDF parsing moves to lopdf 0.42
   (RUSTSEC-2026-0187).
+- **Security:** a per-request LLM `baseUrl` (BYOK) that points at a private,
+  loopback or link-local address is refused with 400 on scrape, v2 batch start
+  and search. Before, the server POSTed page content and the caller's key to
+  it. LLM calls no longer follow redirects to such addresses. The operator's
+  `[extraction.llm].base_url` is not restricted.
 
 ### Changed
 

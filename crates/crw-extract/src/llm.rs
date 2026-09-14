@@ -41,6 +41,8 @@ fn shared_client() -> &'static reqwest::Client {
     CLIENT.get_or_init(|| {
         reqwest::Client::builder()
             .timeout(REQUEST_TIMEOUT)
+            // A BYOK base URL is validated before use; a redirect must not undo it.
+            .redirect(crw_core::url_safety::safe_redirect_policy())
             .build()
             .expect("reqwest client build (LLM shared)")
     })

@@ -63,6 +63,17 @@ pub fn validate_scrape_template(req: &ScrapeRequest) -> CrwResult<()> {
     Ok(())
 }
 
+/// Refuse a BYOK `baseUrl` that points at a private address. It is only used
+/// alongside a BYOK key (`build_byok_llm_config`), so it is only checked then.
+pub async fn validate_byok_base_url(req: &ScrapeRequest) -> CrwResult<()> {
+    if let (Some(base_url), Some(_)) = (&req.base_url, &req.llm_api_key) {
+        crw_core::url_safety::validate_llm_base_url(base_url)
+            .await
+            .map_err(|e| crw_core::error::CrwError::InvalidRequest(format!("baseUrl: {e}")))?;
+    }
+    Ok(())
+}
+
 #[allow(clippy::too_many_arguments)]
 async fn scrape_url_inner(
     req: &ScrapeRequest,
@@ -75,6 +86,7 @@ async fn scrape_url_inner(
     deadline: Deadline,
 ) -> CrwResult<ScrapeData> {
     validate_scrape_template(req)?;
+    validate_byok_base_url(req).await?;
 
     // Determine whether stealth headers should be injected for this request.
     let inject_stealth = req.stealth.unwrap_or(default_stealth);

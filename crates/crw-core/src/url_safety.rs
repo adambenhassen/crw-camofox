@@ -98,6 +98,14 @@ pub async fn validate_safe_url_resolved(url: &url::Url) -> Result<(), String> {
     resolve_and_validate(url).await
 }
 
+/// Validate a caller-supplied LLM base URL (BYOK `baseUrl`). The server POSTs
+/// page content and the caller's key there, so it gets the same destination
+/// rules as a scrape target. Operator-configured base URLs are not checked.
+pub async fn validate_llm_base_url(raw: &str) -> Result<(), String> {
+    let url = url::Url::parse(raw).map_err(|e| format!("invalid base URL: {e}"))?;
+    validate_safe_url_resolved(&url).await
+}
+
 /// [`validate_safe_host`] plus DNS resolution. The destination check for URLs
 /// the browser produced rather than the caller; see [`validate_safe_host`] for
 /// why the URL-shape rules are excluded.

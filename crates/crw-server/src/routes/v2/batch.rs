@@ -70,6 +70,7 @@ pub async fn start_batch(
     // document per URL labelled as a block.
     crate::state::validate_renderer_pin(template.renderer, template.render_js, &state)?;
     crw_crawl::single::validate_scrape_template(&template)?;
+    crw_crawl::single::validate_byok_base_url(&template).await?;
 
     // Partition URLs into valid / invalid (SSRF-checked, same as v1 scrape).
     let mut valid = Vec::new();
