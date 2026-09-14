@@ -18,11 +18,83 @@ and the project uses [Semantic Versioning](https://semver.org/).
   HTTP-tier fetch on later scrapes of that host, so they skip the browser.
   A repeat challenge drops the entry. Off with
   `renderer.camofox.clearance_reuse = false`; never used through a proxy.
+  The cache is used only when its `cf_clearance` cookie applies to the host
+  being fetched.
+- **Crawl:** `CrawlRequest.headers` (and v2 `scrapeOptions.headers`) reach
+  every page fetch. The nested `scrapeOptions` shape from the spec is accepted.
+- **Crawl / batch:** a page that could not be read (transport failure, CDN
+  origin error, wall, PDF or extraction failure) is returned as a document
+  marked through `block` and counted in a new `blocked` field, instead of
+  being dropped. Blocked v2 documents cost zero credits.
+- **v2:** `GET /v2/{batch/scrape,crawl}/{id}/errors` lists each failed URL with
+  its reason. `/v2/scrape` honours `renderJs` and turns `location.languages`
+  into an `Accept-Language` header. v2 documents carry `llmUsage` when an LLM
+  ran, as `/v1` does.
+- **Map:** responses include a `sitemaps` array of the sitemap documents that
+  answered with parseable content (kept out of `links`).
+- **Search:** `scrapeOptions.timeout` (1–60000 ms) sets the per-result scrape
+  budget; the default is 15 s instead of the full renderer ladder. Results
+  carry `truncated`.
+- **Docker:** `CRW_HOST_PORT` and `CRW_BIND_ADDRESS` set the published port
+  and host interface.
+- **Config:** `renderer.camofox.challenge_click` is reserved for a Turnstile
+  click. It is not implemented yet and only logs a startup warning.
 
 ### Fixed
 
 - **Renderer:** a caller-supplied `User-Agent` no longer travels with the
-  stealth mode's Chrome `Sec-Ch-Ua*` client hints.
+  stealth mode's Chrome `Sec-Ch-Ua*` client hints. A blank `User-Agent` is
+  treated as absent.
+- **Renderer:** the escalation after LightPanda targeted a `chrome` tier this
+  fork never builds, so it always failed and Camofox was never reached. It now
+  escalates to Camofox. Custom request headers now reach LightPanda renders
+  too; Camofox renders still ignore them.
+- **Renderer:** Camofox renders report the page's real HTTP status instead of
+  200 for every page, including 404 and 403.
+- **Renderer:** when every browser tier rejects a page as an anti-bot wall, the
+  scrape fails instead of returning the wall, unless the page is larger than
+  an error page (so cleared Cloudflare pages still succeed).
+- **Renderer:** a forced-JS scrape whose browser tiers fail falls back to the
+  HTTP body it already fetched, with a `js_escalation_failed` warning.
+- **Renderer:** timeouts report the requested budget instead of the near-zero
+  overrun. A blackholed origin is reported as unreachable, not a timeout. An
+  unanswered proxy auth challenge is reported as a proxy authentication
+  failure. A request no longer returns to a proxy that already failed it.
+- **Renderer:** a dead Camofox proxy (Firefox `proxyConnectFailure`) now trips
+  the renderer breaker instead of counting as the site's fault. Anti-bot walls
+  no longer advance the breaker when a recovery tier exists.
+- **Renderer:** binary bodies (a NUL byte in the first 1 KB) fail with 422
+  instead of being decoded as HTML; a mislabelled PDF is detected by its
+  header.
+- **Scrape:** Cloudflare 520–527 origin-error pages, origin error pages
+  (>= 400 with little text), registrar parking pages, and Reddit, Cloudflare
+  and Vercel block pages served as 200 fail instead of shipping as content.
+  Cleared Cloudflare pages and thin but real pages are no longer reported as
+  blocks. A scrape whose requested formats all come back empty fails as
+  `no_usable_content`. Crawl and batch apply the same verdicts.
+- **Crawl:** a Camofox escalation that adds content below the LightPanda retry
+  threshold is kept. `truncated` follows the render that was kept.
+- **Extract:** `onlyMainContent` no longer deletes article bodies whose
+  wrappers are named after nearby layout (sidebar, nav, footer), keeps
+  `<header>`/`<aside>`/`<footer>` inside `<main>` or `<article>`, keeps
+  Elementor page content, and removes navigation menus. Non-HTML bodies are
+  left as they are.
+- **Extract:** `maxChars` and the LLM prompt cap count Unicode scalars, not
+  bytes. An LLM request whose connection closed before it reached the provider
+  is retried once. An extract URL whose page is a wall or error page fails
+  with that reason, and a job whose every URL failed charges no credits.
+- **Search:** Google result links resolve to their real URLs instead of Google
+  `/goto` redirects; consent and rate-limit redirects keep the original link.
+  `lang` is validated at the API boundary. Enrichment DNS checks run in
+  parallel.
+- **Research:** arXiv is a paper source again, and OpenAlex queries no longer
+  fail on `?` or `*`.
+- **Security:** the SSRF guard's DNS lookup is bounded at 8 s and no longer
+  blocks whole public /16 ranges. The CDP render tiers check every outbound
+  request (child frames included) against the SSRF rules, and LightPanda starts
+  with `--block-private-networks`. Error strings no longer contain internal
+  URLs or proxy credentials. PDF parsing moves to lopdf 0.42
+  (RUSTSEC-2026-0187).
 
 ### Changed
 
