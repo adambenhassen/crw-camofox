@@ -101,6 +101,9 @@ fn docker_config_hosts_match_compose_services() {
     if let Some(u) = get("renderer", "camofox", "base_url") {
         hosts.push(("renderer.camofox.base_url", u));
     }
+    if let Some(u) = get("renderer", "byparr", "base_url") {
+        hosts.push(("renderer.byparr.base_url", u));
+    }
     if let Some(u) = doc
         .get("search")
         .and_then(|s| s.get("searxng_url"))

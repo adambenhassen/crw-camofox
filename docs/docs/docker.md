@@ -35,16 +35,20 @@ The bundled `docker-compose.yml` starts these services:
 | **crw** | 3000¹ | ✅ | API server (loads `config.docker.toml`) |
 | **lightpanda** | 9222 | ✅ | Lightweight headless browser for JS rendering |
 | **camofox** | 9377 | ✅ | [Camofox](https://github.com/redf0x1/camofox-browser) (Camoufox/Firefox) — heavy/stealth JS tier + `/v1/search` backend |
+| **byparr** | 8191 | ✅ | [Byparr](https://github.com/ThePhaseless/Byparr) — Cloudflare challenge solver, called only after a challenge; no auth, never published |
 | **searxng** | 8080 | `--profile searxng` | SearXNG meta-search backend for `/v1/search` (opt-in alternative to Camofox) |
 
 ¹ The host bind address and port are overridable without editing the Compose file: set `CRW_HOST_PORT` in `.env` (e.g. `CRW_HOST_PORT=3055`) if something else already holds 3000 on the box, and `CRW_BIND_ADDRESS` (e.g. `CRW_BIND_ADDRESS=127.0.0.1`) to stop publishing on public interfaces, for example when a reverse proxy fronts crw. Both default to `0.0.0.0:3000` and the container port stays `3000`. Compose interpolates these on the host into the port mapping only; unlike the `CRW_*` config keys elsewhere they are not delivered into the container, so the engine never reads them.
 
 The `crw` service reads its configuration from the mounted `config.docker.toml` (via
 `CRW_CONFIG=config.docker`), which already points each renderer at the matching
-service name on Compose's default bridge network (`lightpanda:9222`, `camofox:9377`). You
+service name on Compose's default bridge network (`lightpanda:9222`, `camofox:9377`,
+`byparr:8191`). You
 don't need to wire renderer URLs through environment variables — they're in the config file.
 
-The renderer ladder is `HTTP → LightPanda → Camofox`.
+The renderer ladder is `HTTP → LightPanda → Camofox → Byparr`. Byparr runs only when an earlier
+attempt came back as an anti-bot challenge or wall. The `cf_clearance` cookie it earns is cached per
+host, so the next scrape of that host goes out over plain HTTP.
 
 ## Search
 

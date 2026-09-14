@@ -1,5 +1,5 @@
 # Docker-specific overrides (layered on top of config.default.toml).
-# Renderer failover order: HTTP → LightPanda → Camofox.
+# Renderer failover order: HTTP → LightPanda → Camofox → Byparr (challenges only).
 
 [request]
 # Bench analysis (May 2026): 12 of 14 zero-byte misses on the 150-URL diagnose
@@ -50,6 +50,12 @@ ws_url = "ws://lightpanda:9222/"
 # `CRW_RENDERER__CAMOFOX__API_KEY`.
 [renderer.camofox]
 base_url = "http://camofox:9377"
+
+# Byparr — the Cloudflare challenge solver, tried last and only when an earlier
+# attempt returned an anti-bot challenge. Reachable on the compose bridge as
+# `byparr:8191`.
+[renderer.byparr]
+base_url = "http://byparr:8191"
 
 # /v1/search flows through Camofox (Firefox) — it drives Google directly via the
 # camofox-browser tier configured above.

@@ -19,6 +19,11 @@ services:
       # render/search after `compose up` doesn't race the browser cold start.
       camofox:
         condition: service_healthy
+      # Not service_healthy: Byparr's image healthcheck launches a browser and
+      # loads a public page (every 15 min), and crw only calls it after a
+      # challenge anyway.
+      byparr:
+        condition: service_started
     environment:
       - RUST_LOG=info
       - CRW_CONFIG=config.docker
@@ -73,6 +78,20 @@ services:
       timeout: 5s
       retries: 5
       start_period: 20s
+
+  # Cloudflare challenge solver. The ladder calls it last, and only when the
+  # HTTP tier or Camofox came back with an anti-bot challenge: Byparr opens a
+  # fresh stealth Firefox, clicks the Turnstile checkbox, and returns the page
+  # plus the cf_clearance cookie crw then reuses on the HTTP tier. Reachable
+  # only on the compose network as `byparr:8191`. It has NO auth: never publish
+  # its port. Like camofox, requests the browser makes along the way leave this
+  # container; crw refuses to return a page whose final URL is internal.
+  # Pinned (never `:latest`) so upgrades are deliberate.
+  byparr:
+    image: ghcr.io/thephaseless/byparr:3.0.4
+    restart: unless-stopped
+    # Each solve launches its own Firefox; `max_concurrent` defaults to 2.
+    shm_size: "2g"
 
   # Interactive browser MCP for AI agents (e.g. Hermes), bridging the camofox
   # browser REST API to MCP over Streamable HTTP. This is the upstream companion
