@@ -7,6 +7,14 @@ and the project uses [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [1.4.0] - 2026-09-15
+
+A hardening release: the Camofox tier now waits out Cloudflare challenges and
+reuses the clearance it earns, a Byparr solver tier handles Turnstile
+checkboxes, and scrapes stop shipping error pages, walls and parking pages as
+content. Crawl and batch keep failed pages as marked documents, and the
+metrics and admin routes sit behind the API-key boundary.
+
 ### Added
 
 - **Renderer:** the Camofox tier now waits, on the open tab, for a Cloudflare
@@ -26,6 +34,8 @@ and the project uses [Semantic Versioning](https://semver.org/).
   origin error, wall, PDF or extraction failure) is returned as a document
   marked through `block` and counted in a new `blocked` field, instead of
   being dropped. Blocked v2 documents cost zero credits.
+- **Crawl:** a crawl whose every fetch failed ends `failed` with the last
+  fetch failure's reason instead of completing with zero pages.
 - **v2:** `GET /v2/{batch/scrape,crawl}/{id}/errors` lists each failed URL with
   its reason. `/v2/scrape` honours `renderJs` and turns `location.languages`
   into an `Accept-Language` header. v2 documents carry `llmUsage` when an LLM
@@ -78,6 +88,9 @@ and the project uses [Semantic Versioning](https://semver.org/).
   `no_usable_content`. Crawl and batch apply the same verdicts.
 - **Crawl:** a Camofox escalation that adds content below the LightPanda retry
   threshold is kept. `truncated` follows the render that was kept.
+- **Crawl:** a complete non-HTML body (a JSON API response, say) that scores
+  low on the quality check no longer buys a browser render that was then
+  discarded.
 - **Extract:** `onlyMainContent` no longer deletes article bodies whose
   wrappers are named after nearby layout (sidebar, nav, footer), keeps
   `<header>`/`<aside>`/`<footer>` inside `<main>` or `<article>`, keeps
@@ -118,7 +131,9 @@ and the project uses [Semantic Versioning](https://semver.org/).
 - A Camofox fetch that lands on Firefox's own error page ("Problem loading
   page") now fails as a navigation failure instead of returning that page.
 - CORS is no longer permissive. Browser callers need their origin listed in
-  `server.cors_allowed_origins`; the default sends no CORS headers.
+  `server.cors_allowed_origins`; the default sends no CORS headers. Entries
+  are matched as origins, so a trailing slash or capitals no longer disable
+  CORS silently; `*` is ignored with a warning.
 - **Breaking:** a malformed proxy URL is refused instead of ignored. A bad
   `crawler.proxy` (or CLI `--proxy`) fails startup, and a bad per-request
   `proxy` returns 400. Before, the value was logged and dropped, and traffic
@@ -328,6 +343,8 @@ machinery is removed.
 - Structured-extraction (Anthropic) chat URL no longer doubles `/v1`.
 - Engine cap and camofox-mcp configuration corrected against a live Docker stack.
 
+[1.4.0]: https://github.com/adambenhassen/crw-camofox/compare/v1.3.0...v1.4.0
+[1.3.0]: https://github.com/adambenhassen/crw-camofox/compare/v1.2.0...v1.3.0
 [1.2.0]: https://github.com/adambenhassen/crw-camofox/compare/v1.1.2...v1.2.0
 [1.1.2]: https://github.com/adambenhassen/crw-camofox/compare/v1.1.1...v1.1.2
 [1.1.1]: https://github.com/adambenhassen/crw-camofox/compare/v1.1.0...v1.1.1
