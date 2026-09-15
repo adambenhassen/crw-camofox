@@ -140,6 +140,8 @@ agent when to use each tool suite live in [`skills/`](skills/):
 - [**`crw-web`**](skills/crw-web/SKILL.md) — the crw tools (scrape / search / crawl / map / parse): when to use each, `crw_search` engine selection, and output limits.
 - [**`camofox-browser`**](skills/camofox-browser/SKILL.md) — the camofox-mcp interactive browser: the full tool reference and the "escalate only for real interactivity" rule. Requires the `camofox-mcp` server.
 
+---
+
 ## Why crw-camofox?
 
 - **Rust-native engine** — the core is one static Rust binary (no Redis, Node.js, or Python). The Camofox (Firefox) browser runs as a separate container, pulled in only for JS rendering, stealth, and search — plain HTTP fetches never touch it.
