@@ -590,6 +590,13 @@ pub struct RendererConfig {
     /// on an anti-bot challenge. See [`ByparrEndpoint`].
     #[serde(default)]
     pub byparr: Option<ByparrEndpoint>,
+    /// In-process Chrome-impersonation HTTP tier (wreq). Unlike every other
+    /// tier there is no endpoint; `enabled` is the runtime kill switch and
+    /// defaults to true. Inert in a build without the `impersonated` cargo
+    /// feature (`impersonated_in_chain()` folds to false). See
+    /// [`ImpersonatedConfig`].
+    #[serde(default)]
+    pub impersonated: ImpersonatedConfig,
     /// Residential-proxy Chrome tier (opt-in 4th renderer). Same Chromium
     /// browser as `chrome`, but egress routed through a forwarder that adds
     /// upstream proxy auth (e.g. DataImpulse). Tried after Chrome fails —
@@ -842,6 +849,7 @@ impl Default for RendererConfig {
             chrome: None,
             camofox: None,
             byparr: None,
+            impersonated: ImpersonatedConfig::default(),
             chrome_proxy: None,
             chrome_proxy_timeout_ms: None,
             chrome_intercept_resources: false,
@@ -886,6 +894,24 @@ impl RendererConfig {
     pub fn chrome_proxy_timeout(&self) -> u64 {
         self.chrome_proxy_timeout_ms
             .unwrap_or_else(|| self.chrome_timeout().saturating_add(15_000))
+    }
+
+    /// True when the Chrome-impersonation HTTP tier participates in the fetch
+    /// chain. Deliberately not gated on `mode`: the tier is an HTTP strategy,
+    /// and `mode = "none"` means "no JS", not "no fetching strategies". Always
+    /// false in a build without the `impersonated` feature; the leading `cfg!`
+    /// is what keeps the default-on runtime flag inert there.
+    pub fn impersonated_in_chain(&self) -> bool {
+        cfg!(feature = "impersonated") && self.impersonated.enabled
+    }
+
+    /// Per-request budget (ms) for the impersonated tier. Falls back to the
+    /// HTTP tier timeout: the tier is shaped like the HTTP tier and its
+    /// failures are bounded the same way.
+    pub fn impersonated_timeout(&self) -> u64 {
+        self.impersonated
+            .timeout_ms
+            .unwrap_or_else(|| self.http_timeout())
     }
 
     /// Compose the DataImpulse-style proxy credentials for a single request.
@@ -964,6 +990,13 @@ impl RendererConfig {
             if let Some(b) = &self.byparr {
                 sum = sum.saturating_add(b.timeout_ms);
             }
+        }
+
+        // Chrome-impersonation HTTP tier: one bounded HTTP request between the
+        // plain fetch and the browser ladder, in every mode. Inert in the lean
+        // build because `impersonated_in_chain()` is always false there.
+        if self.impersonated_in_chain() {
+            sum = sum.saturating_add(self.impersonated_timeout());
         }
 
         // CDP tiers only contribute when the binary was built with the `cdp`
@@ -1058,6 +1091,30 @@ fn default_byparr_max_concurrent() -> usize {
 
 fn default_clearance_reuse() -> bool {
     true
+}
+
+/// In-process Chrome-impersonation HTTP tier (wreq), loaded under
+/// `[renderer.impersonated]`. Non-Option on purpose: an absent section means
+/// "on with defaults", which is the deployment contract.
+#[derive(Debug, Clone, Deserialize)]
+pub struct ImpersonatedConfig {
+    /// Runtime kill switch. Default true: the tier is ON in any build
+    /// compiled with the `impersonated` feature.
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+    /// Per-request timeout override (ms). Falls back to the HTTP tier
+    /// timeout.
+    #[serde(default)]
+    pub timeout_ms: Option<u64>,
+}
+
+impl Default for ImpersonatedConfig {
+    fn default() -> Self {
+        Self {
+            enabled: default_true(),
+            timeout_ms: None,
+        }
+    }
 }
 
 /// Stealth mode configuration for evading bot detection.

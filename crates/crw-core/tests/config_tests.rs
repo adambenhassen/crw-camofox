@@ -120,3 +120,51 @@ fn auth_config_api_keys_comma_with_spaces() {
     let config: AuthConfig = toml::from_str(toml_str).unwrap();
     assert_eq!(config.api_keys, vec!["key1", "key2", "key3"]);
 }
+
+#[test]
+fn impersonated_config_defaults_on_with_http_timeout_fallback() {
+    let config = RendererConfig::default();
+    assert!(config.impersonated.enabled);
+    assert!(config.impersonated.timeout_ms.is_none());
+    assert_eq!(config.impersonated_timeout(), config.http_timeout());
+}
+
+#[test]
+fn impersonated_config_parses_from_toml() {
+    let config: AppConfig = toml::from_str(
+        "[renderer]\nmode = \"none\"\n[renderer.impersonated]\nenabled = false\ntimeout_ms = 1234\n",
+    )
+    .unwrap();
+    assert!(!config.renderer.impersonated.enabled);
+    assert_eq!(config.renderer.impersonated_timeout(), 1234);
+    assert!(!config.renderer.impersonated_in_chain());
+}
+
+#[test]
+fn impersonated_in_chain_follows_the_cargo_feature() {
+    let config = RendererConfig::default();
+    assert_eq!(
+        config.impersonated_in_chain(),
+        cfg!(feature = "impersonated"),
+        "enabled-by-default config must be inert without the feature"
+    );
+}
+
+#[test]
+fn ladder_min_deadline_counts_the_impersonated_tier_only_when_in_chain() {
+    let mut on = RendererConfig {
+        mode: RendererMode::None,
+        ..Default::default()
+    };
+    on.impersonated.timeout_ms = Some(7_000);
+    let mut off = on.clone();
+    off.impersonated.enabled = false;
+    let delta = on
+        .min_deadline_for_full_ladder_ms()
+        .saturating_sub(off.min_deadline_for_full_ladder_ms());
+    if cfg!(feature = "impersonated") {
+        assert_eq!(delta, 7_000);
+    } else {
+        assert_eq!(delta, 0);
+    }
+}
