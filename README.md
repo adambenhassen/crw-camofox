@@ -167,6 +167,20 @@ agent when to use each tool suite live in [`skills/`](skills/):
 
 ---
 
+## Security
+
+- **SSRF protection** — blocks loopback, private IPs, cloud metadata (`169.254.x.x`), IPv6 mapped addresses, and non-HTTP schemes (`file://`, `data:`). The browser tiers check every outbound request, Camofox refuses pages that end on an internal address, and a per-request LLM `baseUrl` pointing at a private address is rejected
+- **Auth** — optional Bearer token with constant-time comparison; `/metrics` and `/admin/*` sit inside the same boundary
+- **CORS** — off by default; list browser origins in `server.cors_allowed_origins`
+- **Proxies** — a malformed proxy URL fails startup (or returns 400 per request) instead of sending traffic directly
+- **robots.txt** — RFC 9309 compliant with wildcard patterns
+- **Rate limiting** — token-bucket algorithm, returns 429 with `error_code`
+- **Resource limits** — max request body 1 MB; per-crawl depth and page count bounded (configurable; defaults: depth 2, 100 pages)
+
+[Full hardening guide →](docs/docs/self-hosting-hardening.md)
+
+---
+
 ## API endpoints
 
 | Method | Endpoint | Description |
@@ -190,20 +204,6 @@ agent when to use each tool suite live in [`skills/`](skills/):
 Full reference in [`docs/docs/rest-api.md`](docs/docs/rest-api.md).
 The Firecrawl compatibility matrix (field-by-field diff) lives in
 [`COMPATIBILITY-firecrawl.md`](COMPATIBILITY-firecrawl.md).
-
----
-
-## Security
-
-- **SSRF protection** — blocks loopback, private IPs, cloud metadata (`169.254.x.x`), IPv6 mapped addresses, and non-HTTP schemes (`file://`, `data:`). The browser tiers check every outbound request, Camofox refuses pages that end on an internal address, and a per-request LLM `baseUrl` pointing at a private address is rejected
-- **Auth** — optional Bearer token with constant-time comparison; `/metrics` and `/admin/*` sit inside the same boundary
-- **CORS** — off by default; list browser origins in `server.cors_allowed_origins`
-- **Proxies** — a malformed proxy URL fails startup (or returns 400 per request) instead of sending traffic directly
-- **robots.txt** — RFC 9309 compliant with wildcard patterns
-- **Rate limiting** — token-bucket algorithm, returns 429 with `error_code`
-- **Resource limits** — max request body 1 MB; per-crawl depth and page count bounded (configurable; defaults: depth 2, 100 pages)
-
-[Full hardening guide →](docs/docs/self-hosting-hardening.md)
 
 ---
 
