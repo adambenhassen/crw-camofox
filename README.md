@@ -10,7 +10,7 @@
 </p>
 
 <p align="center">
-  <a href="https://github.com/adambenhassen/crw-camofox/actions/workflows/ci.yml"><img src="https://github.com/adambenhassen/crw-camofox/actions/workflows/ci.yml/badge.svg?branch=main&event=push" alt="CI"></a>
+  <a href="https://github.com/adambenhassen/crw-camofox/actions/workflows/ci.yml"><img src="https://github.com/adambenhassen/crw-camofox/actions/workflows/ci.yml/badge.svg?branch=feat%2Fcamofox-renderer&event=push" alt="CI"></a>
   <a href="https://github.com/adambenhassen/crw-camofox/releases"><img src="https://img.shields.io/github/v/release/adambenhassen/crw-camofox?sort=semver&color=blue" alt="Latest release"></a>
   <a href="https://github.com/adambenhassen/crw-camofox/pkgs/container/crw-camofox"><img src="https://img.shields.io/badge/ghcr.io-crw--camofox-2496ED?logo=docker&logoColor=white" alt="Docker image"></a>
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-AGPL--3.0-blue.svg" alt="License"></a>

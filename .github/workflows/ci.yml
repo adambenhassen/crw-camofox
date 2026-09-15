@@ -2,9 +2,9 @@ name: CI
 
 on:
   push:
-    branches: [main]
+    branches: [main, feat/camofox-renderer]
   pull_request:
-    branches: [main]
+    branches: [main, feat/camofox-renderer]
 
 jobs:
   check:
