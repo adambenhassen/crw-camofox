@@ -40,8 +40,8 @@ is additive and config-toggled:
 
 | Area | Upstream `crw` | This fork |
 |------|----------------|-----------|
-| JS render ladder | `HTTP → LightPanda → Chrome` (CDP) | `HTTP → LightPanda → Camofox`, then **Byparr** for Cloudflare challenges |
-| Stealth tier | browserless Chromium (SSPL); opt-in in-process Camoufox renderer | **Camofox** by default, shared by render *and* search |
+| JS render ladder | `HTTP → Chrome-impersonated HTTP → LightPanda → Chrome` (CDP) | `HTTP → LightPanda → Camofox`, then **Byparr** for Cloudflare challenges |
+| Stealth tier | browserless Chromium (SSPL); a Camofox tier exists but is opt-in and stays out of the auto ladder | **Camofox** on the auto ladder by default, shared by render *and* search |
 | `/v1/search` | SearXNG sidecar | **8 engines built in**: Google, Bing, DuckDuckGo, Wikipedia, YouTube, Reddit, Amazon, GitHub |
 | Interactive MCP | `crw-browse` (CDP, 2 tools) | [`camofox-mcp`](https://github.com/redf0x1/camofox-mcp) in the Compose stack: **47 tools** over the same browser |
 | Cloudflare | — | Waits out "Just a moment", hands Turnstile to [Byparr](https://github.com/ThePhaseless/Byparr), caches `cf_clearance` per host |
@@ -107,7 +107,7 @@ shape, not a benchmark:
 | Language | Rust | Rust | Node.js + Playwright | Python + Playwright | Rust |
 | License | AGPL-3.0 | AGPL-3.0, commercial available | AGPL-3.0, commercial available | Apache-2.0 | MIT crate; [spider.cloud](https://spider.cloud) managed |
 | Self-host shape | Static binary + Camofox container (+ Byparr) | Static binary + browser + SearXNG sidecar | Six containers: api, worker, playwright, redis, postgres, rabbitmq | One image with Playwright browsers bundled | Rust crate, no service |
-| Stealth tier | **Anti-detect by default** (Camofox/Firefox) | browserless Chromium, opt-in | Playwright Chromium | Playwright Chromium | — |
+| Stealth tier | **Anti-detect by default** (Camofox/Firefox) | browserless Chromium; Camofox opt-in, off the auto ladder | Playwright Chromium | Playwright Chromium | — |
 | Web search | **8 engines**, no sidecar | SearXNG sidecar | Built-in | — | Via spider.cloud |
 | Firecrawl-compat API | **v1 + v2** | v1 + v2 | Native | No | No |
 | MCP server | `crw-mcp` **+ 47** interactive-browser tools | `crw-mcp` | Separate package | Bundled in the Docker image | `spider_mcp` crate |
