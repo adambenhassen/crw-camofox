@@ -29,6 +29,41 @@ Works with Claude Code, Cursor, Windsurf, Cline, Copilot, Continue.dev, Codex an
 
 ---
 
+## 🦊 This is the Camofox fork
+
+Camofox is the Camoufox/Firefox anti-detect browser, driven over its REST API.
+Changes vs. upstream — all **additive and config-toggled**:
+
+| Area | Upstream `crw` | This fork |
+|------|----------------|-----------|
+| Default JS render ladder | `HTTP → LightPanda → Chrome` (CDP) | `HTTP → LightPanda → Camofox` (Firefox) `→ Byparr` (Cloudflare challenges only) |
+| Stealth tier | browserless Chromium (SSPL); opt-in in-process Camoufox tier | **Camofox** ([camofox-browser](https://github.com/redf0x1/camofox-browser), REST-driven) — engine-level fingerprint evasion, the default tier, shared by render *and* search |
+| `/v1/search` backend | SearXNG sidecar | **8 engines built in** — Google, Bing, DuckDuckGo, Wikipedia, YouTube, Reddit, Amazon, GitHub (no sidecar) |
+| Interactive MCP | `crw-browse` (CDP, 2 tools) | Upstream **[`camofox-mcp`](https://github.com/redf0x1/camofox-mcp)** wired into the Docker stack — 47 tools over Camofox REST |
+
+**What sets this fork apart:**
+
+- **One browser for rendering and search.** `/v1/search` runs Google through the same
+  Camofox browser that renders pages, so `docker compose up` gives working search with
+  no SearXNG sidecar to deploy, version or keep healthy. Upstream's opt-in Camoufox tier
+  is a renderer only; its search still needs the sidecar.
+- **Many engines, one ranked list.** Search defaults to Google but can query up to four of
+  Google, Bing, DuckDuckGo, Wikipedia, YouTube, Reddit, Amazon, and GitHub in a single call
+  (run sequentially, so latency scales with engine count), deduping by URL and agreement-ranking
+  the merged results.
+- **Cloudflare challenges get cleared.** The Camofox tab waits out a "Just a moment"
+  interstitial (`renderer.camofox.challenge_wait_ms`, default 20 s). When a Turnstile
+  checkbox remains, the ladder hands the page to a bundled
+  [Byparr](https://github.com/ThePhaseless/Byparr) solver, which clicks it. The
+  `cf_clearance` cookie either tier earns is cached per host, so later scrapes of that host
+  go out over plain HTTP (about 1 s instead of a browser render).
+
+In production this fork backs the Hermes agent over MCP, with Hermes' native `web` and
+`browser` tools disabled; the Camofox search backend returns results where the SearXNG
+sidecar came back empty, and the render tier loads pages behind bot checks.
+
+---
+
 ## Quickstart
 
 Self-host the full stack with one command — no auth:
@@ -104,43 +139,6 @@ agent when to use each tool suite live in [`skills/`](skills/):
 
 - [**`crw-web`**](skills/crw-web/SKILL.md) — the crw tools (scrape / search / crawl / map / parse): when to use each, `crw_search` engine selection, and output limits.
 - [**`camofox-browser`**](skills/camofox-browser/SKILL.md) — the camofox-mcp interactive browser: the full tool reference and the "escalate only for real interactivity" rule. Requires the `camofox-mcp` server.
-
----
-
-## 🦊 This is the Camofox fork
-
-Camofox is the Camoufox/Firefox anti-detect browser, driven over its REST API.
-Changes vs. upstream — all **additive and config-toggled**:
-
-| Area | Upstream `crw` | This fork |
-|------|----------------|-----------|
-| Default JS render ladder | `HTTP → LightPanda → Chrome` (CDP) | `HTTP → LightPanda → Camofox` (Firefox) `→ Byparr` (Cloudflare challenges only) |
-| Stealth tier | browserless Chromium (SSPL); opt-in in-process Camoufox tier | **Camofox** ([camofox-browser](https://github.com/redf0x1/camofox-browser), REST-driven) — engine-level fingerprint evasion, the default tier, shared by render *and* search |
-| `/v1/search` backend | SearXNG sidecar | **8 engines built in** — Google, Bing, DuckDuckGo, Wikipedia, YouTube, Reddit, Amazon, GitHub (no sidecar) |
-| Interactive MCP | `crw-browse` (CDP, 2 tools) | Upstream **[`camofox-mcp`](https://github.com/redf0x1/camofox-mcp)** wired into the Docker stack — 47 tools over Camofox REST |
-
-**What sets this fork apart:**
-
-- **One browser for rendering and search.** `/v1/search` runs Google through the same
-  Camofox browser that renders pages, so `docker compose up` gives working search with
-  no SearXNG sidecar to deploy, version or keep healthy. Upstream's opt-in Camoufox tier
-  is a renderer only; its search still needs the sidecar.
-- **Many engines, one ranked list.** Search defaults to Google but can query up to four of
-  Google, Bing, DuckDuckGo, Wikipedia, YouTube, Reddit, Amazon, and GitHub in a single call
-  (run sequentially, so latency scales with engine count), deduping by URL and agreement-ranking
-  the merged results.
-- **Cloudflare challenges get cleared.** The Camofox tab waits out a "Just a moment"
-  interstitial (`renderer.camofox.challenge_wait_ms`, default 20 s). When a Turnstile
-  checkbox remains, the ladder hands the page to a bundled
-  [Byparr](https://github.com/ThePhaseless/Byparr) solver, which clicks it. The
-  `cf_clearance` cookie either tier earns is cached per host, so later scrapes of that host
-  go out over plain HTTP (about 1 s instead of a browser render).
-
-In production this fork backs the Hermes agent over MCP, with Hermes' native `web` and
-`browser` tools disabled; the Camofox search backend returns results where the SearXNG
-sidecar came back empty, and the render tier loads pages behind bot checks.
-
----
 
 ## Why crw-camofox?
 
