@@ -114,8 +114,8 @@ pub fn tool_definitions(proxy_mode: bool) -> Value {
                     },
                     "renderer": {
                         "type": "string",
-                        "enum": ["auto", "lightpanda", "camofox"],
-                        "description": "Pin renderer; non-auto hard-pins and implies renderJs:true (default auto)"
+                        "enum": ["auto", "lightpanda", "camofox", "impersonated-http"],
+                        "description": "Pin renderer; browser tiers hard-pin and imply renderJs:true (default auto). 'impersonated-http' is JS-less Chrome-TLS impersonation, never renderJs."
                     }
                 },
                 "required": ["url"]
@@ -163,8 +163,8 @@ pub fn tool_definitions(proxy_mode: bool) -> Value {
                     },
                     "renderer": {
                         "type": "string",
-                        "enum": ["auto", "lightpanda", "camofox"],
-                        "description": "Pin renderer; non-auto hard-pins and implies renderJs:true (default auto)"
+                        "enum": ["auto", "lightpanda", "camofox", "impersonated-http"],
+                        "description": "Pin renderer; browser tiers hard-pin and imply renderJs:true (default auto). 'impersonated-http' is JS-less Chrome-TLS impersonation, never renderJs."
                     }
                 },
                 "required": ["url"]
@@ -800,11 +800,11 @@ mod tests {
     /// rejected to keep this leaf crate dependency-free; the conservative estimate
     /// is sufficient for a regression gate. Real cl100k count is ~25–30% lower.
     ///
-    /// Baseline before the Phase 1 trim was 8233 bytes (~2744 est-tok). After the
-    /// Phase 1 trim + Phase 3 annotations/titles the full 6-tool list is ~6189 bytes
-    /// (~2063 est-tok ≈ ~1450 real cl100k tok). The ceiling is floor + ~11% so the
-    /// gate catches real bloat without churning on minor edits.
-    const TOOLS_LIST_TOKEN_CEILING: usize = 2300;
+    /// Current floor (after impersonated-http renderer and its pin description
+    /// were added to crw_scrape and crw_crawl): ~6893 bytes (~2363 est-tok). The
+    /// ceiling at 2400 is intentionally tight (1.6% above floor) because the tool
+    /// list is weight-optimised; any further growth should be a conscious choice.
+    const TOOLS_LIST_TOKEN_CEILING: usize = 2400;
 
     #[test]
     fn tools_list_token_budget() {
@@ -880,7 +880,12 @@ mod tests {
             .expect("renderer.enum must be an array");
         assert_eq!(
             enum_vals,
-            &vec![json!("auto"), json!("lightpanda"), json!("camofox")]
+            &vec![
+                json!("auto"),
+                json!("lightpanda"),
+                json!("camofox"),
+                json!("impersonated-http")
+            ]
         );
     }
 
@@ -903,10 +908,11 @@ mod tests {
         let enum_vals = props["renderer"]["enum"]
             .as_array()
             .expect("renderer.enum must be an array");
-        assert_eq!(enum_vals.len(), 3);
+        assert_eq!(enum_vals.len(), 4);
         assert!(enum_vals.iter().any(|v| v == "auto"));
         assert!(enum_vals.iter().any(|v| v == "lightpanda"));
         assert!(enum_vals.iter().any(|v| v == "camofox"));
+        assert!(enum_vals.iter().any(|v| v == "impersonated-http"));
     }
 
     #[test]

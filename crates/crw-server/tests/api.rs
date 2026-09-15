@@ -181,3 +181,93 @@ async fn map_endpoint_invalid_url() {
         .await;
     resp.assert_status(axum::http::StatusCode::BAD_REQUEST);
 }
+
+#[tokio::test]
+async fn scrape_impersonated_pin_with_render_js_true_returns_400() {
+    let server = test_app();
+    let resp = server
+        .post("/v1/scrape")
+        .json(&json!({
+            "url": "https://example.com",
+            "renderer": "impersonated-http",
+            "renderJs": true
+        }))
+        .await;
+    resp.assert_status(axum::http::StatusCode::BAD_REQUEST);
+    let json: serde_json::Value = resp.json();
+    let error = json["error"].as_str().unwrap();
+    assert!(
+        error.contains("never executes JS"),
+        "expected the contradiction error, got: {error}"
+    );
+}
+
+#[tokio::test]
+async fn crawl_impersonated_pin_with_render_js_true_returns_400() {
+    let server = test_app();
+    let resp = server
+        .post("/v1/crawl")
+        .json(&json!({
+            "url": "https://example.com",
+            "renderer": "impersonated-http",
+            "renderJs": true
+        }))
+        .await;
+    resp.assert_status(axum::http::StatusCode::BAD_REQUEST);
+    let json: serde_json::Value = resp.json();
+    let error = json["error"].as_str().unwrap();
+    assert!(
+        error.contains("never executes JS"),
+        "expected the contradiction error, got: {error}"
+    );
+}
+
+/// The pin is validated against `available_renderer_names()` even when
+/// `renderJs:false` is set (it is a transport choice, not a JS pin). With the
+/// tier switched off by config the vocabulary lacks it in every build, so the
+/// request must 400 before any network activity.
+#[tokio::test]
+async fn scrape_impersonated_pin_with_tier_disabled_returns_400() {
+    let config: AppConfig = toml::from_str("[renderer.impersonated]\nenabled = false\n").unwrap();
+    let state = AppState::new(config).expect("AppState::new failed");
+    let server = TestServer::new(create_app(state));
+    let resp = server
+        .post("/v1/scrape")
+        .json(&json!({
+            "url": "https://example.com",
+            "renderer": "impersonated-http",
+            "renderJs": false
+        }))
+        .await;
+    resp.assert_status(axum::http::StatusCode::BAD_REQUEST);
+    let json: serde_json::Value = resp.json();
+    let error = json["error"].as_str().unwrap();
+    assert!(
+        error.contains("renderer 'impersonated-http' not available"),
+        "got: {error}"
+    );
+}
+
+/// With the feature built in, the default config constructs the tier, so the
+/// same pin passes validation: the 400 must name a different reason (here the
+/// renderJs contradiction), proving the vocabulary contains the tier.
+#[cfg(feature = "impersonated")]
+#[tokio::test]
+async fn scrape_impersonated_pin_is_in_the_vocabulary_when_built_in() {
+    let server = test_app();
+    let resp = server
+        .post("/v1/scrape")
+        .json(&json!({
+            "url": "https://example.com",
+            "renderer": "impersonated-http",
+            "renderJs": true
+        }))
+        .await;
+    resp.assert_status(axum::http::StatusCode::BAD_REQUEST);
+    let json: serde_json::Value = resp.json();
+    let error = json["error"].as_str().unwrap();
+    assert!(
+        !error.contains("not available"),
+        "the tier must be available in a feature build, got: {error}"
+    );
+}

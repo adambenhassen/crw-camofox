@@ -48,8 +48,9 @@ impl SearchBackend {
 
 /// Validate that a request's pinned renderer is available before accepting
 /// the job. Returns `InvalidRequest` (→ HTTP 400) when the named renderer is
-/// not in the configured pool. Skipped when `renderJs:false` is set, since
-/// HTTP-only ignores the pin.
+/// not in the configured pool. Skipped for a browser pin when `renderJs:false`
+/// is set, since HTTP-only ignores that pin; an `impersonated-http` pin is a
+/// transport choice and is validated regardless.
 ///
 /// We surface this explicitly (rather than silently falling back to "auto")
 /// so users get clear feedback when they ask for a renderer the operator
@@ -65,12 +66,25 @@ pub(crate) fn validate_renderer_pin(
         return Ok(());
     };
 
-    // Mirror the fetch-path resolution at `crw-crawl/src/single.rs:41-50` so
+    // The impersonated tier executes no JS, so an explicit `renderJs: true`
+    // alongside its pin is contradictory. Checked BEFORE availability so the
+    // caller gets the precise reason in every build, feature or not.
+    if renderer == Some(RequestedRenderer::ImpersonatedHttp) && render_js == Some(true) {
+        return Err(CrwError::InvalidRequest(
+            "renderer 'impersonated-http' never executes JS; remove renderJs:true (or omit it)"
+                .into(),
+        ));
+    }
+
+    // Mirror the fetch-path resolution in `crw-crawl/src/single.rs` so
     // validation is consistent with what the actual request does. "Pinned
-    // implies JS" — when a renderer is pinned and the request omits
-    // `renderJs`, force the request to JS=true so a `render_js_default=false`
-    // server config doesn't silently send the request through HTTP-only.
-    let effective_request = if render_js.is_none() {
+    // implies JS": a browser pin with `renderJs` omitted is coerced to JS so a
+    // `render_js_default=false` server config doesn't silently send it
+    // through HTTP-only. The impersonated-http tier never executes JS
+    // (`RequestedRenderer::implies_js`), so it takes neither the coercion nor
+    // the HTTP-only skip below: it is a transport choice, validated regardless.
+    let pin_implies_js = renderer.is_some_and(|r| r.implies_js());
+    let effective_request = if render_js.is_none() && pin_implies_js {
         Some(true)
     } else {
         render_js
@@ -78,11 +92,11 @@ pub(crate) fn validate_renderer_pin(
     let effective_render_js =
         resolve_render_js(effective_request, state.config.renderer.render_js_default);
 
-    if effective_render_js == Some(false) {
+    if effective_render_js == Some(false) && pin_implies_js {
         return Ok(());
     }
 
-    let available = state.renderer.js_renderer_names();
+    let available = state.renderer.available_renderer_names();
     if !available.contains(&name) {
         return Err(CrwError::InvalidRequest(format!(
             "renderer '{}' not available; configured renderers: [{}]. \
