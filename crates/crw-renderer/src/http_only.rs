@@ -11,7 +11,7 @@ use crate::traits::PageFetcher;
 /// previous 10 MB cap rejected legitimate large reports/PDFs (bench had a
 /// ~12 MB PDF mis-flagged as 502). 50 MB is generous enough for almost any
 /// document while still bounding memory use.
-const MAX_RESPONSE_BYTES: usize = 50 * 1024 * 1024;
+pub(crate) const MAX_RESPONSE_BYTES: usize = 50 * 1024 * 1024;
 /// TCP connect timeout for the renderer's HTTP tier. A healthy handshake is one
 /// RTT (well under a second even intercontinental); by SYN-retransmit timing a
 /// connect past ~2.5s means at least two dropped SYNs, i.e. a dead, blocked, or
@@ -29,7 +29,7 @@ const MAX_RESPONSE_BYTES: usize = 50 * 1024 * 1024;
 /// pathological origin, and crawl already skips an unreachable page gracefully. A
 /// per-caller connect timeout would need threading through the shared fetcher and
 /// is deliberately out of scope here.
-const HTTP_CONNECT_TIMEOUT: std::time::Duration = std::time::Duration::from_millis(2500);
+pub(crate) const HTTP_CONNECT_TIMEOUT: std::time::Duration = std::time::Duration::from_millis(2500);
 /// Overall request timeout for HTTP requests.
 const HTTP_REQUEST_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
 /// One retry on transient errors. GET is idempotent so a single retry is safe;
@@ -933,16 +933,6 @@ impl PageFetcher for HttpFetcher {
             .get("content-type")
             .and_then(|v| v.to_str().ok())
             .map(|s| s.to_string());
-        let mut content_type = content_type_header
-            .as_deref()
-            .map(|s| s.split(';').next().unwrap_or(s).trim().to_lowercase());
-        // Charset from the Content-Type header (P1-1): pages served as Latin-1 /
-        // Windows-1252 would otherwise be UTF-8-lossy'd, turning each 0x80–0xFF
-        // byte into U+FFFD. Kept separately since `content_type` drops it.
-        let header_charset = content_type_header
-            .as_deref()
-            .and_then(charset_from_content_type);
-
         let challenge = challenge_header(resp.headers());
 
         let final_url_str = resp.url().as_str().to_string();
@@ -979,65 +969,17 @@ impl PageFetcher for HttpFetcher {
             }
         };
 
-        if bytes.len() > MAX_RESPONSE_BYTES {
-            return Err(CrwError::HttpError(format!(
-                "Response too large: {} bytes (max {MAX_RESPONSE_BYTES})",
-                bytes.len()
-            )));
-        }
-
-        // Route on the actual bytes, not only on the declared type. Keying the
-        // PDF branch on `content_type == "application/pdf"` and treating
-        // EVERYTHING else as text means a body that is neither HTML nor a
-        // correctly-labelled PDF gets UTF-8-lossy'd and handed to the HTML
-        // extractor: a .docx/.xlsx/.pptx comes back as `markdown` beginning
-        // "PK\u{3}\u{4}...[Content_Types].xml" under `success: true`, which a
-        // caller cannot tell apart from a real scrape.
-        if bytes.starts_with(b"%PDF-") {
-            // A PDF served as octet-stream (or text/html). Relabel it so the
-            // downstream PDF branch in crw-crawl, which gates on the same
-            // content type, engages instead of extracting an empty body.
-            content_type = Some("application/pdf".to_string());
-        }
-        // Computed AFTER the relabel, so a sniffed PDF and a declared one are
-        // one case from here down rather than a disjunction repeated at every use.
-        let is_pdf = content_type.as_deref() == Some("application/pdf");
-        // The NUL test applies only when the origin did NOT declare an HTML-ish
-        // type. A page served as `text/html` with a stray NUL in it renders
-        // fine in a real browser (the HTML5 tokenizer maps NUL to U+FFFD), so
-        // rejecting one would cost a page we scrape today, and would hand any
-        // origin a one-byte way to shut the ladder down that costs it nothing
-        // with human visitors. An undeclared or empty type stays in scope: a
-        // body with no `Content-Type` at all is exactly what the sniff is for.
-        // `is_html_like_content_type` answers true for an empty type as well as
-        // for `None`, so the emptiness is checked here: an origin that sends a
-        // bare `Content-Type:` has declared nothing, and treating that as a
-        // declaration of HTML would let a .docx back through the hole this
-        // exists to close.
-        let declared_html = content_type
-            .as_deref()
-            .is_some_and(|ct| !ct.is_empty() && crw_core::is_html_like_content_type(Some(ct)));
-        let (html, raw_bytes) = if is_pdf {
-            (String::new(), Some(bytes.to_vec()))
-        } else if !declared_html && looks_binary(&bytes, header_charset.as_deref()) {
-            // Logged rather than silent: this is the one path that returns a
-            // hard error without climbing the ladder, so if a class of real
-            // pages ever lands here it has to be visible in production.
-            tracing::info!(
-                url,
-                content_type = content_type.as_deref().unwrap_or("none"),
-                bytes = bytes.len(),
-                "binary body, returning unsupported content type without escalating"
-            );
-            return Err(CrwError::UnsupportedContentType(format!(
-                "{} ({} bytes): the body is binary, not HTML and not a PDF, \
-                 so there is nothing to extract",
-                content_type.as_deref().unwrap_or("no content-type"),
-                bytes.len()
-            )));
-        } else {
-            (decode_html_bytes(&bytes, header_charset.as_deref()), None)
-        };
+        let result = build_http_fetch_result(
+            url,
+            status,
+            content_type_header.as_deref(),
+            challenge,
+            &final_url_str,
+            &bytes,
+            start.elapsed().as_millis() as u64,
+            "http",
+        )?;
+        let is_pdf = result.content_type.as_deref() == Some("application/pdf");
 
         // SECOND WRITE HOOK — body-verdict blocks that carry no header and no
         // block status, which is how Wikimedia serves its datacenter-IP ban
@@ -1046,31 +988,24 @@ impl PageFetcher for HttpFetcher {
         // see those, and the arm it sits in never fires for them, so without this
         // every URL on such a host re-climbs the whole doomed ladder.
         //
-        // Placed HERE rather than in `crate::fetch_inner` on purpose: this is the
-        // only point where the decoded body and the egress provenance
-        // (`use_proxy` / `has_static_proxy`) are both in scope. Latching from the
-        // renderer would be unable to tell a direct block from a proxied one, and
-        // a proxy-observed block would re-latch on every request — the TTL would
-        // never expire, so direct would never be re-probed and the host would be
-        // pinned to paid egress permanently.
+        // Runs on the assembled result rather than inside the shared tail on
+        // purpose: this is the only point where the decoded body and the egress
+        // provenance (`use_proxy` / `has_static_proxy`) are both in scope.
+        // Latching from the renderer would be unable to tell a direct block from
+        // a proxied one, and a proxy-observed block would re-latch on every
+        // request — the TTL would never expire, so direct would never be
+        // re-probed and the host would be pinned to paid egress permanently.
         //
         // Fingerprint walls are excluded: a residential IP does not clear a
         // Cloudflare managed challenge or a vendor SDK wall, so latching one only
         // burns paid bandwidth.
-        //
-        // ponytail: `antibot::classify` deliberately does not run on this tier, so
-        // a vendor wall recognisable only from visible text (a PerimeterX/Imperva
-        // page with no SDK marker) is not excluded here and can latch for the
-        // 10-minute TTL. Bounded — the latch only reorders egress, never suppresses
-        // direct. Upgrade path if it ever matters: thread the classifier verdict
-        // down instead of adding a second classify() call to this hot path.
         if !use_proxy
             && !self.has_static_proxy
             && !is_pdf
             && let Some(h) = &host
-            && crate::detector::looks_like_generic_bot_wall(&html)
-            && !crate::detector::looks_like_cloudflare_challenge(&html)
-            && crate::detector::looks_like_vendor_block(&html).is_none()
+            && crate::detector::looks_like_generic_bot_wall(&result.html)
+            && !crate::detector::looks_like_cloudflare_challenge(&result.html)
+            && crate::detector::looks_like_vendor_block(&result.html).is_none()
         {
             let eg = crate::egress::global();
             eg.note_block(h).await;
@@ -1084,35 +1019,11 @@ impl PageFetcher for HttpFetcher {
             );
         }
 
-        let final_url = if final_url_str != url {
-            Some(final_url_str)
-        } else {
-            None
-        };
-
+        // Stamped after the latch so the reported time covers the whole fetch,
+        // as it did before the response tail was shared.
         Ok(FetchResult {
-            url: url.to_string(),
-            final_url,
-            status_code: status,
-            html,
-            content_type,
-            raw_bytes,
-            rendered_with: if is_pdf {
-                Some("pdf".to_string())
-            } else {
-                Some("http".to_string())
-            },
             elapsed_ms: start.elapsed().as_millis() as u64,
-            warning: challenge.map(|c| c.marker().to_string()),
-            render_decision: None,
-            credit_cost: 0,
-            warnings: challenge
-                .map(|c| vec![c.warning_text().to_string()])
-                .unwrap_or_default(),
-            wall: None,
-            truncated: false,
-            deadline_exceeded: false,
-            captured_responses: Vec::new(),
+            ..result
         })
     }
 
@@ -1127,6 +1038,126 @@ impl PageFetcher for HttpFetcher {
     async fn is_available(&self) -> bool {
         true
     }
+}
+
+/// Shared response tail for the two plain-HTTP fetchers (the reqwest
+/// [`HttpFetcher`] and the wreq `ImpersonatedFetcher`): size cap on the read
+/// body, content-type routing (the `%PDF-` sniff and relabel, the binary-body
+/// rejection), charset-aware decode, and [`FetchResult`] assembly. Each
+/// transport keeps its own send/retry machinery, response-metadata extraction
+/// and tier-specific side effects (the egress latch stays in
+/// `HttpFetcher::fetch`).
+///
+/// `tier_name` is the `rendered_with` label for non-PDF bodies (`"http"` or
+/// `"impersonated-http"`); a PDF always reports `"pdf"`.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn build_http_fetch_result(
+    url: &str,
+    status: u16,
+    content_type_header: Option<&str>,
+    challenge: Option<ChallengeHeader>,
+    final_url_str: &str,
+    bytes: &[u8],
+    elapsed_ms: u64,
+    tier_name: &str,
+) -> CrwResult<FetchResult> {
+    if bytes.len() > MAX_RESPONSE_BYTES {
+        return Err(CrwError::HttpError(format!(
+            "Response too large: {} bytes (max {MAX_RESPONSE_BYTES})",
+            bytes.len()
+        )));
+    }
+
+    let mut content_type =
+        content_type_header.map(|s| s.split(';').next().unwrap_or(s).trim().to_lowercase());
+    // Charset from the Content-Type header (P1-1): pages served as Latin-1 /
+    // Windows-1252 would otherwise be UTF-8-lossy'd, turning each 0x80–0xFF
+    // byte into U+FFFD. Kept separately since `content_type` drops it.
+    let header_charset = content_type_header.and_then(charset_from_content_type);
+
+    // Route on the actual bytes, not only on the declared type. Keying the
+    // PDF branch on `content_type == "application/pdf"` and treating
+    // EVERYTHING else as text means a body that is neither HTML nor a
+    // correctly-labelled PDF gets UTF-8-lossy'd and handed to the HTML
+    // extractor: a .docx/.xlsx/.pptx comes back as `markdown` beginning
+    // "PK\u{3}\u{4}...[Content_Types].xml" under `success: true`, which a
+    // caller cannot tell apart from a real scrape.
+    if bytes.starts_with(b"%PDF-") {
+        // A PDF served as octet-stream (or text/html). Relabel it so the
+        // downstream PDF branch in crw-crawl, which gates on the same
+        // content type, engages instead of extracting an empty body.
+        content_type = Some("application/pdf".to_string());
+    }
+    // Computed AFTER the relabel, so a sniffed PDF and a declared one are
+    // one case from here down rather than a disjunction repeated at every use.
+    let is_pdf = content_type.as_deref() == Some("application/pdf");
+    // The NUL test applies only when the origin did NOT declare an HTML-ish
+    // type. A page served as `text/html` with a stray NUL in it renders
+    // fine in a real browser (the HTML5 tokenizer maps NUL to U+FFFD), so
+    // rejecting one would cost a page we scrape today, and would hand any
+    // origin a one-byte way to shut the ladder down that costs it nothing
+    // with human visitors. An undeclared or empty type stays in scope: a
+    // body with no `Content-Type` at all is exactly what the sniff is for.
+    // `is_html_like_content_type` answers true for an empty type as well as
+    // for `None`, so the emptiness is checked here: an origin that sends a
+    // bare `Content-Type:` has declared nothing, and treating that as a
+    // declaration of HTML would let a .docx back through the hole this
+    // exists to close.
+    let declared_html = content_type
+        .as_deref()
+        .is_some_and(|ct| !ct.is_empty() && crw_core::is_html_like_content_type(Some(ct)));
+    let (html, raw_bytes) = if is_pdf {
+        (String::new(), Some(bytes.to_vec()))
+    } else if !declared_html && looks_binary(bytes, header_charset.as_deref()) {
+        // Logged rather than silent: this is the one path that returns a
+        // hard error without climbing the ladder, so if a class of real
+        // pages ever lands here it has to be visible in production.
+        tracing::info!(
+            url,
+            content_type = content_type.as_deref().unwrap_or("none"),
+            bytes = bytes.len(),
+            "binary body, returning unsupported content type without escalating"
+        );
+        return Err(CrwError::UnsupportedContentType(format!(
+            "{} ({} bytes): the body is binary, not HTML and not a PDF, \
+             so there is nothing to extract",
+            content_type.as_deref().unwrap_or("no content-type"),
+            bytes.len()
+        )));
+    } else {
+        (decode_html_bytes(bytes, header_charset.as_deref()), None)
+    };
+
+    let final_url = if final_url_str != url {
+        Some(final_url_str.to_string())
+    } else {
+        None
+    };
+
+    Ok(FetchResult {
+        url: url.to_string(),
+        final_url,
+        status_code: status,
+        html,
+        content_type,
+        raw_bytes,
+        rendered_with: if is_pdf {
+            Some("pdf".to_string())
+        } else {
+            Some(tier_name.to_string())
+        },
+        elapsed_ms,
+        warning: challenge.map(|c| c.marker().to_string()),
+        render_decision: None,
+        credit_cost: 0,
+        warnings: challenge
+            .map(|c| vec![c.warning_text().to_string()])
+            .unwrap_or_default(),
+        wall: None,
+        truncated: false,
+        deadline_exceeded: false,
+        captured_responses: Vec::new(),
+    })
 }
 
 /// Extract the `charset` label from a `Content-Type` header value
