@@ -120,6 +120,11 @@ pub enum RequestedRenderer {
     Playwright,
     /// Camofox (Firefox/Camoufox) heavy/stealth tier.
     Camofox,
+    /// Chrome-impersonating HTTP tier (wreq): real Chrome TLS/JA3/HTTP2
+    /// fingerprint, no JS execution. `rename_all = "lowercase"` would yield
+    /// `"impersonatedhttp"`, so renamed explicitly like `chrome_proxy`.
+    #[serde(rename = "impersonated-http")]
+    ImpersonatedHttp,
 }
 
 impl RequestedRenderer {
@@ -133,7 +138,20 @@ impl RequestedRenderer {
             RequestedRenderer::ChromeProxy => Some("chrome_proxy"),
             RequestedRenderer::Playwright => Some("playwright"),
             RequestedRenderer::Camofox => Some("camofox"),
+            RequestedRenderer::ImpersonatedHttp => Some("impersonated-http"),
         }
+    }
+
+    /// Whether hard-pinning this tier implies a JS render when the request
+    /// omits `renderJs`. True for every browser tier; false for wire-level
+    /// tiers that never execute JS, and false for `Auto` because `Auto` is
+    /// not a pin at all. The single rule behind every pin choke point
+    /// (single.rs, crawl.rs, state.rs), so they cannot drift.
+    pub fn implies_js(self) -> bool {
+        !matches!(
+            self,
+            RequestedRenderer::ImpersonatedHttp | RequestedRenderer::Auto
+        )
     }
 }
 
@@ -2234,6 +2252,9 @@ pub enum RendererKind {
     ChromeProxy,
     Camofox,
     Byparr,
+    /// Chrome-impersonating HTTP tier (wreq). Never a JS renderer.
+    #[serde(rename = "impersonated-http")]
+    ImpersonatedHttp,
 }
 
 impl RendererKind {
@@ -2245,6 +2266,7 @@ impl RendererKind {
             RendererKind::ChromeProxy => "chrome_proxy",
             RendererKind::Camofox => "camofox",
             RendererKind::Byparr => "byparr",
+            RendererKind::ImpersonatedHttp => "impersonated-http",
         }
     }
 }

@@ -520,7 +520,7 @@ const REGISTRY_TTL: Duration = Duration::from_secs(24 * 60 * 60);
 #[derive(Clone)]
 pub struct BreakerRegistry {
     config: BreakerConfig,
-    global: Arc<[(RendererKind, Arc<CircuitBreaker>); 6]>,
+    global: Arc<[(RendererKind, Arc<CircuitBreaker>); 7]>,
     host: Cache<(String, RendererKind), Arc<CircuitBreaker>>,
 }
 
@@ -539,6 +539,10 @@ impl BreakerRegistry {
             ),
             (RendererKind::Camofox, Arc::new(CircuitBreaker::new(config))),
             (RendererKind::Byparr, Arc::new(CircuitBreaker::new(config))),
+            (
+                RendererKind::ImpersonatedHttp,
+                Arc::new(CircuitBreaker::new(config)),
+            ),
         ]);
         let host = Cache::builder()
             .max_capacity(REGISTRY_CAPACITY)
@@ -903,6 +907,7 @@ mod tests {
             RendererKind::ChromeProxy,
             RendererKind::Camofox,
             RendererKind::Byparr,
+            RendererKind::ImpersonatedHttp,
         ] {
             let _ = reg.global_for(kind); // must not panic
         }

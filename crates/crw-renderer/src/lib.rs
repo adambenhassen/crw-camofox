@@ -91,6 +91,7 @@ fn renderer_kind_for(name: &str) -> Option<RendererKind> {
         "chrome_proxy" => Some(RendererKind::ChromeProxy),
         "camofox" => Some(RendererKind::Camofox),
         "byparr" => Some(RendererKind::Byparr),
+        "impersonated-http" => Some(RendererKind::ImpersonatedHttp),
         _ => None,
     }
 }
@@ -161,6 +162,8 @@ fn credit_for(kind: RendererKind) -> u32 {
         RendererKind::Camofox => 2,
         // A full browser solve, like Camofox.
         RendererKind::Byparr => 2,
+        // One plain HTTP request; same cost as the HTTP tier.
+        RendererKind::ImpersonatedHttp => 1,
     }
 }
 
