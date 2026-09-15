@@ -312,6 +312,76 @@ fn is_soft_block_status(status_code: u16) -> bool {
     )
 }
 
+/// Hard-block status set: egress-recoverable blocks only, NOT the softer
+/// 404/405/406/410/412/451/500 shapes that often carry real bodies. The
+/// impersonated hop's status trigger.
+#[cfg(feature = "impersonated")]
+fn is_hard_block_status(status_code: u16) -> bool {
+    matches!(status_code, 401 | 403 | 429 | 503) || (520..=530).contains(&status_code)
+}
+
+/// Is this wall one a Chrome TLS fingerprint cannot clear because the vendor
+/// gates on JS execution? Firing the impersonated hop on these only burns
+/// budget before the ladder: the hop's own accept gate rejects them anyway.
+#[cfg(feature = "impersonated")]
+fn is_fingerprint_vendor_wall(
+    cf_challenge: bool,
+    vendor_block: Option<&str>,
+    antibot_signal: crw_extract::antibot::AntibotSignal,
+) -> bool {
+    use crw_extract::antibot::AntibotSignal;
+    cf_challenge
+        || matches!(
+            vendor_block,
+            Some("datadome" | "perimeterx" | "kasada" | "akamai" | "imperva")
+        )
+        || matches!(
+            antibot_signal,
+            AntibotSignal::Cloudflare
+                | AntibotSignal::Datadome
+                | AntibotSignal::PerimeterX
+                | AntibotSignal::Akamai
+                | AntibotSignal::Imperva
+                | AntibotSignal::Kasada
+        )
+}
+
+/// An HTTP-tier error the Chrome fingerprint could plausibly fix: a failure
+/// after the connection was established (a reset or protocol error once the
+/// origin saw our request). Excludes the shapes no client fixes: a non-page
+/// body, a dead target, a slow origin and an oversize body. Connect-phase
+/// failures, TLS handshake included, arrive as `TargetUnreachable` from the
+/// plain tier and stay excluded: retrying them would double the connect
+/// timeout on a dead host.
+#[cfg(feature = "impersonated")]
+fn fingerprint_shaped_error(e: &CrwError) -> bool {
+    !matches!(e, CrwError::UnsupportedContentType(_))
+        && !matches!(e, CrwError::TargetUnreachable(_))
+        && !matches!(e, CrwError::Timeout(_))
+        && !matches!(e, CrwError::HttpError(m) if m.starts_with("Response too large"))
+}
+
+/// Why the impersonated hop fired; label for logs and the route-decision
+/// metric, and the source of the Failover reason.
+#[cfg(feature = "impersonated")]
+#[derive(Clone, Copy)]
+enum ImpersonatedTrigger {
+    /// Body/header wall or hard-block status on the plain HTTP response.
+    Wall,
+    /// The plain HTTP fetch itself failed at the transport layer.
+    Transport,
+}
+
+#[cfg(feature = "impersonated")]
+impl ImpersonatedTrigger {
+    fn as_str(self) -> &'static str {
+        match self {
+            ImpersonatedTrigger::Wall => "wall",
+            ImpersonatedTrigger::Transport => "transport",
+        }
+    }
+}
+
 /// Minimum remaining request budget for a network attempt to be worth making.
 /// Below this a CDP tier cannot complete its handshake and returns a fabricated
 /// `Timeout after Nms` (single-digit N) while still consuming a pool slot.
@@ -376,6 +446,12 @@ pub struct FallbackRenderer {
     /// Whether the HTTP tier egresses through a configured proxy. A cached
     /// `cf_clearance` is bound to the egress IP, so it is never injected then.
     http_has_proxy: bool,
+    /// Chrome-impersonating HTTP tier (wreq): the auto-chain hop between the
+    /// plain HTTP tier and the JS ladder, and the `renderer =
+    /// "impersonated-http"` pin. Outside `js_renderers`, the breaker and
+    /// `has_recovery_tier`: it changes the fingerprint, not the egress IP.
+    #[cfg(feature = "impersonated")]
+    impersonated: Option<Arc<dyn PageFetcher>>,
     /// Chrome browser-context pool handle for graceful drain on shutdown.
     /// `None` when the pool is disabled or the chrome tier isn't configured.
     #[cfg(feature = "cdp")]
@@ -427,6 +503,26 @@ impl FallbackRenderer {
         let clearance = Arc::new(clearance::ClearanceCache::with_defaults());
         let http = Arc::new(http_concrete) as Arc<dyn PageFetcher>;
 
+        // Chrome-impersonation HTTP tier. Constructed BEFORE the mode=none
+        // early return: it is an HTTP strategy, so "no JS" keeps it; only the
+        // `impersonated.enabled = false` kill switch removes it. A build
+        // failure is a hard error, never a silent fall-through to a
+        // non-impersonating client. Honours the operator's static proxy.
+        #[cfg(feature = "impersonated")]
+        let impersonated: Option<Arc<dyn PageFetcher>> = if config.impersonated_in_chain() {
+            let tier = impersonated::ImpersonatedFetcher::new(
+                proxy,
+                Duration::from_millis(config.impersonated_timeout()),
+            )?;
+            tracing::info!(
+                timeout_ms = config.impersonated_timeout(),
+                "impersonated-http tier enabled"
+            );
+            Some(Arc::new(tier) as Arc<dyn PageFetcher>)
+        } else {
+            None
+        };
+
         // A pinned backend (Lightpanda/Chrome/Playwright) must have CDP compiled in
         // AND its matching endpoint configured. `Auto` and `None` remain functional
         // without CDP — they just won't spawn any JS renderer.
@@ -467,6 +563,8 @@ impl FallbackRenderer {
                 antibot: config.antibot.clone(),
                 clearance: Arc::clone(&clearance),
                 http_has_proxy,
+                #[cfg(feature = "impersonated")]
+                impersonated,
                 #[cfg(feature = "cdp")]
                 chrome_pool: None,
             });
@@ -582,6 +680,8 @@ impl FallbackRenderer {
             antibot: config.antibot.clone(),
             clearance,
             http_has_proxy,
+            #[cfg(feature = "impersonated")]
+            impersonated,
             #[cfg(feature = "cdp")]
             chrome_pool,
         })
@@ -667,6 +767,255 @@ impl FallbackRenderer {
         self.js_renderers.iter().map(|r| r.name()).collect()
     }
 
+    /// Is the Chrome-impersonation HTTP tier present in this build and config?
+    pub fn has_impersonated_tier(&self) -> bool {
+        #[cfg(feature = "impersonated")]
+        {
+            self.impersonated.is_some()
+        }
+        #[cfg(not(feature = "impersonated"))]
+        {
+            false
+        }
+    }
+
+    /// The renderer names a request may pin on this instance: the impersonated
+    /// HTTP tier when present, then the JS ladder. The single vocabulary both
+    /// pin-validation surfaces (crw-server `state.rs`, crw-crawl `single.rs`)
+    /// check against.
+    pub fn available_renderer_names(&self) -> Vec<&str> {
+        let mut names = Vec::new();
+        if self.has_impersonated_tier() {
+            names.push("impersonated-http");
+        }
+        names.extend(self.js_renderer_names());
+        names
+    }
+
+    /// Replace the impersonated tier. For tests that drive the ladder without
+    /// a network.
+    #[cfg(feature = "impersonated")]
+    #[doc(hidden)]
+    pub fn with_impersonated(mut self, tier: Option<Arc<dyn PageFetcher>>) -> Self {
+        self.impersonated = tier;
+        self
+    }
+
+    /// Did the impersonated tier come back holding a WALL? The pin's verdict,
+    /// and the first half of the hop's. Not `JsBodyChecks::accepted()`: that
+    /// also fails on a thin body and on soft 404/410/500 statuses, so a
+    /// pinned crawl would report every dead link as an anti-bot block.
+    /// `StructuralFailure` is excluded for the same reason: it means "thin or
+    /// empty body", not "a vendor said no".
+    #[cfg(feature = "impersonated")]
+    fn impersonation_blocked(&self, result: &FetchResult) -> bool {
+        let checks = JsBodyChecks::assess(result, &self.antibot);
+        self.impersonation_blocked_with(result, &checks)
+    }
+
+    /// Same verdict as [`Self::impersonation_blocked`], taking an already-assessed
+    /// [`JsBodyChecks`] so a caller that also needs the checks for other purposes
+    /// (`impersonation_accepted`) does not assess the body twice.
+    #[cfg(feature = "impersonated")]
+    fn impersonation_blocked_with(&self, result: &FetchResult, checks: &JsBodyChecks) -> bool {
+        use crw_extract::antibot::AntibotSignal;
+        if matches!(
+            result.warning.as_deref(),
+            Some("cloudflare_mitigated") | Some("waf_challenge")
+        ) {
+            return true;
+        }
+        is_hard_block_status(result.status_code)
+            || checks.is_bot_wall
+            || checks.vendor_block.is_some()
+            || checks.cf_challenge
+            || (checks.antibot.signal.is_blocked()
+                && checks.antibot.signal != AntibotSignal::StructuralFailure)
+    }
+
+    /// Accept predicate for the AUTO-CHAIN hop: may this response end the
+    /// chain here, with no browser tier ever running? Stricter than
+    /// `impersonation_blocked` and than `accepted()` alone: the hop feeds
+    /// PRE-render HTML, and a TLS-gated SPA answers with a shell that passes
+    /// the 50-char text gate. So the auto arm's own JS-escalation triggers
+    /// are applied to the hop body too; the hop can only ever end a chain the
+    /// ladder would also have ended.
+    #[cfg(feature = "impersonated")]
+    fn impersonation_accepted(&self, result: &FetchResult) -> bool {
+        let checks = JsBodyChecks::assess(result, &self.antibot);
+        if self.impersonation_blocked_with(result, &checks) || !checks.accepted() {
+            return false;
+        }
+        !detector::needs_js_rendering(&result.html)
+            && !(detector::looks_like_thin_html(&result.html)
+                && detector::warrants_browser_retry(&result.html))
+    }
+
+    /// `antibot::classify` behind the configured gate.
+    #[cfg(feature = "impersonated")]
+    fn antibot_signal(&self, status_code: u16, html: &str) -> crw_extract::antibot::AntibotSignal {
+        if self.antibot.enabled {
+            crw_extract::antibot::classify(Some(status_code), html).signal
+        } else {
+            crw_extract::antibot::AntibotSignal::None
+        }
+    }
+
+    /// One Chrome-impersonated retry between the plain-HTTP tier and the JS
+    /// ladder. The caller fires it ONLY on wall-shaped triggers or a
+    /// transport error, never on SPA/thin/empty shapes, and never on a
+    /// fingerprint-vendor wall. Returns the accepted result, or `None` to
+    /// continue exactly as today.
+    #[cfg(feature = "impersonated")]
+    async fn try_impersonated_hop(
+        &self,
+        url: &str,
+        headers: &HashMap<String, String>,
+        deadline: crw_core::Deadline,
+        trigger: ImpersonatedTrigger,
+    ) -> Option<FetchResult> {
+        let fetcher = self.impersonated.as_ref()?;
+        // Budget split: the hop runs BEFORE the ladder on the SHARED request
+        // deadline, so without a cap a tarpitting wall host drains the budget
+        // the browser tiers needed. Half is the split. A reserve is only owed
+        // when there IS a ladder to protect: an HTTP-only deployment hands
+        // the hop the whole remaining budget.
+        let remaining = deadline.remaining();
+        if remaining < MIN_TIER_BUDGET {
+            return None;
+        }
+        let deadline = if self.js_renderers.is_empty() {
+            deadline
+        } else {
+            let share = remaining / 2;
+            if share < MIN_TIER_BUDGET {
+                return None;
+            }
+            crw_core::Deadline::now_plus(share)
+        };
+        let kind = RendererKind::ImpersonatedHttp;
+        match fetcher.fetch(url, headers, None, deadline).await {
+            Ok(mut r) => {
+                if self.impersonation_accepted(&r) {
+                    r.credit_cost = credit_for(kind);
+                    r.render_decision = Some(RenderDecision::Failover {
+                        chain: vec![RendererKind::Http, kind],
+                        reason: match trigger {
+                            ImpersonatedTrigger::Wall => FailoverErrorKind::VendorBlock,
+                            ImpersonatedTrigger::Transport => FailoverErrorKind::NetworkError,
+                        },
+                    });
+                    metrics()
+                        .render_route_decision_total
+                        .with_label_values(&[kind.as_str(), "success"])
+                        .inc();
+                    Some(r)
+                } else {
+                    tracing::info!(
+                        url,
+                        trigger = trigger.as_str(),
+                        status_code = r.status_code,
+                        "impersonated hop still blocked; continuing to the ladder"
+                    );
+                    metrics()
+                        .render_route_decision_total
+                        .with_label_values(&[kind.as_str(), "blocked"])
+                        .inc();
+                    None
+                }
+            }
+            Err(e) => {
+                tracing::info!(
+                    url,
+                    trigger = trigger.as_str(),
+                    "impersonated hop failed: {e}"
+                );
+                metrics()
+                    .render_route_decision_total
+                    .with_label_values(&[kind.as_str(), "error"])
+                    .inc();
+                None
+            }
+        }
+    }
+
+    /// Serve the `renderer = "impersonated-http"` pin. A wall surfaces as an
+    /// error (the hard-pin "failures must surface" contract), never as a
+    /// billed success. It does NOT run the auto-chain accept gate: the pin
+    /// has no ladder to fall through to, so a PDF, a 404 or a thin page
+    /// comes back as the result it is, exactly as a hard browser pin does.
+    #[cfg(feature = "impersonated")]
+    async fn fetch_pinned_impersonated(
+        &self,
+        url: &str,
+        headers: &HashMap<String, String>,
+        wait_for_ms: Option<u64>,
+        deadline: crw_core::Deadline,
+    ) -> CrwResult<FetchResult> {
+        let kind = RendererKind::ImpersonatedHttp;
+        metrics()
+            .user_pin_total
+            .with_label_values(&[kind.as_str()])
+            .inc();
+        let route = |decision: &'static str| {
+            metrics()
+                .render_route_decision_total
+                .with_label_values(&[kind.as_str(), decision])
+                .inc();
+        };
+        let Some(fetcher) = self.impersonated.as_ref() else {
+            route("error");
+            return Err(CrwError::RendererError(
+                "the impersonated-http tier is not available in this build or config".into(),
+            ));
+        };
+        let mut r = match fetcher.fetch(url, headers, wait_for_ms, deadline).await {
+            Ok(r) => r,
+            Err(e) => {
+                route("error");
+                return Err(e);
+            }
+        };
+        if self.impersonation_blocked(&r) {
+            tracing::warn!(
+                url,
+                status_code = r.status_code,
+                "pinned impersonated-http result looks blocked; surfacing as an error"
+            );
+            route("blocked");
+            return Err(CrwError::RendererError(
+                "impersonated-http: the response carries an anti-bot block \
+                 (vendor wall class); the pinned tier refuses to bill it as a success"
+                    .into(),
+            ));
+        }
+        let is_pdf = r.content_type.as_deref() == Some("application/pdf");
+        if !is_pdf && html_body_text_len(&r.html) < Self::MIN_RENDERED_TEXT_LEN {
+            r.warnings.push(format!(
+                "Pinned renderer 'impersonated-http' returned thin content (text_len={}). \
+                 Omit the renderer field for auto-failover.",
+                html_body_text_len(&r.html)
+            ));
+        }
+        r.credit_cost = credit_for(kind);
+        r.render_decision = Some(RenderDecision::UserPinned { renderer: kind });
+        route("success");
+        Ok(r)
+    }
+
+    #[cfg(not(feature = "impersonated"))]
+    async fn fetch_pinned_impersonated(
+        &self,
+        _url: &str,
+        _headers: &HashMap<String, String>,
+        _wait_for_ms: Option<u64>,
+        _deadline: crw_core::Deadline,
+    ) -> CrwResult<FetchResult> {
+        Err(CrwError::RendererError(
+            "the impersonated-http tier is not available in this build or config".into(),
+        ))
+    }
+
     /// Which tier a post-LightPanda escalation should aim at, or `None` when
     /// this pool has nothing above lightpanda and the escalation should be
     /// skipped rather than dispatched.
@@ -748,6 +1097,14 @@ impl FallbackRenderer {
         );
         // A non-"auto" pinned renderer is a hard pin — failures must surface.
         let is_hard_pinned = matches!(requested_renderer, Some(name) if name != "auto");
+        // The one wire-level pin that never executes JS: served ahead of the
+        // render_js match so a `render_js_default` cannot divert it into the
+        // forced-JS arm it cannot serve.
+        if requested_renderer == Some("impersonated-http") {
+            return self
+                .fetch_pinned_impersonated(url, headers, wait_for_ms, deadline)
+                .await;
+        }
         match effective {
             Some(false) => {
                 let mut r = self.http_fetch(url, headers, deadline).await?;
@@ -884,7 +1241,30 @@ impl FallbackRenderer {
                 // sites that reject reqwest's TLS/UA fingerprint succeed via a
                 // real Chromium navigation. Bench analysis: 10/147 false
                 // "unreachable" + 5/147 "http_502" map to this branch.
-                let mut result = match self.http_fetch(url, headers, deadline).await {
+                let fetched = self.http_fetch(url, headers, deadline).await;
+                // Chrome-impersonation hop on a TRANSPORT failure that happened
+                // after the connection was up (see `fingerprint_shaped_error`),
+                // BEFORE the JS escalation below. When it returns None the match
+                // that follows is byte-identical to the pre-hop ladder.
+                #[cfg(feature = "impersonated")]
+                let fetched = match fetched {
+                    Err(e) if fingerprint_shaped_error(&e) => {
+                        if let Some(r) = self
+                            .try_impersonated_hop(
+                                url,
+                                headers,
+                                deadline,
+                                ImpersonatedTrigger::Transport,
+                            )
+                            .await
+                        {
+                            return Ok(r);
+                        }
+                        Err(e)
+                    }
+                    other => other,
+                };
+                let mut result = match fetched {
                     Ok(r) => r,
                     // `UnsupportedContentType` is excluded on purpose: the body is
                     // not a web page at all (a .docx ZIP, an image), which no
@@ -968,6 +1348,29 @@ impl FallbackRenderer {
                     && !matches!(result.status_code, 204..=206)
                     && crw_core::is_html_like_content_type(result.content_type.as_deref())
                     && result.html.trim().is_empty();
+
+                // Chrome-impersonation hop between the plain HTTP tier and the
+                // JS ladder, on WALL-shaped triggers only. Tier presence is the
+                // FIRST conjunct so a config-disabled tier pays none of the
+                // vendor-wall scans. Never fires on needs_js / thin / empty
+                // shapes (impersonation cannot execute JS) and never on a
+                // fingerprint-vendor wall (those need JS no HTTP client can
+                // fake). Independent of `js_renderers`: an HTTP-only
+                // deployment gets the fix with zero browsers.
+                #[cfg(feature = "impersonated")]
+                if self.impersonated.is_some()
+                    && (is_blocked || is_hard_block_status(result.status_code))
+                    && !is_fingerprint_vendor_wall(
+                        cf_header_signal || detector::looks_like_cloudflare_challenge(&result.html),
+                        detector::looks_like_vendor_block(&result.html),
+                        self.antibot_signal(result.status_code, &result.html),
+                    )
+                    && let Some(r) = self
+                        .try_impersonated_hop(url, headers, deadline, ImpersonatedTrigger::Wall)
+                        .await
+                {
+                    return Ok(r);
+                }
 
                 if !self.js_renderers.is_empty()
                     && (needs_js
@@ -2259,6 +2662,10 @@ mod tests {
         Ok(String),
         OkStatus(u16, String),
         Err(String),
+        #[cfg(feature = "impersonated")]
+        HttpErr(String),
+        #[cfg(feature = "impersonated")]
+        Unreachable(String),
         Timeout,
     }
 
@@ -2275,6 +2682,12 @@ mod tests {
                 MockBehavior::Ok(html) => (200u16, html.clone()),
                 MockBehavior::OkStatus(s, html) => (*s, html.clone()),
                 MockBehavior::Err(msg) => return Err(CrwError::RendererError(msg.clone())),
+                #[cfg(feature = "impersonated")]
+                MockBehavior::HttpErr(msg) => return Err(CrwError::HttpError(msg.clone())),
+                #[cfg(feature = "impersonated")]
+                MockBehavior::Unreachable(msg) => {
+                    return Err(CrwError::TargetUnreachable(msg.clone()));
+                }
                 MockBehavior::Timeout => return Err(CrwError::Timeout(2_500)),
             };
             Ok(FetchResult {
@@ -2369,6 +2782,373 @@ mod tests {
         }
         async fn is_available(&self) -> bool {
             true
+        }
+    }
+
+    #[cfg(feature = "impersonated")]
+    mod impersonated_ladder {
+        use super::*;
+
+        fn wall_403() -> Arc<dyn PageFetcher> {
+            Arc::new(MockFetcher {
+                name: "http",
+                behavior: MockBehavior::OkStatus(
+                    403,
+                    "<html><body>Access denied</body></html>".to_string(),
+                ),
+            })
+        }
+
+        fn spa_shell() -> String {
+            "<html><body><div id=\"root\"></div><script src=\"/app.js\"></script></body></html>"
+                .to_string()
+        }
+
+        /// An SPA shell with enough visible text (>200 chars) to clear the
+        /// `JsBodyChecks::accepted()` thin-content gate on its own, so
+        /// `impersonation_accepted` reaches its `needs_js_rendering` check
+        /// instead of being rejected earlier by the thin-body check. A single
+        /// `<script src>` does not trip `needs_js_rendering` once body text is
+        /// over 200 chars (that heuristic only fires on a short body); five
+        /// script tags do, via the "bundler-heavy SPA" branch (short-of-1000-char
+        /// body + 5 or more `<script>` tags). Confirmed against
+        /// `detector::needs_js_rendering`.
+        fn rich_spa_shell() -> String {
+            format!(
+                "<html><body><div id=\"root\"></div>\
+                 <script src=\"/a.js\"></script><script src=\"/b.js\"></script>\
+                 <script src=\"/c.js\"></script><script src=\"/d.js\"></script>\
+                 <script src=\"/e.js\"></script>\
+                 <p>{}</p></body></html>",
+                "Lorem ipsum dolor sit amet, consectetur adipiscing elit. ".repeat(5)
+            )
+        }
+
+        fn counting(
+            name: &'static str,
+        ) -> (Arc<dyn PageFetcher>, Arc<std::sync::atomic::AtomicUsize>) {
+            let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+            let f = Arc::new(CountingFetcher {
+                name,
+                calls: Arc::clone(&calls),
+            }) as Arc<dyn PageFetcher>;
+            (f, calls)
+        }
+
+        fn renderer(
+            http: Arc<dyn PageFetcher>,
+            imp: Option<Arc<dyn PageFetcher>>,
+            js: Vec<Arc<dyn PageFetcher>>,
+        ) -> FallbackRenderer {
+            make_renderer_with_mocks(Vec::new())
+                .with_fetchers(http, js)
+                .with_impersonated(imp)
+        }
+
+        async fn auto_fetch(r: &FallbackRenderer) -> CrwResult<FetchResult> {
+            r.fetch(
+                "https://example.com",
+                &HashMap::new(),
+                None,
+                None,
+                None,
+                tdl(),
+            )
+            .await
+        }
+
+        #[test]
+        fn default_config_constructs_the_tier_and_kill_switch_removes_it() {
+            let on = FallbackRenderer::new(
+                &RendererConfig::default(),
+                "crw-test",
+                None,
+                &StealthConfig::default(),
+            )
+            .unwrap();
+            assert!(on.has_impersonated_tier());
+            assert_eq!(on.available_renderer_names(), vec!["impersonated-http"]);
+
+            let mut cfg = RendererConfig::default();
+            cfg.impersonated.enabled = false;
+            let off =
+                FallbackRenderer::new(&cfg, "crw-test", None, &StealthConfig::default()).unwrap();
+            assert!(!off.has_impersonated_tier());
+            assert!(off.available_renderer_names().is_empty());
+        }
+
+        #[tokio::test]
+        async fn wall_hops_to_impersonated_before_js() {
+            let imp = Arc::new(MockFetcher {
+                name: "impersonated-http",
+                behavior: MockBehavior::Ok(rich_html("IMP-")),
+            }) as Arc<dyn PageFetcher>;
+            let (lp, lp_calls) = counting("lightpanda");
+            let r = renderer(wall_403(), Some(imp), vec![lp]);
+            let res = auto_fetch(&r).await.unwrap();
+            assert!(res.html.contains("IMP-"));
+            assert_eq!(res.credit_cost, 1);
+            assert_eq!(
+                res.render_decision,
+                Some(RenderDecision::Failover {
+                    chain: vec![RendererKind::Http, RendererKind::ImpersonatedHttp],
+                    reason: FailoverErrorKind::VendorBlock,
+                })
+            );
+            assert_eq!(lp_calls.load(std::sync::atomic::Ordering::SeqCst), 0);
+        }
+
+        #[tokio::test]
+        async fn transport_error_hops_to_impersonated_before_js() {
+            let http = Arc::new(MockFetcher {
+                name: "http",
+                behavior: MockBehavior::HttpErr(
+                    "https://example.com: connection reset by peer".into(),
+                ),
+            }) as Arc<dyn PageFetcher>;
+            let imp = Arc::new(MockFetcher {
+                name: "impersonated-http",
+                behavior: MockBehavior::Ok(rich_html("IMP-")),
+            }) as Arc<dyn PageFetcher>;
+            let (lp, lp_calls) = counting("lightpanda");
+            let r = renderer(http, Some(imp), vec![lp]);
+            let res = auto_fetch(&r).await.unwrap();
+            assert!(res.html.contains("IMP-"));
+            assert_eq!(
+                res.render_decision,
+                Some(RenderDecision::Failover {
+                    chain: vec![RendererKind::Http, RendererKind::ImpersonatedHttp],
+                    reason: FailoverErrorKind::NetworkError,
+                })
+            );
+            assert_eq!(lp_calls.load(std::sync::atomic::Ordering::SeqCst), 0);
+        }
+
+        #[tokio::test]
+        async fn unreachable_target_does_not_hop() {
+            let http = Arc::new(MockFetcher {
+                name: "http",
+                behavior: MockBehavior::Unreachable(
+                    "Could not reach https://example.com: tls handshake eof".into(),
+                ),
+            }) as Arc<dyn PageFetcher>;
+            let (imp, imp_calls) = counting("impersonated-http");
+            let lp = Arc::new(MockFetcher {
+                name: "lightpanda",
+                behavior: MockBehavior::Ok(rich_html("LP-")),
+            }) as Arc<dyn PageFetcher>;
+            let r = renderer(http, Some(imp), vec![lp]);
+            let res = auto_fetch(&r).await.unwrap();
+            assert_eq!(imp_calls.load(std::sync::atomic::Ordering::SeqCst), 0);
+            assert!(res.html.contains("LP-"));
+        }
+
+        #[tokio::test]
+        async fn clean_site_never_consults_impersonated() {
+            let http = Arc::new(MockFetcher {
+                name: "http",
+                behavior: MockBehavior::Ok(rich_html("HTTP-")),
+            }) as Arc<dyn PageFetcher>;
+            let (imp, imp_calls) = counting("impersonated-http");
+            let (lp, _) = counting("lightpanda");
+            let r = renderer(http, Some(imp), vec![lp]);
+            let res = auto_fetch(&r).await.unwrap();
+            assert!(res.html.contains("HTTP-"));
+            assert_eq!(res.rendered_with.as_deref(), Some("http"));
+            assert_eq!(imp_calls.load(std::sync::atomic::Ordering::SeqCst), 0);
+        }
+
+        #[tokio::test]
+        async fn still_blocked_hop_continues_to_ladder() {
+            let imp = Arc::new(MockFetcher {
+                name: "impersonated-http",
+                behavior: MockBehavior::OkStatus(403, "<html><body>denied</body></html>".into()),
+            }) as Arc<dyn PageFetcher>;
+            let lp = Arc::new(MockFetcher {
+                name: "lightpanda",
+                behavior: MockBehavior::Ok(rich_html("LP-")),
+            }) as Arc<dyn PageFetcher>;
+            let r = renderer(wall_403(), Some(imp), vec![lp]);
+            let res = auto_fetch(&r).await.unwrap();
+            assert!(res.html.contains("LP-"));
+        }
+
+        #[tokio::test]
+        async fn spa_shell_skips_impersonated() {
+            let http = Arc::new(MockFetcher {
+                name: "http",
+                behavior: MockBehavior::Ok(spa_shell()),
+            }) as Arc<dyn PageFetcher>;
+            let (imp, imp_calls) = counting("impersonated-http");
+            let lp = Arc::new(MockFetcher {
+                name: "lightpanda",
+                behavior: MockBehavior::Ok(rich_html("LP-")),
+            }) as Arc<dyn PageFetcher>;
+            let r = renderer(http, Some(imp), vec![lp]);
+            let res = auto_fetch(&r).await.unwrap();
+            assert!(res.html.contains("LP-"));
+            assert_eq!(imp_calls.load(std::sync::atomic::Ordering::SeqCst), 0);
+        }
+
+        #[tokio::test]
+        async fn hop_body_that_needs_js_continues_to_ladder() {
+            let imp = Arc::new(MockFetcher {
+                name: "impersonated-http",
+                behavior: MockBehavior::Ok(rich_spa_shell()),
+            }) as Arc<dyn PageFetcher>;
+            let lp = Arc::new(MockFetcher {
+                name: "lightpanda",
+                behavior: MockBehavior::Ok(rich_html("LP-")),
+            }) as Arc<dyn PageFetcher>;
+            let r = renderer(wall_403(), Some(imp), vec![lp]);
+            let res = auto_fetch(&r).await.unwrap();
+            assert!(res.html.contains("LP-"));
+        }
+
+        #[tokio::test]
+        async fn pinned_wall_shaped_result_errors() {
+            let imp = Arc::new(MockFetcher {
+                name: "impersonated-http",
+                behavior: MockBehavior::OkStatus(403, "<html><body>denied</body></html>".into()),
+            }) as Arc<dyn PageFetcher>;
+            let (http, http_calls) = counting("http");
+            let r = renderer(http, Some(imp), Vec::new());
+            let res = r
+                .fetch(
+                    "https://example.com",
+                    &HashMap::new(),
+                    None,
+                    None,
+                    Some("impersonated-http"),
+                    tdl(),
+                )
+                .await;
+            assert!(
+                matches!(res, Err(CrwError::RendererError(_))),
+                "got: {res:?}"
+            );
+            assert_eq!(http_calls.load(std::sync::atomic::Ordering::SeqCst), 0);
+        }
+
+        #[tokio::test]
+        async fn pinned_404_is_returned_as_is() {
+            let imp = Arc::new(MockFetcher {
+                name: "impersonated-http",
+                behavior: MockBehavior::OkStatus(404, rich_html("GONE-")),
+            }) as Arc<dyn PageFetcher>;
+            let (http, _) = counting("http");
+            let r = renderer(http, Some(imp), Vec::new());
+            let res = r
+                .fetch(
+                    "https://example.com",
+                    &HashMap::new(),
+                    None,
+                    None,
+                    Some("impersonated-http"),
+                    tdl(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(res.status_code, 404);
+            assert_eq!(res.credit_cost, 1);
+            assert_eq!(
+                res.render_decision,
+                Some(RenderDecision::UserPinned {
+                    renderer: RendererKind::ImpersonatedHttp
+                })
+            );
+        }
+
+        #[tokio::test]
+        async fn pinned_thin_body_warns_instead_of_erroring() {
+            let imp = Arc::new(MockFetcher {
+                name: "impersonated-http",
+                behavior: MockBehavior::Ok("<html><body>ok</body></html>".into()),
+            }) as Arc<dyn PageFetcher>;
+            let (http, _) = counting("http");
+            let r = renderer(http, Some(imp), Vec::new());
+            let res = r
+                .fetch(
+                    "https://example.com",
+                    &HashMap::new(),
+                    None,
+                    None,
+                    Some("impersonated-http"),
+                    tdl(),
+                )
+                .await
+                .unwrap();
+            assert!(
+                res.warnings.iter().any(|w| w.contains("thin content")),
+                "warnings: {:?}",
+                res.warnings
+            );
+        }
+
+        #[tokio::test]
+        async fn pin_without_tier_errors() {
+            let (http, _) = counting("http");
+            let r = renderer(http, None, Vec::new());
+            let res = r
+                .fetch(
+                    "https://example.com",
+                    &HashMap::new(),
+                    None,
+                    None,
+                    Some("impersonated-http"),
+                    tdl(),
+                )
+                .await;
+            assert!(
+                matches!(res, Err(CrwError::RendererError(_))),
+                "got: {res:?}"
+            );
+        }
+
+        /// End-to-end AUTO chain against the real wall: plain HTTP first, the
+        /// impersonated hop clears it, no browser tier exists in this
+        /// renderer, so the hop MUST be what wins. The wall is served per
+        /// request (rate and egress dependent), so both outcomes are asserted
+        /// for internal consistency.
+        #[tokio::test]
+        #[ignore]
+        async fn live_auto_chain_serves_amazon_via_the_hop() {
+            let r = FallbackRenderer::new(
+                &RendererConfig::default(),
+                "crw-test",
+                None,
+                &StealthConfig::default(),
+            )
+            .unwrap();
+            let res = r
+                .fetch(
+                    "https://www.amazon.it/dp/B0FHQGLXBP",
+                    &HashMap::new(),
+                    None,
+                    None,
+                    None,
+                    crw_core::Deadline::from_request_ms(45_000),
+                )
+                .await
+                .unwrap();
+            assert!(
+                res.html.to_lowercase().contains("nene toys"),
+                "neither tier served the product page"
+            );
+            match res.rendered_with.as_deref() {
+                Some("impersonated-http") => assert_eq!(
+                    res.render_decision,
+                    Some(RenderDecision::Failover {
+                        chain: vec![RendererKind::Http, RendererKind::ImpersonatedHttp],
+                        reason: FailoverErrorKind::VendorBlock,
+                    })
+                ),
+                Some("http") => assert!(
+                    !detector::looks_like_generic_bot_wall(&res.html),
+                    "the plain tier's result IS the wall; the hop should have fired"
+                ),
+                other => panic!("unexpected rendered_with: {other:?}"),
+            }
         }
     }
 
