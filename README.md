@@ -8,15 +8,6 @@
   Self-hosted, Rust-native web crawler &amp; scraper for AI agents
 </p>
 
-The open-source alternative to Firecrawl: one static Rust binary, ~50 MB RAM
-idle, a Firecrawl-compatible REST API on **both `/v1/*` and `/v2/*`** (scrape,
-crawl, map, search, extract, plus v2 batch & parse) — a drop-in for the official
-Firecrawl SDKs — plus first-class MCP. Self-host free under AGPL-3.0.
-
-**This fork** swaps the browser layer to [Camofox](https://github.com/redf0x1/camofox-browser)
-(Firefox anti-detect) and re-backs search on it — details [below](#-this-is-the-camofox-fork).
-Upstream offers a managed API at `api.fastcrw.com`; this fork is self-host only.
-
 <p align="center">
   <a href="https://github.com/adambenhassen/crw-camofox/actions/workflows/ci.yml"><img src="https://github.com/adambenhassen/crw-camofox/actions/workflows/ci.yml/badge.svg?branch=main&event=push" alt="CI"></a>
   <a href="https://github.com/adambenhassen/crw-camofox/releases"><img src="https://img.shields.io/github/v/release/adambenhassen/crw-camofox?sort=semver&color=blue" alt="Latest release"></a>
@@ -25,89 +16,16 @@ Upstream offers a managed API at `api.fastcrw.com`; this fork is self-host only.
   <a href="https://github.com/adambenhassen/crw-camofox/stargazers"><img src="https://img.shields.io/github/stars/adambenhassen/crw-camofox?style=social" alt="GitHub Stars"></a>
 </p>
 
-Works with: [Claude Code](https://docs.fastcrw.com/mcp-clients/#claude-code) · [Cursor](https://docs.fastcrw.com/mcp-clients/#cursor) · [Windsurf](https://docs.fastcrw.com/mcp-clients/#windsurf) · [Cline](https://docs.fastcrw.com/mcp-clients/#cline) · [Copilot](https://docs.fastcrw.com/mcp-clients/#any-mcp-client) · [Continue.dev](https://docs.fastcrw.com/mcp-clients/#continue) · [Codex](https://docs.fastcrw.com/mcp-clients/#openai-codex-cli) · [Gemini CLI](https://docs.fastcrw.com/mcp-clients/#gemini-cli)
+The open-source alternative to Firecrawl: one static Rust binary, ~50 MB RAM
+idle, a Firecrawl-compatible REST API on **both `/v1/*` and `/v2/*`** (scrape,
+crawl, map, search, extract, plus v2 batch & parse) — a drop-in for the official
+Firecrawl SDKs — plus first-class MCP. This fork of [`crw`](https://github.com/us/crw)
+swaps the browser layer to [Camofox](https://github.com/redf0x1/camofox-browser)
+(Firefox anti-detect) and re-backs search on it — details
+[below](#-this-is-the-camofox-fork). Self-host free under AGPL-3.0; upstream offers
+a managed API at `api.fastcrw.com`, this fork is self-host only.
 
----
-
-## 🦊 This is the Camofox fork
-
-This is a fork of [`crw`](https://github.com/us/crw) that swaps the browser layer
-to [**Camofox**](https://github.com/redf0x1/camofox-browser) (the Camoufox/Firefox
-anti-detect browser, driven over its REST API) and re-backs search on it. Changes
-vs. upstream — all **additive and config-toggled**:
-
-| Area | Upstream `crw` | This fork |
-|------|----------------|-----------|
-| Default JS render ladder | `HTTP → LightPanda → Chrome` (CDP) | `HTTP → LightPanda → Camofox` (Firefox) `→ Byparr` (Cloudflare challenges only) |
-| Stealth tier | browserless Chromium (SSPL); opt-in in-process Camoufox tier | **Camofox** ([camofox-browser](https://github.com/redf0x1/camofox-browser), REST-driven) — engine-level fingerprint evasion, the default tier, shared by render *and* search |
-| `/v1/search` backend | SearXNG sidecar | **8 engines built in** — Google, Bing, DuckDuckGo, Wikipedia, YouTube, Reddit, Amazon, GitHub (no sidecar) |
-| Interactive MCP | `crw-browse` (CDP, 2 tools) | Upstream **[`camofox-mcp`](https://github.com/redf0x1/camofox-mcp)** wired into the Docker stack — 47 tools over Camofox REST |
-
-**What sets this fork apart:**
-
-- **One less moving part.** Upstream's `/v1/search` needs a SearXNG sidecar; this fork
-  searches Google through the **same Camofox browser it already runs to render pages**.
-  `docker compose up` gives you working search with no extra container to deploy,
-  version, or keep healthy.
-- **Search that actually returns results.** In the production setup below, the SearXNG
-  backend came back **empty for every query**; the Camofox-driven backend (Google by
-  default) reliably returns real results.
-- **Anti-detection at the engine level.** Camofox is Camoufox (Firefox) with fingerprint
-  evasion **built into the browser**. Upstream now ships its own opt-in Camoufox tier too,
-  but it's an in-process *renderer* only — search still needs the SearXNG sidecar. Here one
-  browser covers both rendering *and* search by default, so there's no Chromium heap plus a
-  search sidecar to run side by side.
-- **Many engines, one ranked list.** Search defaults to Google but can query up to four of
-  Google, Bing, DuckDuckGo, Wikipedia, YouTube, Reddit, Amazon, and GitHub in a single call
-  (run sequentially, so latency scales with engine count), deduping by URL and agreement-ranking
-  the merged results — where upstream is tied to one SearXNG instance.
-- **Cloudflare challenges get cleared.** The Camofox tab waits out a "Just a moment"
-  interstitial (`renderer.camofox.challenge_wait_ms`, default 20 s). When a Turnstile
-  checkbox remains, the ladder hands the page to a bundled
-  [Byparr](https://github.com/ThePhaseless/Byparr) solver, which clicks it. The
-  `cf_clearance` cookie either tier earns is cached per host, so later scrapes of that host
-  go out over plain HTTP (about 1 s instead of a browser render).
-
-**Field notes — used in production by Hermes.** This fork backs the **Hermes**
-agent over MCP, with Hermes' built-in `web` and `browser` tools **disabled** so
-every fetch/search routes through this fork instead of its flaky native tools.
-In that setup the upstream **SearXNG backend was returning nothing at all** —
-empty results for every query. The **Camofox-driven Google backend reliably
-finds results**, and the Camofox render tier even **loads pages sitting behind
-bot checks** that the previous stack couldn't get past.
-
----
-
-## Why crw-camofox?
-
-- **Rust-native engine** — the core is one static Rust binary (no Redis, Node.js, or Python). The Camofox (Firefox) browser runs as a separate container, pulled in only for JS rendering, stealth, and search — plain HTTP fetches never touch it.
-- **Light idle footprint** — the engine idles around ~50 MB; the Camofox browser only spins up for heavy renders. Browser-render-first stacks (Firecrawl, Crawl4AI) carry a Chromium heap baseline measured in hundreds of MB before a single request lands.
-- **Anti-detect by default** — the stealth tier is Camofox (Camoufox/Firefox with engine-level fingerprint evasion), and search runs through the same browser, so bot-walled pages and web search both work without bolting on a separate Chromium or SearXNG sidecar.
-- **Firecrawl-compatible drop-in** — both the `/v1/*` and `/v2/*` surfaces (scrape, crawl, map, search, extract; plus v2-only batch & parse) with compatible request/response shapes. The v2 API is a drop-in for the official `firecrawl-py` v4 SDK (`FirecrawlApp(api_url="http://localhost:3000")`) — swap the base URL and keep your code.
-- **Change tracking** — diff a page against a prior snapshot (markdown git-diff, per-field JSON, or both) with an optional LLM "meaningful-change" judge. A stateless `changeTracking` primitive in the engine — wire it into your own scheduler. See the [Monitoring docs](https://us.github.io/crw/monitoring).
-- **AGPL-3.0, self-host only** — run the whole stack yourself under AGPL-3.0. This fork operates no managed tier: no account, no usage metering, no API keys.
-
----
-
-## Comparison Table
-
-Qualitative positioning of this fork vs. upstream `crw` and the three
-most-cited alternatives. Descriptive shape, not a benchmark.
-
-| | **crw-camofox** | fastCRW (upstream) | Firecrawl | Crawl4AI | Spider |
-|---|---|---|---|---|---|
-| Language | Rust | Rust | Node.js + Playwright | Python + Playwright | Rust |
-| License | AGPL-3.0 | AGPL-3.0 (commercial avail.) | AGPL-3.0 (commercial avail.) | Apache-2.0 | Source-available / commercial ([spider.cloud](https://spider.cloud)) |
-| Self-host footprint | Static binary (~8 MB) + Camofox container (+ Byparr challenge solver) | Static binary (~8 MB) + browser + SearXNG sidecar | Multi-container (~500 MB+ image) | ~2 GB image (browser bundled) | Managed-first; self-host via crate |
-| Memory baseline (idle) | ~50 MB | ~50 MB | Large (Chromium heap) | Large (Chromium heap) | Light (Rust) |
-| Stealth tier | **Anti-detect by default** (Camofox/Firefox) | browserless Chromium (SSPL), opt-in | Playwright Chromium | Playwright Chromium | — |
-| Search backend | **8 engines** (Google, Bing, DuckDuckGo, Wikipedia, YouTube, Reddit, Amazon, GitHub) | SearXNG sidecar | Built-in | Built-in | Built-in |
-| Firecrawl-compat API | Yes — **v1 + v2** | Yes — **v1 + v2** | Native | No | No |
-| MCP server | `crw-mcp` **+ 47** interactive-browser tools | `crw-mcp` only | Separate package | Community add-on | No first-party |
-| Hosted option | Self-host | `api.fastcrw.com` | firecrawl.dev | None official | spider.cloud (primary product) |
-
-Pricing/spec cells where claimed link to the vendor page; everything else
-is the qualitative architectural shape, not a comparison number.
+Works with Claude Code, Cursor, Windsurf, Cline, Copilot, Continue.dev, Codex and Gemini CLI — setup per client in [`docs/docs/mcp-clients.md`](docs/docs/mcp-clients.md).
 
 ---
 
@@ -125,8 +43,28 @@ Camofox-driven search, so JS-heavy pages, challenge-walled pages and web search
 work out of the box. Set `CRW_HOST_PORT` and `CRW_BIND_ADDRESS` in `.env` to
 change the published port or bind to `127.0.0.1` only.
 
+First request:
+
+```bash
+curl -X POST http://localhost:3000/v1/scrape \
+  -H "Content-Type: application/json" \
+  -d '{"url": "https://example.com", "formats": ["markdown"], "onlyMainContent": true}'
+```
+
+```json
+{
+  "success": true,
+  "data": {
+    "markdown": "# Example Domain\n\nThis domain is for use in illustrative examples...",
+    "metadata": { "title": "Example Domain", "sourceURL": "https://example.com", "statusCode": 200 }
+  }
+}
+```
+
 The full REST surface (`/v1/*` + `/v2/*`) is listed under
-[API endpoints](#api-endpoints) below.
+[API endpoints](#api-endpoints) below. Configuration (auth, proxies, render
+ladder, search engines) lives in [`config.default.toml`](config.default.toml)
+and [`docs/docs/configuration.md`](docs/docs/configuration.md).
 
 ### MCP
 
@@ -169,18 +107,63 @@ agent when to use each tool suite live in [`skills/`](skills/):
 
 ---
 
-## Build from source
+## 🦊 This is the Camofox fork
 
-This fork is distributed as the multi-arch Docker image
-**`ghcr.io/adambenhassen/crw-camofox`** (`linux/amd64` + `linux/arm64`) used by the
-Compose stack above; upstream's `npm`/`pip`/`brew`/`cargo`/`apt` packages are
-**not** this fork (they default to Chrome + SearXNG). To build the binaries yourself:
+Camofox is the Camoufox/Firefox anti-detect browser, driven over its REST API.
+Changes vs. upstream — all **additive and config-toggled**:
 
-```bash
-git clone https://github.com/adambenhassen/crw-camofox
-cd crw-camofox
-cargo build --release -p crw-server --features cdp,camofox -p crw-mcp -p crw-cli
-```
+| Area | Upstream `crw` | This fork |
+|------|----------------|-----------|
+| Default JS render ladder | `HTTP → LightPanda → Chrome` (CDP) | `HTTP → LightPanda → Camofox` (Firefox) `→ Byparr` (Cloudflare challenges only) |
+| Stealth tier | browserless Chromium (SSPL); opt-in in-process Camoufox tier | **Camofox** ([camofox-browser](https://github.com/redf0x1/camofox-browser), REST-driven) — engine-level fingerprint evasion, the default tier, shared by render *and* search |
+| `/v1/search` backend | SearXNG sidecar | **8 engines built in** — Google, Bing, DuckDuckGo, Wikipedia, YouTube, Reddit, Amazon, GitHub (no sidecar) |
+| Interactive MCP | `crw-browse` (CDP, 2 tools) | Upstream **[`camofox-mcp`](https://github.com/redf0x1/camofox-mcp)** wired into the Docker stack — 47 tools over Camofox REST |
+
+**What sets this fork apart:**
+
+- **One browser for rendering and search.** `/v1/search` runs Google through the same
+  Camofox browser that renders pages, so `docker compose up` gives working search with
+  no SearXNG sidecar to deploy, version or keep healthy. Upstream's opt-in Camoufox tier
+  is a renderer only; its search still needs the sidecar.
+- **Many engines, one ranked list.** Search defaults to Google but can query up to four of
+  Google, Bing, DuckDuckGo, Wikipedia, YouTube, Reddit, Amazon, and GitHub in a single call
+  (run sequentially, so latency scales with engine count), deduping by URL and agreement-ranking
+  the merged results.
+- **Cloudflare challenges get cleared.** The Camofox tab waits out a "Just a moment"
+  interstitial (`renderer.camofox.challenge_wait_ms`, default 20 s). When a Turnstile
+  checkbox remains, the ladder hands the page to a bundled
+  [Byparr](https://github.com/ThePhaseless/Byparr) solver, which clicks it. The
+  `cf_clearance` cookie either tier earns is cached per host, so later scrapes of that host
+  go out over plain HTTP (about 1 s instead of a browser render).
+
+In production this fork backs the Hermes agent over MCP, with Hermes' native `web` and
+`browser` tools disabled; the Camofox search backend returns results where the SearXNG
+sidecar came back empty, and the render tier loads pages behind bot checks.
+
+---
+
+## Why crw-camofox?
+
+- **Rust-native engine** — the core is one static Rust binary (no Redis, Node.js, or Python). The Camofox (Firefox) browser runs as a separate container, pulled in only for JS rendering, stealth, and search — plain HTTP fetches never touch it.
+- **Light idle footprint** — the engine idles around ~50 MB; the Camofox browser only spins up for heavy renders. Browser-render-first stacks (Firecrawl, Crawl4AI) carry a Chromium heap baseline measured in hundreds of MB before a single request lands.
+- **Firecrawl-compatible drop-in** — both the `/v1/*` and `/v2/*` surfaces (scrape, crawl, map, search, extract; plus v2-only batch & parse) with compatible request/response shapes. The v2 API is a drop-in for the official `firecrawl-py` v4 SDK (`FirecrawlApp(api_url="http://localhost:3000")`) — swap the base URL and keep your code.
+- **Change tracking** — diff a page against a prior snapshot (markdown git-diff, per-field JSON, or both) with an optional LLM "meaningful-change" judge. A stateless `changeTracking` primitive in the engine — wire it into your own scheduler. See [`docs/docs/monitoring.md`](docs/docs/monitoring.md).
+- **AGPL-3.0, self-host only** — run the whole stack yourself under AGPL-3.0. This fork operates no managed tier: no account and no usage metering. Bearer auth is optional and yours to configure.
+
+Against upstream `crw` and the three most-cited alternatives — descriptive
+shape, not a benchmark:
+
+| | **crw-camofox** | fastCRW (upstream) | Firecrawl | Crawl4AI | Spider |
+|---|---|---|---|---|---|
+| Language | Rust | Rust | Node.js + Playwright | Python + Playwright | Rust |
+| License | AGPL-3.0 | AGPL-3.0 (commercial avail.) | AGPL-3.0 (commercial avail.) | Apache-2.0 | Source-available / commercial ([spider.cloud](https://spider.cloud)) |
+| Self-host footprint | Static binary + Camofox container (+ Byparr challenge solver) | Static binary + browser + SearXNG sidecar | Multi-container | Single large image (browser bundled) | Managed-first; self-host via crate |
+| Memory baseline (idle) | ~50 MB | ~50 MB | Large (Chromium heap) | Large (Chromium heap) | Light (Rust) |
+| Stealth tier | **Anti-detect by default** (Camofox/Firefox) | browserless Chromium (SSPL), opt-in | Playwright Chromium | Playwright Chromium | — |
+| Search backend | **8 engines** (Google, Bing, DuckDuckGo, Wikipedia, YouTube, Reddit, Amazon, GitHub) | SearXNG sidecar | Built-in | Built-in | Built-in |
+| Firecrawl-compat API | Yes — **v1 + v2** | Yes — **v1 + v2** | Native | No | No |
+| MCP server | `crw-mcp` **+ 47** interactive-browser tools | `crw-mcp` only | Separate package | Community add-on | No first-party |
+| Hosted option | Self-host | `api.fastcrw.com` | firecrawl.dev | None official | spider.cloud (primary product) |
 
 ---
 
@@ -196,7 +179,7 @@ cargo build --release -p crw-server --features cdp,camofox -p crw-mcp -p crw-cli
 | `POST` | `/v1/search` | Web search via Camofox-driven engines (Google default; 8 selectable), with optional content scraping |
 | `GET` | `/v1/search/research/papers` | Paper search over Camofox web search merged with OpenAlex and Semantic Scholar; `.../papers/:id` and `.../papers/:id/similar` |
 | `GET` | `/v1/search/research/github` | Repository search through the GitHub engine |
-| `POST` | `/v1/change-tracking/diff` | Diff a scrape against a supplied snapshot (the [monitoring](https://us.github.io/crw/monitoring) primitive) — single or batch |
+| `POST` | `/v1/change-tracking/diff` | Diff a scrape against a supplied snapshot (the [monitoring](docs/docs/monitoring.md) primitive) — single or batch |
 | `GET` | `/v1/capabilities` | Feature and limit discovery |
 | `GET` | `/health`, `/ready`, `/openapi.json` | Liveness, readiness and schema (no auth required) |
 | `GET` | `/metrics` | Prometheus metrics (behind the API-key boundary when `[auth].api_keys` is set) |
@@ -204,7 +187,7 @@ cargo build --release -p crw-server --features cdp,camofox -p crw-mcp -p crw-cli
 
 **Firecrawl v2 surface** — `scrape`, `crawl`, `map`, `search` are also served under `/v2/*` with Firecrawl v2 request/response shapes, plus v2-only `POST /v2/extract` (async structured JSON via JSON Schema; poll `GET /v2/extract/:id`), `POST /v2/batch/scrape`, `POST /v2/parse` (PDF/doc → markdown), and `GET /v2/crawl/active`. `GET /v2/crawl/:id/errors` and `GET /v2/batch/scrape/:id/errors` list each failed URL with its reason; failed pages also stay in the results as documents marked `block` and are counted in `blocked`. This makes the official `firecrawl-py` v4 SDK a drop-in: `FirecrawlApp(api_url="http://localhost:3000")`.
 
-Full reference at [docs.fastcrw.com/#rest-api](https://docs.fastcrw.com/#rest-api).
+Full reference in [`docs/docs/rest-api.md`](docs/docs/rest-api.md).
 The Firecrawl compatibility matrix (field-by-field diff) lives in
 [`COMPATIBILITY-firecrawl.md`](COMPATIBILITY-firecrawl.md).
 
@@ -220,7 +203,22 @@ The Firecrawl compatibility matrix (field-by-field diff) lives in
 - **Rate limiting** — token-bucket algorithm, returns 429 with `error_code`
 - **Resource limits** — max request body 1 MB; per-crawl depth and page count bounded (configurable; defaults: depth 2, 100 pages)
 
-[Full security docs →](https://docs.fastcrw.com/self-hosting-hardening/)
+[Full hardening guide →](docs/docs/self-hosting-hardening.md)
+
+---
+
+## Build from source
+
+This fork is distributed as the multi-arch Docker image
+**`ghcr.io/adambenhassen/crw-camofox`** (`linux/amd64` + `linux/arm64`) used by the
+Compose stack above; upstream's `npm`/`pip`/`brew`/`cargo`/`apt` packages are
+**not** this fork (they default to Chrome + SearXNG). To build the binaries yourself:
+
+```bash
+git clone https://github.com/adambenhassen/crw-camofox
+cd crw-camofox
+cargo build --release -p crw-server --features cdp,camofox -p crw-mcp -p crw-cli
+```
 
 ---
 
@@ -238,8 +236,8 @@ Contributions are welcome — issues and PRs both.
 The pre-commit hook runs the same checks as CI (`cargo fmt`, `cargo clippy`,
 `cargo test`). Run manually with `make check`.
 
-<a href="https://github.com/us/crw/graphs/contributors">
-  <img alt="contributors" src="https://contrib.rocks/image?repo=us/crw"/>
+<a href="https://github.com/adambenhassen/crw-camofox/graphs/contributors">
+  <img alt="contributors" src="https://contrib.rocks/image?repo=adambenhassen/crw-camofox"/>
 </a>
 
 ---
