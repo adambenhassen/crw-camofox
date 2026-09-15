@@ -7,6 +7,17 @@ and the project uses [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Added
+
+- **Renderer:** a Chrome-impersonated HTTP tier (`[renderer.impersonated]`,
+  on by default in the Docker image). It presents a real Chrome TLS/JA3/HTTP2
+  fingerprint with no browser and no JavaScript, runs between the plain HTTP
+  fetch and the browser ladder on wall-shaped results or fingerprint-shaped
+  transport errors, and never on pages that need JavaScript or on vendor
+  walls that do. Pin it with `renderer: "impersonated-http"`; `renderJs:
+  true` alongside the pin is rejected. Per-request `proxy` and `stealth`
+  overrides bypass the hop.
+
 ## [1.4.0] - 2026-09-15
 
 A hardening release: the Camofox tier now waits out Cloudflare challenges and

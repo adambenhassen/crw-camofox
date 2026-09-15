@@ -40,7 +40,7 @@ is additive and config-toggled:
 
 | Area | Upstream `crw` | This fork |
 |------|----------------|-----------|
-| JS render ladder | `HTTP → Chrome-impersonated HTTP → LightPanda → Chrome` (CDP) | `HTTP → LightPanda → Camofox`, then **Byparr** for Cloudflare challenges |
+| JS render ladder | `HTTP → Chrome-impersonated HTTP → LightPanda → Chrome` (CDP) | `HTTP → Chrome-impersonated HTTP → LightPanda → Camofox`, then **Byparr** for Cloudflare challenges |
 | Stealth tier | browserless Chromium (SSPL); a Camofox tier exists but is opt-in and stays out of the auto ladder | **Camofox** on the auto ladder by default, shared by render *and* search |
 | `/v1/search` | SearXNG sidecar | **8 engines built in**: Google, Bing, DuckDuckGo, Wikipedia, YouTube, Reddit, Amazon, GitHub |
 | Interactive MCP | `crw-browse` (CDP, 2 tools) | [`camofox-mcp`](https://github.com/redf0x1/camofox-mcp) in the Compose stack: **47 tools** over the same browser |
@@ -50,7 +50,9 @@ is additive and config-toggled:
 
 ```mermaid
 flowchart LR
-    A[HTTP fetch] -->|needs JS| B[LightPanda]
+    A[HTTP fetch] -->|TLS-fingerprint wall| A2[Chrome-impersonated HTTP]
+    A -->|needs JS| B[LightPanda]
+    A2 -->|still blocked or needs JS| B
     B -->|blocked or thin| C[Camofox<br/>Firefox anti-detect]
     C -->|Turnstile checkbox| D[Byparr solver]
     C -->|cleared| E[cf_clearance cached per host]
