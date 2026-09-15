@@ -61,11 +61,12 @@ vs. upstream — all **additive and config-toggled**:
   Google, Bing, DuckDuckGo, Wikipedia, YouTube, Reddit, Amazon, and GitHub in a single call
   (run sequentially, so latency scales with engine count), deduping by URL and agreement-ranking
   the merged results — where upstream is tied to one SearXNG instance.
-- **Cloudflare Turnstile challenges get solved.** When a page comes back as a managed
-  challenge that Camofox cannot clear, the ladder hands it to a bundled
-  [Byparr](https://github.com/ThePhaseless/Byparr) solver, which clicks the checkbox. The
-  `cf_clearance` cookie it earns is cached per host, so later scrapes of that host go out over
-  plain HTTP (about 1 s instead of a browser render).
+- **Cloudflare challenges get cleared.** The Camofox tab waits out a "Just a moment"
+  interstitial (`renderer.camofox.challenge_wait_ms`, default 20 s). When a Turnstile
+  checkbox remains, the ladder hands the page to a bundled
+  [Byparr](https://github.com/ThePhaseless/Byparr) solver, which clicks it. The
+  `cf_clearance` cookie either tier earns is cached per host, so later scrapes of that host
+  go out over plain HTTP (about 1 s instead of a browser render).
 
 **Field notes — used in production by Hermes.** This fork backs the **Hermes**
 agent over MCP, with Hermes' built-in `web` and `browser` tools **disabled** so
@@ -121,7 +122,8 @@ docker compose up -d        # crw + lightpanda + camofox + byparr + camofox-mcp
 This brings up the REST API on `localhost:3000` plus the real render ladder
 (HTTP → LightPanda → Camofox, then Byparr for Cloudflare challenges) and
 Camofox-driven search, so JS-heavy pages, challenge-walled pages and web search
-work out of the box.
+work out of the box. Set `CRW_HOST_PORT` and `CRW_BIND_ADDRESS` in `.env` to
+change the published port or bind to `127.0.0.1` only.
 
 The full REST surface (`/v1/*` + `/v2/*`) is listed under
 [API endpoints](#api-endpoints) below.
@@ -192,11 +194,15 @@ cargo build --release -p crw-server --features cdp,camofox -p crw-mcp -p crw-cli
 | `DELETE` | `/v1/crawl/:id` | Cancel a running crawl job |
 | `POST` | `/v1/map` | Discover all URLs on a site |
 | `POST` | `/v1/search` | Web search via Camofox-driven engines (Google default; 8 selectable), with optional content scraping |
+| `GET` | `/v1/search/research/papers` | Paper search over Camofox web search merged with OpenAlex and Semantic Scholar; `.../papers/:id` and `.../papers/:id/similar` |
+| `GET` | `/v1/search/research/github` | Repository search through the GitHub engine |
 | `POST` | `/v1/change-tracking/diff` | Diff a scrape against a supplied snapshot (the [monitoring](https://us.github.io/crw/monitoring) primitive) — single or batch |
-| `GET` | `/health` | Health check (no auth required) |
+| `GET` | `/v1/capabilities` | Feature and limit discovery |
+| `GET` | `/health`, `/ready`, `/openapi.json` | Liveness, readiness and schema (no auth required) |
+| `GET` | `/metrics` | Prometheus metrics (behind the API-key boundary when `[auth].api_keys` is set) |
 | `POST` | `/mcp` | Streamable HTTP MCP transport |
 
-**Firecrawl v2 surface** — `scrape`, `crawl`, `map`, `search` are also served under `/v2/*` with Firecrawl v2 request/response shapes, plus v2-only `POST /v2/extract` (async structured JSON via JSON Schema; poll `GET /v2/extract/:id`), `POST /v2/batch/scrape`, `POST /v2/parse` (PDF/doc → markdown), and `GET /v2/crawl/active`. This makes the official `firecrawl-py` v4 SDK a drop-in: `FirecrawlApp(api_url="http://localhost:3000")`.
+**Firecrawl v2 surface** — `scrape`, `crawl`, `map`, `search` are also served under `/v2/*` with Firecrawl v2 request/response shapes, plus v2-only `POST /v2/extract` (async structured JSON via JSON Schema; poll `GET /v2/extract/:id`), `POST /v2/batch/scrape`, `POST /v2/parse` (PDF/doc → markdown), and `GET /v2/crawl/active`. `GET /v2/crawl/:id/errors` and `GET /v2/batch/scrape/:id/errors` list each failed URL with its reason; failed pages also stay in the results as documents marked `block` and are counted in `blocked`. This makes the official `firecrawl-py` v4 SDK a drop-in: `FirecrawlApp(api_url="http://localhost:3000")`.
 
 Full reference at [docs.fastcrw.com/#rest-api](https://docs.fastcrw.com/#rest-api).
 The Firecrawl compatibility matrix (field-by-field diff) lives in
@@ -206,8 +212,10 @@ The Firecrawl compatibility matrix (field-by-field diff) lives in
 
 ## Security
 
-- **SSRF protection** — blocks loopback, private IPs, cloud metadata (`169.254.x.x`), IPv6 mapped addresses, and non-HTTP schemes (`file://`, `data:`)
-- **Auth** — optional Bearer token with constant-time comparison
+- **SSRF protection** — blocks loopback, private IPs, cloud metadata (`169.254.x.x`), IPv6 mapped addresses, and non-HTTP schemes (`file://`, `data:`). The browser tiers check every outbound request, Camofox refuses pages that end on an internal address, and a per-request LLM `baseUrl` pointing at a private address is rejected
+- **Auth** — optional Bearer token with constant-time comparison; `/metrics` and `/admin/*` sit inside the same boundary
+- **CORS** — off by default; list browser origins in `server.cors_allowed_origins`
+- **Proxies** — a malformed proxy URL fails startup (or returns 400 per request) instead of sending traffic directly
 - **robots.txt** — RFC 9309 compliant with wildcard patterns
 - **Rate limiting** — token-bucket algorithm, returns 429 with `error_code`
 - **Resource limits** — max request body 1 MB; per-crawl depth and page count bounded (configurable; defaults: depth 2, 100 pages)
