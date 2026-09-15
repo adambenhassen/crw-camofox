@@ -64,6 +64,31 @@ sidecar came back empty, and the render tier loads pages behind bot checks.
 
 ---
 
+## Why crw-camofox?
+
+- **Rust-native engine** — the core is one static Rust binary (no Redis, Node.js, or Python). The Camofox (Firefox) browser runs as a separate container, pulled in only for JS rendering, stealth, and search — plain HTTP fetches never touch it.
+- **Light idle footprint** — the engine idles around ~50 MB; the Camofox browser only spins up for heavy renders. Browser-render-first stacks (Firecrawl, Crawl4AI) carry a Chromium heap baseline measured in hundreds of MB before a single request lands.
+- **Firecrawl-compatible drop-in** — both the `/v1/*` and `/v2/*` surfaces (scrape, crawl, map, search, extract; plus v2-only batch & parse) with compatible request/response shapes. The v2 API is a drop-in for the official `firecrawl-py` v4 SDK (`FirecrawlApp(api_url="http://localhost:3000")`) — swap the base URL and keep your code.
+- **Change tracking** — diff a page against a prior snapshot (markdown git-diff, per-field JSON, or both) with an optional LLM "meaningful-change" judge. A stateless `changeTracking` primitive in the engine — wire it into your own scheduler. See [`docs/docs/monitoring.md`](docs/docs/monitoring.md).
+- **AGPL-3.0, self-host only** — run the whole stack yourself under AGPL-3.0. This fork operates no managed tier: no account and no usage metering. Bearer auth is optional and yours to configure.
+
+Against upstream `crw` and the three most-cited alternatives — descriptive
+shape, not a benchmark:
+
+| | **crw-camofox** | fastCRW (upstream) | Firecrawl | Crawl4AI | Spider |
+|---|---|---|---|---|---|
+| Language | Rust | Rust | Node.js + Playwright | Python + Playwright | Rust |
+| License | AGPL-3.0 | AGPL-3.0 (commercial avail.) | AGPL-3.0 (commercial avail.) | Apache-2.0 | Source-available / commercial ([spider.cloud](https://spider.cloud)) |
+| Self-host footprint | Static binary + Camofox container (+ Byparr challenge solver) | Static binary + browser + SearXNG sidecar | Multi-container | Single large image (browser bundled) | Managed-first; self-host via crate |
+| Memory baseline (idle) | ~50 MB | ~50 MB | Large (Chromium heap) | Large (Chromium heap) | Light (Rust) |
+| Stealth tier | **Anti-detect by default** (Camofox/Firefox) | browserless Chromium (SSPL), opt-in | Playwright Chromium | Playwright Chromium | — |
+| Search backend | **8 engines** (Google, Bing, DuckDuckGo, Wikipedia, YouTube, Reddit, Amazon, GitHub) | SearXNG sidecar | Built-in | Built-in | Built-in |
+| Firecrawl-compat API | Yes — **v1 + v2** | Yes — **v1 + v2** | Native | No | No |
+| MCP server | `crw-mcp` **+ 47** interactive-browser tools | `crw-mcp` only | Separate package | Community add-on | No first-party |
+| Hosted option | Self-host | `api.fastcrw.com` | firecrawl.dev | None official | spider.cloud (primary product) |
+
+---
+
 ## Quickstart
 
 Self-host the full stack with one command — no auth:
@@ -139,31 +164,6 @@ agent when to use each tool suite live in [`skills/`](skills/):
 
 - [**`crw-web`**](skills/crw-web/SKILL.md) — the crw tools (scrape / search / crawl / map / parse): when to use each, `crw_search` engine selection, and output limits.
 - [**`camofox-browser`**](skills/camofox-browser/SKILL.md) — the camofox-mcp interactive browser: the full tool reference and the "escalate only for real interactivity" rule. Requires the `camofox-mcp` server.
-
----
-
-## Why crw-camofox?
-
-- **Rust-native engine** — the core is one static Rust binary (no Redis, Node.js, or Python). The Camofox (Firefox) browser runs as a separate container, pulled in only for JS rendering, stealth, and search — plain HTTP fetches never touch it.
-- **Light idle footprint** — the engine idles around ~50 MB; the Camofox browser only spins up for heavy renders. Browser-render-first stacks (Firecrawl, Crawl4AI) carry a Chromium heap baseline measured in hundreds of MB before a single request lands.
-- **Firecrawl-compatible drop-in** — both the `/v1/*` and `/v2/*` surfaces (scrape, crawl, map, search, extract; plus v2-only batch & parse) with compatible request/response shapes. The v2 API is a drop-in for the official `firecrawl-py` v4 SDK (`FirecrawlApp(api_url="http://localhost:3000")`) — swap the base URL and keep your code.
-- **Change tracking** — diff a page against a prior snapshot (markdown git-diff, per-field JSON, or both) with an optional LLM "meaningful-change" judge. A stateless `changeTracking` primitive in the engine — wire it into your own scheduler. See [`docs/docs/monitoring.md`](docs/docs/monitoring.md).
-- **AGPL-3.0, self-host only** — run the whole stack yourself under AGPL-3.0. This fork operates no managed tier: no account and no usage metering. Bearer auth is optional and yours to configure.
-
-Against upstream `crw` and the three most-cited alternatives — descriptive
-shape, not a benchmark:
-
-| | **crw-camofox** | fastCRW (upstream) | Firecrawl | Crawl4AI | Spider |
-|---|---|---|---|---|---|
-| Language | Rust | Rust | Node.js + Playwright | Python + Playwright | Rust |
-| License | AGPL-3.0 | AGPL-3.0 (commercial avail.) | AGPL-3.0 (commercial avail.) | Apache-2.0 | Source-available / commercial ([spider.cloud](https://spider.cloud)) |
-| Self-host footprint | Static binary + Camofox container (+ Byparr challenge solver) | Static binary + browser + SearXNG sidecar | Multi-container | Single large image (browser bundled) | Managed-first; self-host via crate |
-| Memory baseline (idle) | ~50 MB | ~50 MB | Large (Chromium heap) | Large (Chromium heap) | Light (Rust) |
-| Stealth tier | **Anti-detect by default** (Camofox/Firefox) | browserless Chromium (SSPL), opt-in | Playwright Chromium | Playwright Chromium | — |
-| Search backend | **8 engines** (Google, Bing, DuckDuckGo, Wikipedia, YouTube, Reddit, Amazon, GitHub) | SearXNG sidecar | Built-in | Built-in | Built-in |
-| Firecrawl-compat API | Yes — **v1 + v2** | Yes — **v1 + v2** | Native | No | No |
-| MCP server | `crw-mcp` **+ 47** interactive-browser tools | `crw-mcp` only | Separate package | Community add-on | No first-party |
-| Hosted option | Self-host | `api.fastcrw.com` | firecrawl.dev | None official | spider.cloud (primary product) |
 
 ---
 
