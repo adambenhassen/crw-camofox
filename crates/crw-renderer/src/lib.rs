@@ -53,6 +53,8 @@ pub mod egress;
 pub mod health_telemetry;
 pub mod host_limiter;
 pub mod http_only;
+#[cfg(feature = "impersonated")]
+pub mod impersonated;
 pub mod preference;
 pub mod traits;
 
