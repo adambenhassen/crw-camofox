@@ -65,6 +65,6 @@ jobs:
       # The Camofox tier and the ladder wiring around it are feature-gated, and
       # the workspace default builds without them, so the step above never runs
       # `tests/camofox_tests.rs` or the camofox arms of the renderer tests. The
-      # Docker image ships with `cdp,camofox`; test what ships.
-      - name: Test (camofox tier)
-        run: cargo test -p crw-renderer -p crw-server --features crw-renderer/cdp,crw-renderer/camofox,crw-server/camofox
+      # Docker image ships with `cdp,camofox,impersonated`; test what ships.
+      - name: Test (camofox + impersonated tiers)
+        run: cargo test -p crw-renderer -p crw-server --features crw-renderer/cdp,crw-renderer/camofox,crw-renderer/impersonated,crw-server/camofox,crw-server/impersonated
