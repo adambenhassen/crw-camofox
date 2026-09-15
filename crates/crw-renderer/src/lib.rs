@@ -1353,9 +1353,10 @@ impl FallbackRenderer {
                 // JS ladder, on WALL-shaped triggers only. Tier presence is the
                 // FIRST conjunct so a config-disabled tier pays none of the
                 // vendor-wall scans. The gate relies on SPA, thin and empty
-                // shapes not also being wall-shaped; a body that is both hops
-                // and is then rejected by the accept gate, which is the
-                // backstop. It never fires on a fingerprint-vendor wall (those
+                // shapes not also being wall-shaped. A body that is both (a
+                // bot wall that is also an SPA shell) does hop, and the
+                // accept gate then rejects it; that gate is the backstop.
+                // It never fires on a fingerprint-vendor wall (those
                 // need JS no HTTP client can fake). Independent of
                 // `js_renderers`: an HTTP-only deployment gets the fix with
                 // zero browsers.
