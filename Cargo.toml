@@ -34,6 +34,11 @@ tower-http = { version = "0.6", features = ["cors", "trace", "timeout", "set-hea
 
 # HTTP client
 reqwest = { version = "0.13", default-features = false, features = ["json", "cookies", "rustls", "gzip", "brotli", "deflate", "socks", "stream", "multipart"] }
+# Chrome TLS/JA3/HTTP2 impersonation client (optional; only crw-renderer
+# references it, behind the `impersonated` feature). `socks` is required:
+# without it wreq routes a socks5 proxy URL down its HTTP-proxy path.
+wreq = { version = "0.16", features = ["gzip", "brotli", "zstd", "deflate", "charset", "socks"] }
+wreq-util = "0.2"
 
 # Serialization
 serde = { version = "1", features = ["derive"] }

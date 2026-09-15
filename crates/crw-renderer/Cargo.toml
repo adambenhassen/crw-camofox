@@ -15,6 +15,10 @@ cdp = ["tokio-tungstenite", "crw-core/cdp"]
 auto-browser = ["dep:dirs"]
 # Camofox (camofox-browser REST) renderer tier. Pure-reqwest; no extra deps.
 camofox = []
+# Chrome-impersonation HTTP tier (wreq). Default off so the lean build never
+# links the wreq/BoringSSL stack. Forwards to `crw-core/impersonated` for the
+# config-level predicate.
+impersonated = ["crw-core/impersonated", "dep:wreq", "dep:wreq-util"]
 
 [dependencies]
 crw-core = { workspace = true }
@@ -35,6 +39,9 @@ moka = { workspace = true }
 publicsuffix = { workspace = true }
 regex = { workspace = true }
 encoding_rs = "0.8"
+# Chrome TLS/JA3/HTTP2 impersonation client (impersonated feature only).
+wreq = { workspace = true, optional = true }
+wreq-util = { workspace = true, optional = true }
 
 [target.'cfg(unix)'.dependencies]
 libc = { workspace = true }

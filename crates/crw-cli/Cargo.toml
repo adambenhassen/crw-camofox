@@ -22,6 +22,9 @@ serve = ["dep:axum", "dep:tower", "dep:tower-http"]
 # Enable embedded MCP mode (self-contained, no server needed)
 mcp-embedded = ["dep:crw-server"]
 
+# Chrome-impersonation HTTP tier (wreq). Default OFF like camofox.
+impersonated = ["crw-renderer/impersonated", "crw-server?/impersonated"]
+
 [dependencies]
 # Core crates
 crw-core = { workspace = true }
