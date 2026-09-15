@@ -41,6 +41,13 @@ lightpanda_timeout_ms = 2500
 # for backward compatibility; it governs the Camofox tier's nav budget.
 chrome_timeout_ms = 30000
 
+# Chrome-impersonated HTTP tier: one bounded HTTP request between the plain
+# fetch and the browser ladder. Budgeted like the HTTP tier above so the hop
+# never widens the 8s end-to-end deadline; the ladder caps it at half the
+# remaining budget anyway.
+[renderer.impersonated]
+timeout_ms = 4000
+
 [renderer.lightpanda]
 ws_url = "ws://lightpanda:9222/"
 
