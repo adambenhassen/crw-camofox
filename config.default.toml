@@ -56,7 +56,7 @@ ws_url = "ws://127.0.0.1:9222/"
 # never starve it. ON by default; disable with enabled = false.
 # [renderer.impersonated]
 # enabled = true               # runtime kill switch (default true)
-# timeout_ms = 15000           # falls back to http_timeout_ms when unset
+# timeout_ms = 15000           # per-request budget for the tier (default 15 s)
 
 # Camofox (camofox-browser REST) — the Firefox/Camoufox anti-detect tier. Not a
 # CDP endpoint: `base_url` is the camofox-browser HTTP server. In `auto` mode it

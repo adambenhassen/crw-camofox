@@ -80,7 +80,7 @@ When `mode = "auto"` and you have multiple renderers configured (e.g., LightPand
 
 ### Pinned implies JS
 
-A non-`auto` browser `renderer` value implies `renderJs:true`. The `impersonated-http` pin never does, and `renderJs:true` alongside it is rejected with 400. If you set `renderJs:false` explicitly, the request stays HTTP-only and the pin is silently ignored — `renderJs:false` always wins. This means the availability check is also skipped when `renderJs:false` is set, so combinations like `{"mode":"none","renderJs":false,"renderer":"chrome"}` are accepted.
+A non-`auto` browser `renderer` value implies `renderJs:true`. The `impersonated-http` pin never does, and `renderJs:true` alongside it is rejected with 400. For a browser pin, an explicit `renderJs:false` keeps the request HTTP-only and the pin is silently ignored. The `impersonated-http` pin is a transport choice, so it is honoured regardless of `renderJs` (and `renderJs:true` alongside it is rejected). This means the availability check is also skipped when `renderJs:false` is set, so combinations like `{"mode":"none","renderJs":false,"renderer":"chrome"}` are accepted.
 
 ### Errors and validation
 

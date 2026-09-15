@@ -322,6 +322,54 @@ mod tests {
         }
     }
 
+    /// A same-host redirect within the safe-redirect policy is followed, and
+    /// the final URL is reported. Loopback is opted in via
+    /// `CRW_ALLOW_LOOPBACK_FOR_TESTS` since both hops target the wiremock
+    /// server; unset again immediately after the fetch so no other test in
+    /// this binary observes the relaxed policy.
+    #[tokio::test]
+    async fn wiremock_follows_safe_redirect_and_reports_final_url() {
+        let server = wiremock::MockServer::start().await;
+        wiremock::Mock::given(wiremock::matchers::method("GET"))
+            .and(wiremock::matchers::path("/start"))
+            .respond_with(
+                wiremock::ResponseTemplate::new(302)
+                    .insert_header("location", format!("{}/final", server.uri())),
+            )
+            .mount(&server)
+            .await;
+        wiremock::Mock::given(wiremock::matchers::method("GET"))
+            .and(wiremock::matchers::path("/final"))
+            .respond_with(
+                wiremock::ResponseTemplate::new(200)
+                    .insert_header("content-type", "text/html")
+                    .set_body_string(
+                        "<html><body><p>A perfectly ordinary page with more than eighty \
+                         characters of visible text, so the accept gate has something to \
+                         work with here.</p></body></html>",
+                    ),
+            )
+            .mount(&server)
+            .await;
+        let f = fetcher().unwrap();
+        unsafe { std::env::set_var("CRW_ALLOW_LOOPBACK_FOR_TESTS", "1") };
+        let r = f
+            .fetch(
+                &format!("{}/start", server.uri()),
+                &HashMap::new(),
+                None,
+                Deadline::from_request_ms(10_000),
+            )
+            .await;
+        unsafe { std::env::remove_var("CRW_ALLOW_LOOPBACK_FOR_TESTS") };
+        let r = r.unwrap();
+        assert_eq!(r.status_code, 200);
+        assert_eq!(
+            r.final_url.as_deref(),
+            Some(format!("{}/final", server.uri()).as_str())
+        );
+    }
+
     /// Challenge-header stamping: a `cf-mitigated: challenge` response
     /// carries the same `warning` marker the auto arm matches on.
     #[tokio::test]

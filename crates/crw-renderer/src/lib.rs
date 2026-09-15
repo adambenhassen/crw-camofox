@@ -1352,11 +1352,13 @@ impl FallbackRenderer {
                 // Chrome-impersonation hop between the plain HTTP tier and the
                 // JS ladder, on WALL-shaped triggers only. Tier presence is the
                 // FIRST conjunct so a config-disabled tier pays none of the
-                // vendor-wall scans. Never fires on needs_js / thin / empty
-                // shapes (impersonation cannot execute JS) and never on a
-                // fingerprint-vendor wall (those need JS no HTTP client can
-                // fake). Independent of `js_renderers`: an HTTP-only
-                // deployment gets the fix with zero browsers.
+                // vendor-wall scans. The gate relies on SPA, thin and empty
+                // shapes not also being wall-shaped; a body that is both hops
+                // and is then rejected by the accept gate, which is the
+                // backstop. It never fires on a fingerprint-vendor wall (those
+                // need JS no HTTP client can fake). Independent of
+                // `js_renderers`: an HTTP-only deployment gets the fix with
+                // zero browsers.
                 #[cfg(feature = "impersonated")]
                 if self.impersonated.is_some()
                     && (is_blocked || is_hard_block_status(result.status_code))

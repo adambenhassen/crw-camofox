@@ -905,13 +905,11 @@ impl RendererConfig {
         cfg!(feature = "impersonated") && self.impersonated.enabled
     }
 
-    /// Per-request budget (ms) for the impersonated tier. Falls back to the
-    /// HTTP tier timeout: the tier is shaped like the HTTP tier and its
-    /// failures are bounded the same way.
+    /// Per-request budget (ms) for the impersonated tier. Defaults to 15 s
+    /// (see [`ImpersonatedConfig::timeout_ms`]), independent of the HTTP
+    /// tier's timeout.
     pub fn impersonated_timeout(&self) -> u64 {
-        self.impersonated
-            .timeout_ms
-            .unwrap_or_else(|| self.http_timeout())
+        self.impersonated.timeout_ms
     }
 
     /// Compose the DataImpulse-style proxy credentials for a single request.
@@ -1102,19 +1100,23 @@ pub struct ImpersonatedConfig {
     /// compiled with the `impersonated` feature.
     #[serde(default = "default_true")]
     pub enabled: bool,
-    /// Per-request timeout override (ms). Falls back to the HTTP tier
-    /// timeout.
-    #[serde(default)]
-    pub timeout_ms: Option<u64>,
+    /// Per-request timeout in ms. Default 15 s: one bounded HTTP request,
+    /// well under the browser tiers' budgets.
+    #[serde(default = "default_impersonated_timeout_ms")]
+    pub timeout_ms: u64,
 }
 
 impl Default for ImpersonatedConfig {
     fn default() -> Self {
         Self {
             enabled: default_true(),
-            timeout_ms: None,
+            timeout_ms: default_impersonated_timeout_ms(),
         }
     }
+}
+
+fn default_impersonated_timeout_ms() -> u64 {
+    15_000
 }
 
 /// Stealth mode configuration for evading bot detection.

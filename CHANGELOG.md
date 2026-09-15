@@ -16,7 +16,9 @@ and the project uses [Semantic Versioning](https://semver.org/).
   transport errors, and never on pages that need JavaScript or on vendor
   walls that do. Pin it with `renderer: "impersonated-http"`; `renderJs:
   true` alongside the pin is rejected. Per-request `proxy` and `stealth`
-  overrides bypass the hop.
+  overrides bypass the hop. The tier is on by default in the Docker image and
+  adds its 15 s budget to the auto-extended request deadline; set `enabled =
+  false` to opt out.
 
 ## [1.4.0] - 2026-09-15
 

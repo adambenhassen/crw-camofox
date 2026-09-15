@@ -122,11 +122,11 @@ fn auth_config_api_keys_comma_with_spaces() {
 }
 
 #[test]
-fn impersonated_config_defaults_on_with_http_timeout_fallback() {
+fn impersonated_config_defaults_on_with_15s_timeout() {
     let config = RendererConfig::default();
     assert!(config.impersonated.enabled);
-    assert!(config.impersonated.timeout_ms.is_none());
-    assert_eq!(config.impersonated_timeout(), config.http_timeout());
+    assert_eq!(config.impersonated.timeout_ms, 15_000);
+    assert_eq!(config.impersonated_timeout(), 15_000);
 }
 
 #[test]
@@ -156,7 +156,7 @@ fn ladder_min_deadline_counts_the_impersonated_tier_only_when_in_chain() {
         mode: RendererMode::None,
         ..Default::default()
     };
-    on.impersonated.timeout_ms = Some(7_000);
+    on.impersonated.timeout_ms = 7_000;
     let mut off = on.clone();
     off.impersonated.enabled = false;
     let delta = on

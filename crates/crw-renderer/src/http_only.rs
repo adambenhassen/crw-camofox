@@ -999,6 +999,13 @@ impl PageFetcher for HttpFetcher {
         // Fingerprint walls are excluded: a residential IP does not clear a
         // Cloudflare managed challenge or a vendor SDK wall, so latching one only
         // burns paid bandwidth.
+        //
+        // ponytail: `antibot::classify` deliberately does not run on this tier, so
+        // a vendor wall recognisable only from visible text (a PerimeterX/Imperva
+        // page with no SDK marker) is not excluded here and can latch for the
+        // 10-minute TTL. Bounded — the latch only reorders egress, never suppresses
+        // direct. Upgrade path if it ever matters: thread the classifier verdict
+        // down instead of adding a second classify() call to this hot path.
         if !use_proxy
             && !self.has_static_proxy
             && !is_pdf
