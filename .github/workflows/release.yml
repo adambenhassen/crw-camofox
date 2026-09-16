@@ -58,10 +58,19 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: read
+    env:
+      CARGO_INCREMENTAL: 0
     steps:
       - uses: actions/checkout@v6
         with:
           ref: ${{ needs.release-context.outputs.source_ref }}
+
+      - name: Free runner disk space
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc \
+            /opt/hostedtoolcache/CodeQL /usr/local/share/boost
+          sudo docker image prune -af
+          df -h /
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
