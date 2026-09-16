@@ -7,6 +7,13 @@ and the project uses [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [1.5.0] - 2026-09-16
+
+A fingerprint release: a Chrome-impersonated HTTP tier sits between the plain
+fetch and the browser ladder, so pages that only check the TLS and HTTP/2
+handshake no longer cost a browser render. The Docker image ships the tier on
+by default.
+
 ### Added
 
 - **Renderer:** a Chrome-impersonated HTTP tier (`[renderer.impersonated]`,
@@ -19,6 +26,12 @@ and the project uses [Semantic Versioning](https://semver.org/).
   overrides bypass the hop. The tier is on by default in the Docker image and
   adds its 15 s budget to the auto-extended request deadline; set `enabled =
   false` to opt out.
+
+### Changed
+
+- **Docker:** the image builder moved from Rust 1.93 to Rust 1.98, which the
+  impersonated tier's `wreq` dependency requires. Building the image now also
+  needs cmake and clang for BoringSSL; the arm64 leg cross-compiles it.
 
 ## [1.4.0] - 2026-09-15
 
@@ -356,6 +369,7 @@ machinery is removed.
 - Structured-extraction (Anthropic) chat URL no longer doubles `/v1`.
 - Engine cap and camofox-mcp configuration corrected against a live Docker stack.
 
+[1.5.0]: https://github.com/adambenhassen/crw-camofox/compare/v1.4.0...v1.5.0
 [1.4.0]: https://github.com/adambenhassen/crw-camofox/compare/v1.3.0...v1.4.0
 [1.3.0]: https://github.com/adambenhassen/crw-camofox/compare/v1.2.0...v1.3.0
 [1.2.0]: https://github.com/adambenhassen/crw-camofox/compare/v1.1.2...v1.2.0
