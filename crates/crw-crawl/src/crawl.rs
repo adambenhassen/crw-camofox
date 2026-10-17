@@ -11,6 +11,7 @@ use uuid::Uuid;
 
 use crate::robots::RobotsTxt;
 use crate::single::derive_target_warning;
+use crate::url_filter::normalize_url;
 
 /// Default URL discovery limit when a caller doesn't specify one.
 pub const DEFAULT_MAX_DISCOVERED_URLS: usize = 5000;
@@ -94,10 +95,19 @@ fn enqueue_discovered_links(
             if link_url.origin().ascii_serialization() != origin {
                 continue;
             }
-            let normalized = normalize_url(&link);
-            if !visited.contains(&normalized) && visited.len() < max_pages {
-                visited.insert(normalized.clone());
-                queue.push_back((normalized, depth + 1));
+            // Dedup on the canonical key, but enqueue the link as the page
+            // wrote it. Enqueueing the key instead meant the crawl fetched a
+            // lowercased URL: on a case-sensitive origin `/docs/Guide` went out
+            // as `/docs/guide` and 404'd, `?id=AbC` lost its token, and the
+            // document's `source_url` reported a URL that was never requested.
+            let key = normalize_url(&link);
+            if !visited.contains(&key) && visited.len() < max_pages {
+                visited.insert(key);
+                // The fragment is never sent on the wire, so strip it here
+                // rather than asking the renderer to.
+                let mut fetch_url = link_url.clone();
+                fetch_url.set_fragment(None);
+                queue.push_back((fetch_url.into(), depth + 1));
             }
         }
     }
@@ -212,8 +222,13 @@ async fn run_crawl_inner(opts: CrawlOptions<'_>) {
     }
     let origin = base_url.origin().ascii_serialization();
 
+    // Without these a seed host that blackholes `/robots.txt` hangs this fetch
+    // forever: the job holds one of the process-wide crawl permits and stays
+    // `InProgress` indefinitely, and non-terminal jobs are never TTL-evicted.
     let mut client_builder = reqwest::Client::builder()
         .user_agent(user_agent)
+        .timeout(ROBOTS_FETCH_TIMEOUT)
+        .connect_timeout(ROBOTS_CONNECT_TIMEOUT)
         .redirect(crw_core::url_safety::safe_redirect_policy());
     // An empty/whitespace `proxy` (e.g. a present-but-empty CRW_CRAWLER__PROXY or
     // a CLI `--proxy ""`, which bypasses config normalization) means "no proxy
@@ -234,13 +249,18 @@ async fn run_crawl_inner(opts: CrawlOptions<'_>) {
         .build()
         .expect("reqwest client build should not fail");
 
-    let robots = if respect_robots {
-        RobotsTxt::fetch(&origin, &client)
-            .await
-            .unwrap_or_else(|_| RobotsTxt::parse(""))
-    } else {
-        RobotsTxt::parse("")
-    };
+    // Fails open. An unreadable robots.txt is not a licence to fail the job:
+    // the crawl proceeds with no rules, so an origin that 503s the file cannot
+    // stop a crawl outright.
+    let robots =
+        if respect_robots {
+            RobotsTxt::fetch(&origin, &client).await.unwrap_or_else(|e| {
+            tracing::warn!(error = %e, "robots.txt unavailable, crawling without its rules");
+            RobotsTxt::default()
+        })
+        } else {
+            RobotsTxt::default()
+        };
 
     let semaphore = Arc::new(Semaphore::new(max_concurrency));
     // Key the rate limiter by eTLD+1 so subdomains under the same registered
@@ -266,8 +286,13 @@ async fn run_crawl_inner(opts: CrawlOptions<'_>) {
             break;
         }
 
+        // Match on path AND query. `is_allowed(parsed.path())` drops the query,
+        // which silently allows everything a site keyed its rules on. The
+        // exact failure `is_url_allowed`'s doc comment describes, and which
+        // `discover_urls` already avoids. This is the surface that fetches at
+        // volume, so it was the one that mattered.
         if let Ok(parsed) = url::Url::parse(&url)
-            && !robots.is_allowed(parsed.path())
+            && !robots.is_url_allowed(&parsed)
         {
             tracing::debug!(url, "Blocked by robots.txt");
             continue;
@@ -614,6 +639,16 @@ pub struct DiscoverResult {
 /// is true, the BFS phase still runs but with a much smaller time budget
 /// (we have plenty already; spending the full timeout on slow HTML fetches
 /// would burn time for marginal gain).
+/// Read timeout for the one-shot `robots.txt` fetch. In `run_crawl` this is the
+/// only bound on that request: unlike `discover_urls`, `CrawlOptions` carries no
+/// overall deadline, and `deadline_ms_per_page` never reaches this call.
+const ROBOTS_FETCH_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(15);
+
+/// Connect timeout for the `robots.txt` fetch.
+const ROBOTS_CONNECT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
+const DISCOVERY_FETCH_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(15);
+const DISCOVERY_CONNECT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
+
 const SITEMAP_SUFFICIENT_THRESHOLD: usize = 50;
 /// Hard ceiling on the BFS crawl phase when sitemap was sufficient.
 const BFS_SHORT_BUDGET_SECS: u64 = 30;
@@ -780,8 +815,8 @@ pub async fn discover_urls(opts: DiscoverOptions<'_>) -> CrwResult<DiscoverResul
 
     let mut discover_client_builder = reqwest::Client::builder()
         .user_agent(user_agent)
-        .timeout(std::time::Duration::from_secs(15))
-        .connect_timeout(std::time::Duration::from_secs(5))
+        .timeout(DISCOVERY_FETCH_TIMEOUT)
+        .connect_timeout(DISCOVERY_CONNECT_TIMEOUT)
         .redirect(crw_core::url_safety::safe_redirect_policy());
     // Empty/whitespace single `proxy` = no proxy configured; never hand "" to
     // reqwest::Proxy::all (it errors with "builder error" — issue #154). Covers
@@ -810,12 +845,26 @@ pub async fn discover_urls(opts: DiscoverOptions<'_>) -> CrwResult<DiscoverResul
     // The client's own 15s timeout is longer than a short caller timeout, so it
     // is additionally clamped by the overall deadline — otherwise a slow
     // robots.txt alone could burn the whole budget and lose every result.
+    // Half the remaining budget, not all of it: a robots.txt that hangs used to
+    // be handed the whole deadline, so the seed and the sitemap probes got
+    // nothing and discovery came back with zero URLs. Half leaves the work its
+    // share. Like `run_crawl` this fails open, because an origin that cannot
+    // serve the file has not thereby forbidden anything.
     let robots = match remaining_budget(overall_deadline) {
-        Some(budget) => tokio::time::timeout(budget, RobotsTxt::fetch(&origin, &client))
-            .await
-            .unwrap_or_else(|_| Ok(RobotsTxt::parse("")))
-            .unwrap_or_else(|_| RobotsTxt::parse("")),
-        None => RobotsTxt::parse(""),
+        Some(budget) => {
+            match tokio::time::timeout(budget / 2, RobotsTxt::fetch(&origin, &client)).await {
+                Ok(Ok(robots)) => robots,
+                Ok(Err(error)) => {
+                    tracing::warn!(error = %error, "robots.txt unavailable, discovering without its rules");
+                    RobotsTxt::default()
+                }
+                Err(_) => {
+                    tracing::warn!("robots.txt fetch timed out, discovering without its rules");
+                    RobotsTxt::default()
+                }
+            }
+        }
+        None => RobotsTxt::default(),
     };
 
     if use_sitemap {
@@ -1140,12 +1189,6 @@ pub async fn discover_urls(opts: DiscoverOptions<'_>) -> CrwResult<DiscoverResul
     })
 }
 
-/// Normalize URL by removing fragment and trailing slash.
-fn normalize_url(url: &str) -> String {
-    let without_fragment = url.split('#').next().unwrap_or(url);
-    without_fragment.trim_end_matches('/').to_lowercase()
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1227,10 +1270,22 @@ mod tests {
     }
 
     #[test]
-    fn normalize_url_lowercase() {
+    fn normalize_url_folds_scheme_and_host_only() {
+        // Scheme and host are case-insensitive per RFC 3986 §6.2.2.1 and are
+        // folded; the path is not, so its case survives into the key.
         assert_eq!(
             normalize_url("HTTPS://EXAMPLE.COM/Page"),
-            "https://example.com/page"
+            "https://example.com/Page"
+        );
+    }
+
+    #[test]
+    fn normalize_url_path_case_distinguishes_two_pages() {
+        // The whole point of not folding the path: these are two documents on
+        // any case-sensitive origin and must not share a frontier slot.
+        assert_ne!(
+            normalize_url("https://example.com/Guide"),
+            normalize_url("https://example.com/guide")
         );
     }
 
@@ -1238,7 +1293,7 @@ mod tests {
     fn normalize_url_combined() {
         assert_eq!(
             normalize_url("https://Example.Com/Path/#fragment"),
-            "https://example.com/path"
+            "https://example.com/Path"
         );
     }
 
@@ -1248,6 +1303,100 @@ mod tests {
             normalize_url("https://example.com/page"),
             "https://example.com/page"
         );
+    }
+
+    #[test]
+    fn normalize_url_query_and_unicode_path_case_preserved() {
+        // Query values carry IDs, base64 and signatures; folding them broke
+        // every origin that treats them as opaque tokens.
+        assert_eq!(
+            normalize_url("https://example.com/CAFÉ?Q=Hello"),
+            "https://example.com/CAFÉ?Q=Hello"
+        );
+    }
+
+    #[test]
+    fn normalize_url_keeps_userinfo_default_port_and_dot_segments() {
+        // Routing the key through `Url::parse` would drop the credentials and
+        // the `:443`, and collapse `/a/../b`.
+        assert_eq!(
+            normalize_url("https://u:p@example.com:443/a/../b"),
+            "https://u:p@example.com:443/a/../b"
+        );
+    }
+
+    #[test]
+    fn normalize_url_trailing_slash_before_a_query_is_untouched() {
+        assert_eq!(
+            normalize_url("https://example.com/a/?q=1"),
+            "https://example.com/a/?q=1"
+        );
+    }
+
+    #[test]
+    fn normalize_url_relative_path_case_preserved() {
+        assert_eq!(normalize_url("/Just/A/Path/"), "/Just/A/Path");
+    }
+
+    #[test]
+    fn normalize_url_authority_is_folded_without_a_path_or_before_a_query() {
+        assert_eq!(normalize_url("HTTPS://EXAMPLE.COM"), "https://example.com");
+        assert_eq!(
+            normalize_url("HTTPS://EXAMPLE.COM?Q=1"),
+            "https://example.com?Q=1"
+        );
+    }
+
+    fn enqueued_urls(links: &[&str]) -> VecDeque<(String, u32)> {
+        let anchors: String = links
+            .iter()
+            .map(|l| format!(r#"<a href="{l}">x</a>"#))
+            .collect();
+        let html = format!("<html><body>{anchors}</body></html>");
+        let mut visited = HashSet::new();
+        let mut queue = VecDeque::new();
+        enqueue_discovered_links(
+            &html,
+            "https://example.com/",
+            "https://example.com",
+            100,
+            &mut visited,
+            &mut queue,
+            0,
+        );
+        queue
+    }
+
+    #[test]
+    fn enqueue_keeps_path_and_query_case_of_the_link_as_written() {
+        // The crawl used to enqueue its own dedup key, so a mixed-case path went
+        // out lowercased and 404'd on any case-sensitive origin.
+        assert_eq!(
+            enqueued_urls(&["/docs/Guide"])[0].0,
+            "https://example.com/docs/Guide"
+        );
+        assert_eq!(
+            enqueued_urls(&["/item?id=AbC123"])[0].0,
+            "https://example.com/item?id=AbC123"
+        );
+    }
+
+    #[test]
+    fn enqueue_path_case_variants_are_two_distinct_pages() {
+        assert_eq!(enqueued_urls(&["/Guide", "/guide"]).len(), 2);
+    }
+
+    #[test]
+    fn enqueue_host_case_variants_are_one_page() {
+        let queue = enqueued_urls(&["https://EXAMPLE.com/page", "https://example.com/page"]);
+        assert_eq!(queue.len(), 1);
+    }
+
+    #[test]
+    fn enqueue_trailing_slash_variant_is_deduped_but_fetched_as_written() {
+        let queue = enqueued_urls(&["/a/", "/a"]);
+        assert_eq!(queue.len(), 1);
+        assert_eq!(queue[0].0, "https://example.com/a/");
     }
 
     #[test]

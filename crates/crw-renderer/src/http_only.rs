@@ -959,11 +959,11 @@ impl PageFetcher for HttpFetcher {
         // failure needs a proxy that answers headers and then dies.
         let bytes = match tokio::time::timeout(
             deadline.remaining().max(crate::MIN_TIER_BUDGET),
-            resp.bytes(),
+            read_body_capped(resp, MAX_RESPONSE_BYTES),
         )
         .await
         {
-            Ok(r) => r.map_err(|e| CrwError::HttpError(crw_core::error::reqwest_message(e)))?,
+            Ok(r) => r?,
             Err(_) => {
                 return Err(CrwError::Timeout(deadline.requested_ms()));
             }
@@ -1182,6 +1182,41 @@ fn charset_from_content_type(ct: &str) -> Option<String> {
     (!label.is_empty()).then(|| label.to_string())
 }
 
+/// Read a response body, refusing to buffer past `max` bytes.
+///
+/// The `Content-Length` pre-check at the call site is necessary but not
+/// sufficient: the header is absent on a chunked response and on a
+/// transport-decompressed one, so the cap has to be applied to the decoded
+/// bytes as they arrive. See [`crw_core::body::read_capped`].
+pub(crate) async fn read_body_capped(resp: reqwest::Response, max: usize) -> CrwResult<Vec<u8>> {
+    let (body, truncated) = crw_core::body::read_capped(resp.bytes_stream(), max)
+        .await
+        .map_err(|e| CrwError::HttpError(crw_core::error::reqwest_message(e)))?;
+    if truncated {
+        return Err(CrwError::HttpError(format!(
+            "Response too large: exceeds {max} bytes"
+        )));
+    }
+    Ok(body)
+}
+
+#[cfg(test)]
+pub(crate) fn serve_raw(head: impl Into<String>, body: Vec<u8>) -> String {
+    let head = head.into();
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr = listener.local_addr().unwrap();
+    std::thread::spawn(move || {
+        use std::io::{Read, Write};
+
+        let (mut stream, _) = listener.accept().unwrap();
+        let mut buf = [0u8; 1024];
+        let _ = stream.read(&mut buf);
+        let _ = stream.write_all(head.as_bytes());
+        let _ = stream.write_all(&body);
+    });
+    format!("http://{addr}/")
+}
+
 /// Sniff a `<meta charset>` / `<meta http-equiv=content-type … charset=…>`
 /// declaration from the first ~2KB of an HTML document.
 fn sniff_meta_charset(bytes: &[u8]) -> Option<String> {
@@ -1269,6 +1304,91 @@ mod tests {
             "a redirect to 169.254.169.254 must be refused, got {:?}",
             res.map(|r| r.status())
         );
+    }
+
+    // ── read_body_capped ────────────────────────────────────────────────
+
+    const CHUNKED_HEAD: &str = "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n";
+
+    fn is_too_large(err: &CrwError) -> bool {
+        matches!(err, CrwError::HttpError(m) if m.contains("too large"))
+    }
+
+    /// A chunked response has no `Content-Length`, so the header pre-check is
+    /// skipped; the cap must be enforced while streaming.
+    #[tokio::test]
+    async fn read_body_capped_rejects_a_chunked_body_over_the_cap() {
+        let body = format!(
+            "400\r\n{}\r\n400\r\n{}\r\n0\r\n\r\n",
+            "a".repeat(1024),
+            "b".repeat(1024)
+        );
+        let url = serve_raw(CHUNKED_HEAD, body.into_bytes());
+        let resp = reqwest::Client::new().get(&url).send().await.unwrap();
+        assert_eq!(resp.content_length(), None);
+        let err = read_body_capped(resp, 1500).await.unwrap_err();
+        assert!(is_too_large(&err), "got {err:?}");
+    }
+
+    /// Exactly the cap is accepted; one byte over is not.
+    #[tokio::test]
+    async fn read_body_capped_boundary_is_inclusive() {
+        for (len, cap, want_ok) in [(100usize, 100usize, true), (101, 100, false)] {
+            let url = serve_raw(
+                CHUNKED_HEAD,
+                format!("{len:x}\r\n{}\r\n0\r\n\r\n", "a".repeat(len)).into_bytes(),
+            );
+            let resp = reqwest::Client::new().get(&url).send().await.unwrap();
+            let got = read_body_capped(resp, cap).await;
+            assert_eq!(got.is_ok(), want_ok, "len={len} cap={cap} got {got:?}");
+            if want_ok {
+                assert_eq!(got.unwrap().len(), len);
+            }
+        }
+    }
+
+    /// The cap is measured after decompression: 1 MiB of zeros gzips to about a
+    /// kilobyte, so a cap applied to wire bytes would wave this through.
+    #[tokio::test]
+    async fn read_body_capped_measures_decompressed_bytes() {
+        use flate2::{Compression, write::GzEncoder};
+        use std::io::Write;
+
+        let mut enc = GzEncoder::new(Vec::new(), Compression::default());
+        enc.write_all(&vec![b'a'; 1024 * 1024]).unwrap();
+        let gz = enc.finish().unwrap();
+        let head = format!(
+            "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nContent-Encoding: gzip\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+            gz.len()
+        );
+        let url = serve_raw(head, gz);
+        let resp = reqwest::Client::new().get(&url).send().await.unwrap();
+        let err = read_body_capped(resp, 128 * 1024).await.unwrap_err();
+        assert!(is_too_large(&err), "got {err:?}");
+    }
+
+    /// A chunked body under the cap is reassembled whole, across chunks.
+    #[tokio::test]
+    async fn read_body_capped_reassembles_a_chunked_body() {
+        let (a, b) = ("<html><body>chunked ", "ok</body></html>");
+        let url = serve_raw(
+            CHUNKED_HEAD,
+            format!("{:x}\r\n{a}\r\n{:x}\r\n{b}\r\n0\r\n\r\n", a.len(), b.len()).into_bytes(),
+        );
+        let resp = reqwest::Client::new().get(&url).send().await.unwrap();
+        let body = read_body_capped(resp, 1024).await.unwrap();
+        assert_eq!(String::from_utf8(body).unwrap(), format!("{a}{b}"));
+    }
+
+    /// An empty body is not an error and does not trip the cap, even at zero.
+    #[tokio::test]
+    async fn read_body_capped_accepts_an_empty_body() {
+        let url = serve_raw(
+            "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+            Vec::new(),
+        );
+        let resp = reqwest::Client::new().get(&url).send().await.unwrap();
+        assert!(read_body_capped(resp, 0).await.unwrap().is_empty());
     }
 
     // ── looks_binary ────────────────────────────────────────────────────

@@ -42,6 +42,30 @@ fn default_sitemap() -> String {
     "include".to_string()
 }
 
+fn apply_text_filters(
+    urls: &mut Vec<String>,
+    include_paths: &[String],
+    exclude_paths: &[String],
+    search: Option<&str>,
+) {
+    let includes: Vec<String> = include_paths.iter().map(|p| p.to_lowercase()).collect();
+    let excludes: Vec<String> = exclude_paths.iter().map(|p| p.to_lowercase()).collect();
+    let search = search.filter(|s| !s.is_empty()).map(str::to_lowercase);
+
+    if includes.is_empty() && excludes.is_empty() && search.is_none() {
+        return;
+    }
+
+    urls.retain(|url| {
+        let haystack = url.to_lowercase();
+        (includes.is_empty() || includes.iter().any(|p| haystack.contains(p)))
+            && !excludes.iter().any(|p| haystack.contains(p))
+            && search
+                .as_ref()
+                .is_none_or(|needle| haystack.contains(needle))
+    });
+}
+
 #[derive(Debug, Serialize)]
 pub struct V2MapResponse {
     pub success: bool,
@@ -101,16 +125,12 @@ pub async fn map(
     };
 
     let mut urls = result.urls;
-    if !req.include_paths.is_empty() {
-        urls.retain(|u| req.include_paths.iter().any(|p| u.contains(p.as_str())));
-    }
-    if !req.exclude_paths.is_empty() {
-        urls.retain(|u| !req.exclude_paths.iter().any(|p| u.contains(p.as_str())));
-    }
-    if let Some(s) = req.search.as_ref().filter(|s| !s.is_empty()) {
-        let needle = s.to_lowercase();
-        urls.retain(|u| u.to_lowercase().contains(&needle));
-    }
+    apply_text_filters(
+        &mut urls,
+        &req.include_paths,
+        &req.exclude_paths,
+        req.search.as_deref(),
+    );
     // `0` means unbounded (matches discovery); only truncate for a positive cap.
     if let Some(limit) = req.limit.filter(|l| *l > 0) {
         urls.truncate(limit);
@@ -129,4 +149,27 @@ pub async fn map(
         success: true,
         links,
     }))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::apply_text_filters;
+
+    #[test]
+    fn path_filters_are_case_insensitive_and_preserve_output_case() {
+        let mut urls = vec![
+            "https://example.com/Docs/Guide".to_string(),
+            "https://example.com/Docs/Private/Page".to_string(),
+            "https://example.com/blog".to_string(),
+        ];
+
+        apply_text_filters(
+            &mut urls,
+            &["/DOCS".to_string()],
+            &["/PRIVATE".to_string()],
+            Some("GUIDE"),
+        );
+
+        assert_eq!(urls, ["https://example.com/Docs/Guide"]);
+    }
 }

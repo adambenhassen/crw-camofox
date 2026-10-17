@@ -66,6 +66,18 @@ impl ImpersonatedFetcher {
     }
 }
 
+async fn read_body_capped(resp: wreq::Response, max: usize, url: &str) -> CrwResult<Vec<u8>> {
+    let (body, truncated) = crw_core::body::read_capped(resp.bytes_stream(), max)
+        .await
+        .map_err(|e| CrwError::HttpError(format!("{url}: {e}")))?;
+    if truncated {
+        return Err(CrwError::HttpError(format!(
+            "Response too large: exceeds {max} bytes"
+        )));
+    }
+    Ok(body)
+}
+
 /// wreq twin of `crw_core::url_safety::safe_redirect_policy`. The SSRF
 /// invariant has ONE owner: `validate_safe_url_blocking_resolved` in crw-core,
 /// which both policies call. Only the transport adapter lives here.
@@ -157,11 +169,11 @@ impl PageFetcher for ImpersonatedFetcher {
         // on headers and a slow-TTFB origin deserves its last sliver.
         let bytes = match tokio::time::timeout(
             deadline.remaining().max(crate::MIN_TIER_BUDGET),
-            resp.bytes(),
+            read_body_capped(resp, http_only::MAX_RESPONSE_BYTES, url),
         )
         .await
         {
-            Ok(r) => r.map_err(|e| CrwError::HttpError(format!("{url}: {e}")))?,
+            Ok(r) => r?,
             Err(_) => return Err(CrwError::Timeout(deadline.requested_ms())),
         };
 
@@ -389,6 +401,39 @@ mod tests {
             .unwrap();
         assert_eq!(r.status_code, 200);
         server.verify().await;
+    }
+
+    #[tokio::test]
+    async fn capped_reader_rejects_chunked_body_over_limit() {
+        let chunk = "a".repeat(1024);
+        let body = format!("400\r\n{chunk}\r\n400\r\n{chunk}\r\n0\r\n\r\n").into_bytes();
+        let url = http_only::serve_raw(
+            "HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n",
+            body,
+        );
+        let response = fetcher().unwrap().client.get(&url).send().await.unwrap();
+        let error = read_body_capped(response, 1500, &url).await.unwrap_err();
+        assert!(matches!(error, CrwError::HttpError(message) if message.contains("too large")));
+    }
+
+    #[tokio::test]
+    async fn capped_reader_measures_decoded_gzip_bytes() {
+        use flate2::{Compression, write::GzEncoder};
+        use std::io::Write;
+
+        let mut encoder = GzEncoder::new(Vec::new(), Compression::default());
+        encoder.write_all(&vec![b'a'; 1024 * 1024]).unwrap();
+        let compressed = encoder.finish().unwrap();
+        let head = format!(
+            "HTTP/1.1 200 OK\r\nContent-Encoding: gzip\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+            compressed.len()
+        );
+        let url = http_only::serve_raw(head, compressed);
+        let response = fetcher().unwrap().client.get(&url).send().await.unwrap();
+        let error = read_body_capped(response, 128 * 1024, &url)
+            .await
+            .unwrap_err();
+        assert!(matches!(error, CrwError::HttpError(message) if message.contains("too large")));
     }
 
     // ── Live network verification (#[ignore], run explicitly) ───────────

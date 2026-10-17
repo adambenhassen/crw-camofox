@@ -238,10 +238,13 @@ async fn slow_site_returns_partial_results_instead_of_timing_out() {
     );
 }
 
-/// A robots.txt that hangs must not be able to eat the whole budget and take
-/// every result down with it: the robots fetch is clamped by the overall deadline.
+/// A hanging robots.txt must not consume the whole budget, and must not stop
+/// discovery. It used to be handed the entire remaining deadline, so the seed
+/// and the sitemap probes got nothing left and the caller saw zero URLs; then
+/// it additionally failed the request outright. Now it gets half the budget and
+/// discovery carries on without its rules.
 #[tokio::test]
-async fn hanging_robots_does_not_consume_the_whole_budget() {
+async fn hanging_robots_leaves_budget_for_the_seed() {
     let server = MockServer::start().await;
 
     Mock::given(method("GET"))
@@ -256,7 +259,11 @@ async fn hanging_robots_does_not_consume_the_whole_budget() {
         .await;
     Mock::given(method("GET"))
         .and(path("/"))
-        .respond_with(ResponseTemplate::new(200).set_body_string(r#"<a href="/x">x</a>"#))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .insert_header("content-type", "text/html")
+                .set_body_string(r#"<html><body><a href="/x">x</a></body></html>"#),
+        )
         .mount(&server)
         .await;
 
@@ -265,18 +272,34 @@ async fn hanging_robots_does_not_consume_the_whole_budget() {
     let result = discover_urls(opts(
         &server.uri(),
         &r,
-        Instant::now() + Duration::from_secs(3),
+        Instant::now() + Duration::from_secs(8),
         true,
     ))
-    .await
-    .expect("a hanging robots.txt must not fail the whole call");
+    .await;
 
     assert!(
         started.elapsed() < Duration::from_secs(20),
         "robots fetch must be clamped by the overall deadline, took {:?}",
         started.elapsed()
     );
-    assert!(!result.urls.is_empty(), "the base URL is always reported");
+    let urls = result
+        .expect("a hanging robots.txt must not fail discovery")
+        .urls;
+    assert!(
+        urls.iter().any(|u| u.contains(&server.uri())),
+        "the seed must survive the robots hang, got {urls:?}"
+    );
+    let paths: Vec<String> = server
+        .received_requests()
+        .await
+        .unwrap()
+        .iter()
+        .map(|r| r.url.path().to_string())
+        .collect();
+    assert!(
+        paths.iter().any(|p| p != "/robots.txt"),
+        "work must happen after the robots timeout, only saw {paths:?}"
+    );
 }
 
 /// `max_urls` is a hard cap, not a suggestion. The base URL used to be appended
@@ -319,4 +342,79 @@ async fn seed_validation_is_bounded_by_the_overall_deadline() {
         matches!(err, crw_core::error::CrwError::Timeout(_)),
         "expected a clean Timeout from the seed budget gate, got: {err:?}"
     );
+}
+
+/// A 5xx on robots.txt is the origin failing to serve a file, not the origin
+/// forbidding anything. Discovery proceeds to the seed and the sitemap probes
+/// with no rules, rather than returning the caller an error and zero URLs.
+#[tokio::test]
+async fn a_robots_txt_we_cannot_read_does_not_stop_discovery() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/robots.txt"))
+        .respond_with(ResponseTemplate::new(503))
+        .expect(1)
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .insert_header("content-type", "text/html")
+                .set_body_string("<html><body>seed</body></html>"),
+        )
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/sitemap.xml"))
+        .respond_with(ResponseTemplate::new(404))
+        .mount(&server)
+        .await;
+
+    let renderer = renderer().await;
+    let uri = server.uri();
+    let urls = discover_urls(opts(
+        &uri,
+        &renderer,
+        Instant::now() + Duration::from_secs(10),
+        true,
+    ))
+    .await
+    .expect("a 503 on robots.txt must not fail discovery")
+    .urls;
+    assert!(urls.iter().any(|u| u == &uri), "got {urls:?}");
+}
+
+#[tokio::test]
+async fn disabled_robots_policy_keeps_sitemap_metadata_best_effort() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/robots.txt"))
+        .respond_with(ResponseTemplate::new(503))
+        .expect(1)
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .insert_header("content-type", "text/html")
+                .set_body_string("<html><body>seed</body></html>"),
+        )
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    let renderer = renderer().await;
+    let uri = server.uri();
+    let mut options = opts(
+        &uri,
+        &renderer,
+        Instant::now() + Duration::from_secs(10),
+        false,
+    );
+    options.use_sitemap = false;
+    options.max_depth = 0;
+    let result = discover_urls(options).await.unwrap();
+    assert!(result.urls.iter().any(|url| url == &uri));
 }
