@@ -17,6 +17,8 @@ and the project uses [Semantic Versioning](https://semver.org/).
 - **v2 errors:** error bodies add Firecrawl's `code` next to `error_code`. A
   timeout is 408 `SCRAPE_TIMEOUT` (was 504); an unreachable target stays 422
   with `SCRAPE_SITE_ERROR`; an unsupported content type is 500.
+- **v2 search:** `sources` and `categories` accept the object form
+  (`[{"type": "web"}]`).
 
 ## [1.6.1] - 2026-10-17
 
