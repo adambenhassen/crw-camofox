@@ -1220,6 +1220,10 @@ pub struct CrawlerConfig {
     /// config when scraping their own infrastructure.
     #[serde(default = "default_per_host_max_concurrent")]
     pub per_host_max_concurrent: u32,
+    /// Maximum number of URLs accepted by a single `/v2/batch/scrape`
+    /// request (sanity cap; plan-level caps live in the SaaS). Default 10000.
+    #[serde(default = "default_max_batch_urls")]
+    pub max_batch_urls: usize,
 }
 
 fn default_per_host_max_concurrent() -> u32 {
@@ -1240,8 +1244,13 @@ impl Default for CrawlerConfig {
             stealth: StealthConfig::default(),
             per_host_min_interval_ms: 0,
             per_host_max_concurrent: default_per_host_max_concurrent(),
+            max_batch_urls: default_max_batch_urls(),
         }
     }
+}
+
+fn default_max_batch_urls() -> usize {
+    10_000
 }
 
 fn default_concurrency() -> usize {

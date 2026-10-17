@@ -167,3 +167,87 @@ async fn v2_scrape_auth_ok_reaches_handler() {
     // Passed auth, hit the handler, which 400s on the bad URL.
     assert_ne!(r.status_code(), StatusCode::UNAUTHORIZED);
 }
+
+#[tokio::test]
+async fn v2_batch_url_cap_400() {
+    // Sanity cap: max_batch_urls rejects oversized lists BEFORE any
+    // per-URL validation work (the check is O(1) on the list length).
+    let config: AppConfig = toml::from_str("[crawler]\nmax_batch_urls = 5").unwrap();
+    let state = AppState::new(config).expect("AppState::new failed");
+    let s = TestServer::new(create_app(state));
+    let urls: Vec<String> = (0..6).map(|i| format!("https://example.com/{i}")).collect();
+    let r = s
+        .post("/v2/batch/scrape")
+        .json(&json!({ "urls": urls }))
+        .await;
+    r.assert_status(StatusCode::BAD_REQUEST);
+    let body: Value = r.json();
+    assert_eq!(body["success"], false);
+    assert!(
+        body["error"]
+            .as_str()
+            .unwrap_or("")
+            .contains("maximum of 5"),
+        "error should name the cap: {body}"
+    );
+}
+
+#[tokio::test]
+async fn v2_batch_body_limit_exceeds_the_global_json_cap() {
+    // A large URL list is bigger than the global 1 MB JSON cap. The batch route
+    // raises its own limit, so a ~1.5 MB body reaches the handler (which then
+    // rejects it on the URL cap) instead of failing with 413.
+    let config: AppConfig = toml::from_str("[crawler]\nmax_batch_urls = 3").unwrap();
+    let state = AppState::new(config).expect("AppState::new failed");
+    let s = TestServer::new(create_app(state));
+    let long = "a".repeat(300_000);
+    let urls: Vec<String> = (0..5)
+        .map(|i| format!("https://example.com/{i}/{long}"))
+        .collect();
+    let r = s
+        .post("/v2/batch/scrape")
+        .json(&json!({ "urls": urls }))
+        .await;
+    r.assert_status(StatusCode::BAD_REQUEST);
+    let body: Value = r.json();
+    assert!(
+        body["error"]
+            .as_str()
+            .unwrap_or("")
+            .contains("maximum of 3"),
+        "body should reach the handler: {body}"
+    );
+}
+
+#[tokio::test]
+async fn v2_batch_validation_keeps_input_order_past_the_concurrency_window() {
+    // 300 URLs is more than the 256 in-flight validations, so this crosses the
+    // window; `buffered` must still report the rejects in input order. Literal
+    // private IPs and unparsable strings are rejected without any DNS lookup.
+    let urls: Vec<String> = (0..300)
+        .map(|i| {
+            if i % 2 == 0 {
+                format!("http://10.0.0.{}/", i % 250)
+            } else {
+                format!("not a url {i}")
+            }
+        })
+        .collect();
+    // ignoreInvalidURLs=false makes the rejects abort the batch before a job
+    // starts; one valid literal IP (no DNS) keeps the "no valid URLs" gate quiet.
+    let mut sent = urls.clone();
+    sent.push("http://93.184.216.34/".to_string());
+    let r = test_app()
+        .post("/v2/batch/scrape")
+        .json(&json!({ "urls": sent, "ignoreInvalidURLs": false }))
+        .await;
+    r.assert_status(StatusCode::BAD_REQUEST);
+    let body: Value = r.json();
+    let error = body["error"].as_str().unwrap_or("");
+    let listed = error.split_once("invalid URLs: ").map(|(_, rest)| rest);
+    assert_eq!(
+        listed,
+        Some(urls.join(", ").as_str()),
+        "rejects must come back in input order"
+    );
+}
