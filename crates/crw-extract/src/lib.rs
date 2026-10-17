@@ -398,7 +398,7 @@ pub fn extract(opts: ExtractOptions<'_>) -> CrwResult<ScrapeData> {
         elapsed_ms,
         render_decision,
         credit_cost,
-        warnings,
+        mut warnings,
         formats,
         only_main_content,
         include_tags,
@@ -446,15 +446,51 @@ pub fn extract(opts: ExtractOptions<'_>) -> CrwResult<ScrapeData> {
 
     // Steps 2-4 (clean / selector / readability narrowing) only make sense on
     // real markup. For a non-HTML body, `raw_html` already IS the content.
+    // Set when the caller's `include_tags` matched nothing (see Step 2).
+    let mut include_tags_no_match = false;
     let (content_html, cleaned_ref, selected_html) = if treat_as_plain {
         (raw_html.to_string(), None, None)
     } else {
         // Step 2: Clean HTML (remove boilerplate, nav, ads, etc.).
-        let cleaned = clean::clean_html(raw_html, only_main_content, include_tags, exclude_tags)
-            .unwrap_or_else(|_| raw_html.to_string());
+        // `include_tags` narrowing happens inside clean_html; when it matches
+        // nothing, clean_html empties the output and pushes `selector_no_match`.
+        // Capture that (via the warning delta this call produced) so the rest of
+        // the pipeline treats it exactly like an unmatched css/xpath selector.
+        let warns_before = warnings.len();
+        let cleaned = clean::clean_html_with_warnings(
+            raw_html,
+            only_main_content,
+            include_tags,
+            exclude_tags,
+            &mut warnings,
+        )
+        .unwrap_or_else(|_| raw_html.to_string());
+        include_tags_no_match = warnings[warns_before..]
+            .iter()
+            .any(|w| w == "selector_no_match");
 
         // Step 3: Apply CSS/XPath selector if provided (narrows to a specific element).
         let selected_html = apply_selector(&cleaned, css_selector, xpath)?;
+        // A user-requested narrowing that matched nothing must NOT fall back to
+        // the whole page (a silent context-bloat footgun: an unmatched
+        // `--css`/`--xpath` or `includeTags` used to return the entire document).
+        // Treat it as an intentional narrow extraction that yielded empty output.
+        // `Some("")` also short-circuits the alternates ladder below, so the whole
+        // page can't sneak back in via basic_clean. Domain-configured default
+        // selectors are excluded: a host default that doesn't apply should still
+        // show the page (its no-match sets neither flag).
+        let selected_html = if include_tags_no_match {
+            // `cleaned` is already empty; this takes precedence over any css/xpath
+            // applied afterwards (an xpath scalar like `count(//x)` would evaluate
+            // to "0" against the empty document). clean_html already pushed the
+            // warning, so don't push it again.
+            Some(String::new())
+        } else if user_selected && selected_html.is_none() {
+            warnings.push("selector_no_match".to_string());
+            Some(String::new())
+        } else {
+            selected_html
+        };
         let after_selection = selected_html.as_deref().unwrap_or(&cleaned);
 
         // Step 4: If only_main_content, try to narrow further with readability scoring.
@@ -619,7 +655,9 @@ pub fn extract(opts: ExtractOptions<'_>) -> CrwResult<ScrapeData> {
         // Not HTML: there is no real `<title>`/`og:title` to prepend — any match
         // `extract_metadata` found is a false positive off a stray HTML-looking
         // snippet inside the plain-text body itself.
-        if user_selected || treat_as_plain {
+        // A narrowing that matched nothing is intentionally empty; padding it
+        // with the page title would re-leak content the caller narrowed away.
+        if user_selected || treat_as_plain || include_tags_no_match {
             return m;
         }
         let title = meta
@@ -678,7 +716,7 @@ pub fn extract(opts: ExtractOptions<'_>) -> CrwResult<ScrapeData> {
     // or it duplicates the page title.
     let md = md.map(|m| {
         // Not HTML: same false-positive-metadata reasoning as the title prepend.
-        if user_selected || treat_as_plain {
+        if user_selected || treat_as_plain || include_tags_no_match {
             return m;
         }
         if m.len() >= 1500 {

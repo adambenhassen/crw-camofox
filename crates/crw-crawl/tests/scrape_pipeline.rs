@@ -317,3 +317,63 @@ async fn change_tracking_does_not_call_the_llm_on_a_blocked_page() {
         calls.len()
     );
 }
+
+async fn scrape_with(
+    r: &Arc<FallbackRenderer>,
+    extra: serde_json::Value,
+) -> CrwResult<crw_core::types::ScrapeData> {
+    let mut body = serde_json::json!({ "url": "https://spa.example/listings" });
+    body.as_object_mut()
+        .unwrap()
+        .extend(extra.as_object().unwrap().clone());
+    let req: ScrapeRequest = serde_json::from_value(body).expect("request");
+    scrape_url(
+        &req,
+        r,
+        None,
+        &ExtractionConfig::default(),
+        "crw-test",
+        false,
+        None,
+        Deadline::from_request_ms(30_000),
+    )
+    .await
+}
+
+/// A selector the caller supplied that matches nothing yields an empty document
+/// carrying `selector_no_match`, not the whole page and not a wall verdict. A
+/// JS tier is available, so the empty result's escalation must not bring the
+/// page back either.
+#[tokio::test]
+async fn unmatched_selector_ships_empty_with_a_warning() {
+    for extra in [
+        serde_json::json!({ "includeTags": [".missing"] }),
+        serde_json::json!({ "cssSelector": ".missing" }),
+        serde_json::json!({ "xpath": "//section[@id='missing']" }),
+    ] {
+        let r = renderer_with_http(
+            tier("http", Ok(article(30))),
+            vec![tier("camofox", Ok(article(30)))],
+        );
+        let data = scrape_with(&r, extra.clone()).await.expect("scrape");
+        assert!(
+            data.markdown
+                .as_deref()
+                .unwrap_or_default()
+                .trim()
+                .is_empty(),
+            "{extra}: {:?}",
+            data.markdown
+        );
+        assert!(data.block.is_none(), "{extra}: {:?}", data.block);
+        assert_eq!(
+            data.warnings
+                .iter()
+                .filter(|w| *w == "selector_no_match")
+                .count(),
+            1,
+            "{extra}: {:?}",
+            data.warnings
+        );
+    }
+}

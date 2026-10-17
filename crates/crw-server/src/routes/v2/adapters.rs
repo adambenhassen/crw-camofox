@@ -127,9 +127,19 @@ pub fn to_v2_document(data: ScrapeData, proxy_used: &str, scrape_id: String) -> 
         // would otherwise reach a /v2 caller as an empty document with nothing
         // to explain it. `warning` is part of the frozen shape and is exactly
         // where Firecrawl surfaces a per-document problem.
+        //
+        // `selector_no_match` rides in the plural `warnings` (which `V2Document`
+        // has no field for); an empty document from a selector that matched
+        // nothing would otherwise carry no hint of why.
         warning: data
             .warning
-            .or_else(|| data.block.as_ref().map(|b| b.reason.clone())),
+            .or_else(|| data.block.as_ref().map(|b| b.reason.clone()))
+            .or_else(|| {
+                data.warnings
+                    .iter()
+                    .find(|w| *w == "selector_no_match")
+                    .cloned()
+            }),
         llm_usage: data.llm_usage,
         metadata,
     }
@@ -373,6 +383,27 @@ mod tests {
         });
         let doc = to_v2_document(data, "basic", "sid".to_string());
         assert_eq!(doc.metadata.credits_used, 0);
+    }
+
+    /// A selector that matched nothing leaves an empty document; the reason has
+    /// to reach `/v2` callers, whose `Document` carries only the singular
+    /// `warning`.
+    #[test]
+    fn selector_no_match_reaches_the_v2_document_warning() {
+        let mut data = fake_doc("https://x");
+        data.markdown = Some(String::new());
+        data.warnings = vec!["selector_no_match".to_string()];
+        let doc = to_v2_document(data, "basic", "sid".to_string());
+        assert_eq!(doc.warning.as_deref(), Some("selector_no_match"));
+
+        // Other plural warnings stay off the v2 document, as before.
+        let mut data = fake_doc("https://x");
+        data.warnings = vec!["redirected_to: https://y".to_string()];
+        assert!(
+            to_v2_document(data, "basic", "sid".to_string())
+                .warning
+                .is_none()
+        );
     }
 
     fn fake_doc(url: &str) -> ScrapeData {
