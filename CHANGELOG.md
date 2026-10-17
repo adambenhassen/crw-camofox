@@ -9,21 +9,11 @@ and the project uses [Semantic Versioning](https://semver.org/).
 
 ## [1.6.1] - 2026-10-17
 
-Ships 1.6.0. The 1.6.0 tag never published an image: its release check
-failed on a lint that Rust 1.99 added. No functional change from 1.6.0.
-
-### Changed
-
-- **Build:** CI, release and preflight now use Rust 1.98.1, the same version
-  as the Docker builder, instead of the newest stable. A new Rust release can
-  no longer fail a release with no code change.
-- **Dependencies:** `async-trait` 0.1.92, which passes clippy 1.99.
-
-## [1.6.0] - 2026-10-17
-
 An upstream-sync release: crawl, extraction and wall handling fixes ported
 from upstream crw, plus fixes for cancelled jobs and selectors that match
-nothing.
+nothing. This is the first published build of these changes: the 1.6.0 tag
+never published an image, because its release check failed on a lint that
+Rust 1.99 added.
 
 ### Changed
 
@@ -40,6 +30,10 @@ nothing.
 - **Extraction:** the default Anthropic model is `claude-sonnet-4-6`.
 - **Batch:** `/v2/batch/scrape` caps a request at `crawler.max_batch_urls`
   (10000), validates URLs concurrently, and accepts bodies up to 8 MB.
+- **Build:** CI, release and preflight now use Rust 1.98.1, the same version
+  as the Docker builder, instead of the newest stable. A new Rust release can
+  no longer fail a release with no code change.
+- **Dependencies:** `async-trait` 0.1.92, which passes clippy 1.99.
 
 ### Fixed
 
@@ -54,6 +48,11 @@ nothing.
   head script no longer zeroes the body-text measure; CDP connects over every
   resolved address.
 - **CLI:** debug builds no longer panic on start.
+
+## [1.6.0] - 2026-10-17
+
+Tagged but never published: the release check failed on a Rust 1.99 lint.
+Its changes ship in 1.6.1.
 
 ## [1.5.0] - 2026-09-16
 
