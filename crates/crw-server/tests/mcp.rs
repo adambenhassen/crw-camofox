@@ -62,6 +62,30 @@ async fn mcp_initialize_returns_capabilities() {
     assert!(result["serverInfo"]["version"].is_string());
 }
 
+/// `initialize` carries server `instructions` that agree with `tools/list`:
+/// `crw_search` is named only when a search backend is configured.
+#[tokio::test]
+async fn mcp_initialize_instructions_follow_the_advertised_tools() {
+    for (server, search) in [(test_app_with_search(), true), (test_app(), false)] {
+        let resp = server
+            .post("/mcp")
+            .content_type("application/json")
+            .json(&mcp_request("initialize", json!(1), json!({})))
+            .await;
+        resp.assert_status_ok();
+        let json: serde_json::Value = resp.json();
+        let instructions = json["result"]["instructions"]
+            .as_str()
+            .expect("initialize returns instructions");
+        assert_eq!(
+            instructions.contains("crw_search"),
+            search,
+            "{instructions}"
+        );
+        assert!(instructions.contains("crw_scrape"), "{instructions}");
+    }
+}
+
 #[tokio::test]
 async fn mcp_tools_list_returns_all_tools() {
     // With a search backend configured, all 6 tools are advertised.

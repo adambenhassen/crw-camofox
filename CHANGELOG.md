@@ -7,8 +7,17 @@ and the project uses [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Added
+
+- **MCP:** `initialize` returns server `instructions` that steer agents to the
+  web tools for live or source-specific information. They name only the tools
+  `tools/list` offers: `crw_search` is left out when no search backend is
+  configured. Served by both `/mcp` and the `crw-mcp` binary.
+
 ### Fixed
 
+- **MCP:** the `crw_search` `categories` description no longer points at a
+  "native SearXNG category" (the MCP search backend is Camofox).
 - **Scrape:** a selector that matches nothing (`includeTags`, `cssSelector`,
   `xpath`) returns `success: true` with an empty document and the
   `selector_no_match` warning, billed normally. It no longer fails as

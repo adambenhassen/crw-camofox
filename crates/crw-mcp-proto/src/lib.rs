@@ -12,6 +12,29 @@ use serde_json::{Value, json};
 /// the revision that defines it is the only spec-legal way to emit it.
 pub const PROTOCOL_VERSION: &str = "2025-06-18";
 
+/// Server-level usage guidance returned in the `initialize` result's optional
+/// `instructions` field (MCP InitializeResult). Clients surface this to the model
+/// as "how to use this server", so it is the sanctioned lever for steering an
+/// agent to reach for these tools on web-shaped tasks. Kept factual (states the
+/// tools' real capability and when they apply), not an "always use instead of X"
+/// directive. Sits outside `tools/list`, so it does not count against the
+/// tools/list token budget.
+pub const SERVER_INSTRUCTIONS: &str = "CRW gives you live web access. Prefer these tools whenever a task needs information from the internet rather than answering from memory: crw_search for web search and current or real-time facts, crw_scrape to read a specific URL as clean markdown, crw_map to discover a site's URLs, crw_crawl to gather many pages across a site (poll it with crw_check_crawl_status), and crw_parse_file to convert a PDF you already have into markdown. When the user asks about recent, live, or source-specific information, reach for these instead of guessing.";
+
+/// Variant used when no search backend is configured. `tools/list` strips
+/// `crw_search` in that case, so the default instructions would name a tool the
+/// client can never call; the two surfaces must agree.
+pub const SERVER_INSTRUCTIONS_NO_SEARCH: &str = "CRW gives you live web access. Prefer these tools whenever a task needs information from the internet rather than answering from memory: crw_scrape to read a specific URL as clean markdown, crw_map to discover a site's URLs, crw_crawl to gather many pages across a site (poll it with crw_check_crawl_status), and crw_parse_file to convert a PDF you already have into markdown. When the user asks about recent, live, or source-specific information, reach for these instead of guessing.";
+
+/// The `instructions` string that matches the tool set actually advertised.
+pub fn server_instructions(search_available: bool) -> &'static str {
+    if search_available {
+        SERVER_INSTRUCTIONS
+    } else {
+        SERVER_INSTRUCTIONS_NO_SEARCH
+    }
+}
+
 // --- JSON-RPC types ---
 
 #[derive(Deserialize)]
@@ -279,7 +302,7 @@ pub fn tool_definitions(proxy_mode: bool) -> Value {
                 "categories": {
                     "type": "array",
                     "items": { "type": "string" },
-                    "description": "Category bias; e.g. \"pdf\", \"github\", \"research\", or a native SearXNG category"
+                    "description": "Category bias; \"pdf\" restricts to PDFs. For GitHub, use engines"
                 },
                 "engines": {
                     "type": "array",
@@ -467,7 +490,8 @@ pub fn handle_protocol_method(
                     "serverInfo": {
                         "name": server_name,
                         "version": server_version
-                    }
+                    },
+                    "instructions": server_instructions(search_available)
                 }),
             ))
         }
@@ -818,6 +842,65 @@ mod tests {
             est_tokens,
             TOOLS_LIST_TOKEN_CEILING
         );
+    }
+
+    fn initialize_result(search_available: bool) -> Value {
+        let req = JsonRpcRequest {
+            jsonrpc: "2.0".into(),
+            id: Some(json!(1)),
+            method: "initialize".into(),
+            params: json!({}),
+        };
+        let ProtocolResult::Response(resp) =
+            handle_protocol_method("crw", "0", &req, false, search_available)
+        else {
+            panic!("expected response");
+        };
+        resp.result.unwrap()
+    }
+
+    /// initialize advertises server usage `instructions` that name only tools
+    /// `tools/list` actually offers: no `crw_search` without a search backend,
+    /// and never a tool the fork does not have.
+    #[test]
+    fn initialize_instructions_match_the_advertised_tools() {
+        let with = initialize_result(true);
+        let with = with["instructions"]
+            .as_str()
+            .expect("initialize returns an instructions string");
+        let without = initialize_result(false);
+        let without = without["instructions"]
+            .as_str()
+            .expect("instructions string");
+
+        let names = |tools: &Value| -> Vec<String> {
+            tools["tools"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|t| t["name"].as_str().unwrap().to_string())
+                .collect()
+        };
+        let all = names(&tool_definitions(false));
+        assert!(all.iter().all(|t| with.contains(t.as_str())), "{with}");
+        for t in all.iter().filter(|t| *t != "crw_search") {
+            assert!(without.contains(t.as_str()), "{t} missing: {without}");
+        }
+        assert!(!without.contains("crw_search"), "{without}");
+        assert!(!with.contains("crw_extract") && !without.contains("crw_extract"));
+    }
+
+    /// The advertised surface (descriptions + instructions) must not name a
+    /// search backend the MCP tools do not use.
+    #[test]
+    fn advertised_surface_does_not_name_searxng() {
+        let advertised = format!(
+            "{} {} {}",
+            SERVER_INSTRUCTIONS,
+            SERVER_INSTRUCTIONS_NO_SEARCH,
+            tool_definitions(false)
+        );
+        assert!(!advertised.to_lowercase().contains("searxng"));
     }
 
     #[test]
