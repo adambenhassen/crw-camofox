@@ -734,6 +734,108 @@ fn elementor_page_with_duplicated_nav_extracts_cleanly() {
     );
 }
 
+fn extract_main_content(html: &str) -> String {
+    crw_extract::extract(ExtractOptions {
+        raw_html: html,
+        content_type: None,
+        source_url: "https://example.com/page",
+        status_code: 200,
+        rendered_with: None,
+        elapsed_ms: 0,
+        render_decision: None,
+        credit_cost: 0,
+        warnings: Vec::new(),
+        formats: &[OutputFormat::Markdown],
+        only_main_content: true,
+        include_tags: &[],
+        exclude_tags: &[],
+        css_selector: None,
+        xpath: None,
+        chunk_strategy: None,
+        query: None,
+        filter_mode: None,
+        top_k: None,
+        domain_selectors: None,
+        captured_responses: &[],
+        llm_fallback: None,
+        debug: false,
+        debug_sink: None,
+    })
+    .unwrap()
+    .markdown
+    .unwrap_or_default()
+}
+
+/// The article sits in a wrapper whose class (`sidebar-layout`) the class-name
+/// rules read as furniture, so the full clean and readability both lose it and
+/// the ladder's whole-page rescue candidate has to carry the body. That
+/// candidate used to be the raw page, so the mega menu, the footer links and the
+/// consent notice rode in with the article. It now stops at structural chrome.
+#[test]
+fn rescue_candidate_does_not_reintroduce_page_chrome() {
+    let para = "The council approved the new stormwater plan after a long public \
+                hearing, and construction on the first three culverts is scheduled \
+                to begin in the spring once the permits have been issued by the \
+                regional authority and the contractor has been confirmed.";
+    let menu: String = (0..12)
+        .map(|i| format!("<li><a href=\"/section/{i}\">Mega menu entry number {i}</a></li>"))
+        .collect();
+    let html = format!(
+        "<html><head><title>Stormwater plan</title></head><body>\
+         <nav><ul>{menu}</ul></nav>\
+         <div class=\"sidebar-layout\"><h1>Stormwater plan approved</h1>\
+         <p>{para}</p><p>{para}</p><p>{para}</p></div>\
+         <footer><p>Footer links: sitemap, accessibility statement, contact the webmaster</p>\
+         <p>We use cookies to improve your experience. Accept all cookies.</p></footer>\
+         </body></html>"
+    );
+
+    let md = extract_main_content(&html);
+
+    assert!(
+        md.contains("stormwater plan after a long public"),
+        "article lost: {md}"
+    );
+    assert!(!md.contains("Mega menu entry"), "nav reintroduced: {md}");
+    assert!(
+        !md.contains("accessibility statement"),
+        "footer reintroduced: {md}"
+    );
+    assert!(
+        !md.contains("We use cookies"),
+        "consent notice reintroduced: {md}"
+    );
+}
+
+/// Page builders use `<header>` as a generic layout wrapper, so the structural
+/// rung has to be able to back out of its own pruning. Without the survival
+/// floor this page extracts to nothing: the rung removes the `<header>` that
+/// holds the entire article.
+#[test]
+fn structural_rung_backs_out_when_it_would_delete_the_page() {
+    let body = "Cog is a tool that lets you package machine learning models in a \
+                reproducible container. It reads a configuration file, builds the \
+                image, and gives the model a prediction interface over HTTP. \
+                Packaging a model this way means the same weights and the same \
+                preprocessing run identically on a laptop and on a GPU server, \
+                which is the part teams usually get wrong when they hand a model \
+                over to someone else to deploy.";
+    let html = format!(
+        "<html><head><title>Packaging models</title></head><body>\
+         <header class=\"page-wrap\"><h1>Packaging models</h1>\
+         <p>{body}</p><p>{body}</p><p>{body}</p></header>\
+         <div class=\"legal\">\u{a9} 2026</div></body></html>"
+    );
+
+    let md = extract_main_content(&html);
+    assert!(
+        md.contains("reproducible container"),
+        "the article lives inside <header>; the structural rung must back out \
+         rather than delete it. got {} chars:\n{md}",
+        md.len()
+    );
+}
+
 // Content-rich page (title + meta description + a 2-row table + a 5-item list)
 // so every re-leak vector is live: title-prepend, description-append, AND the
 // `structural` / `basic_clean` alternates (which need >=2 table rows or >=5

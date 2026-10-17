@@ -546,10 +546,55 @@ pub fn extract(opts: ExtractOptions<'_>) -> CrwResult<ScrapeData> {
                     candidates.push(("cleaned", m, q));
                 }
 
-                // Alt 2: basic clean without only_main_content (no readability narrowing).
-                let basic_cleaned = clean::clean_html(raw_html, false, include_tags, exclude_tags)
+                // Alt 2: the widest cleaned view of the page. It rescues pages
+                // where readability narrows onto the wrong container, and ones
+                // where Alt 1's class-name rules mistook a theme's naming for
+                // chrome and took the body with it.
+                //
+                // On the only_main_content path it stops at structural chrome:
+                // `nav`, site `header`/`footer`/`aside`, `menu` and `select` are
+                // gone, the class-name rules are not applied. It used to be the
+                // raw page with everything intact. Because the quality score
+                // rewards word count, that boilerplate bulk is what made this
+                // candidate win on page-builder and portal sites, shipping a
+                // mega menu, footer and cookie banner for an onlyMainContent
+                // request. Deleting the rung outright empties pages whose body
+                // only this candidate carries, so it is cleaned, not dropped.
+                let chrome_cleaned = clean::clean_html_at(
+                    raw_html,
+                    clean::CleanDepth::Chrome,
+                    include_tags,
+                    exclude_tags,
+                )
+                .unwrap_or_else(|_| raw_html.to_string());
+                let chrome_md = markdown::html_to_markdown(&chrome_cleaned);
+
+                // Structural removal has to be able to back out. Page builders
+                // use `nav`, `header` and `footer` as generic layout wrappers,
+                // so on those sites this rung deletes the page instead of
+                // trimming it. Below a seventh of the chrome-only markdown
+                // surviving, fall back to the chrome-only clean, which is what
+                // the candidate used to be (trafilatura reverts its own prune
+                // at the same ratio). Upstream swept 1/6 to 1/8: recall flat,
+                // and 1/7 removed the most boilerplate.
+                const STRUCTURAL_SURVIVAL_FLOOR: usize = 7;
+                let (basic_cleaned, basic_md) = if only_main_content {
+                    let structural = clean::clean_html_at(
+                        raw_html,
+                        clean::CleanDepth::Structural,
+                        include_tags,
+                        exclude_tags,
+                    )
                     .unwrap_or_else(|_| raw_html.to_string());
-                let basic_md = markdown::html_to_markdown(&basic_cleaned);
+                    let structural_md = markdown::html_to_markdown(&structural);
+                    if structural_md.len() * STRUCTURAL_SURVIVAL_FLOOR < chrome_md.len() {
+                        (chrome_cleaned, chrome_md)
+                    } else {
+                        (structural, structural_md)
+                    }
+                } else {
+                    (chrome_cleaned, chrome_md)
+                };
                 let basic_q = quality::analyze_md_only(&basic_md);
                 candidates.push(("basic_clean", basic_md, basic_q));
 

@@ -7,6 +7,25 @@ const KEEP_NESTED: u8 = 1;
 use scraper::{Html, Selector};
 use std::collections::HashSet;
 
+/// How much boilerplate removal to apply beyond the always-unwanted tags.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum CleanDepth {
+    /// Scripts, styles, frames and data-URI images only. What a caller asking
+    /// for the document as it is gets.
+    Chrome,
+    /// Also drop structural chrome: `nav`, site-level `header`/`footer`/`aside`,
+    /// `menu`, `select`. The class-name rules do NOT run.
+    ///
+    /// The markdown candidate ladder's whole-page rung. The class-name rules
+    /// are the part that can mistake a theme's naming for chrome and take the
+    /// body with it, so a page they over-prune needs somewhere to land that
+    /// still is not the raw document.
+    Structural,
+    /// Everything, including the class and id rules. What `onlyMainContent`
+    /// means.
+    Full,
+}
+
 /// Clean HTML by stripping scripts, styles, and optionally non-content elements.
 /// Then apply include_tags/exclude_tags via scraper.
 ///
@@ -20,11 +39,30 @@ pub fn clean_html(
 ) -> Result<String, String> {
     clean_html_impl(
         html,
-        only_main_content,
+        depth_for(only_main_content),
         include_tags,
         exclude_tags,
         &mut Vec::new(),
     )
+}
+
+fn depth_for(only_main_content: bool) -> CleanDepth {
+    if only_main_content {
+        CleanDepth::Full
+    } else {
+        CleanDepth::Chrome
+    }
+}
+
+/// Clean at an explicit depth. Used by the markdown candidate ladder to build a
+/// rung between [`CleanDepth::Full`] and the raw document.
+pub(crate) fn clean_html_at(
+    html: &str,
+    depth: CleanDepth,
+    include_tags: &[String],
+    exclude_tags: &[String],
+) -> Result<String, String> {
+    clean_html_impl(html, depth, include_tags, exclude_tags, &mut Vec::new())
 }
 
 /// Like [`clean_html`], but collects soft-failure warnings into `warnings`.
@@ -39,7 +77,7 @@ pub fn clean_html_with_warnings(
 ) -> Result<String, String> {
     clean_html_impl(
         html,
-        only_main_content,
+        depth_for(only_main_content),
         include_tags,
         exclude_tags,
         warnings,
@@ -48,7 +86,7 @@ pub fn clean_html_with_warnings(
 
 fn clean_html_impl(
     html: &str,
-    only_main_content: bool,
+    depth: CleanDepth,
     include_tags: &[String],
     exclude_tags: &[String],
     warnings: &mut Vec<String>,
@@ -96,7 +134,7 @@ fn clean_html_impl(
         }),
     ];
 
-    if only_main_content {
+    if depth != CleanDepth::Chrome {
         handlers.push(element!("nav", |el| {
             el.remove();
             Ok(())
@@ -148,7 +186,9 @@ fn clean_html_impl(
             el.remove();
             Ok(())
         }));
+    }
 
+    if depth == CleanDepth::Full {
         // Remove elements whose class or id matches common non-content patterns.
         // Covers sidebars, TOC, navigation, ads, related/recommended sections,
         // cookie banners, share widgets, and comment sections.
@@ -665,5 +705,26 @@ mod tests {
             warnings.iter().any(|w| w == "selector_no_match"),
             "expected selector_no_match warning, got {warnings:?}"
         );
+    }
+
+    #[test]
+    fn structural_depth_drops_chrome_tags_but_not_class_rules() {
+        let html = r#"<html><body><nav>Menu</nav><header>Top</header>
+            <div class="cookie-banner">Cookie notice</div>
+            <div class="sidebar-layout">Body text</div><footer>Foot</footer></body></html>"#;
+        let out = clean_html_at(html, CleanDepth::Structural, &[], &[]).unwrap();
+        for gone in ["Menu", "Top", "Foot"] {
+            assert!(!out.contains(gone), "{gone} survived: {out}");
+        }
+        assert!(out.contains("Cookie notice"), "class rules ran: {out}");
+        assert!(out.contains("Body text"), "body lost: {out}");
+
+        let chrome = clean_html_at(html, CleanDepth::Chrome, &[], &[]).unwrap();
+        assert!(
+            chrome.contains("Menu") && chrome.contains("Foot"),
+            "{chrome}"
+        );
+        let full = clean_html_at(html, CleanDepth::Full, &[], &[]).unwrap();
+        assert!(!full.contains("Cookie notice") && !full.contains("Body text"));
     }
 }

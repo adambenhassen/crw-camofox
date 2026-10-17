@@ -16,6 +16,13 @@ and the project uses [Semantic Versioning](https://semver.org/).
 
 ### Fixed
 
+- **Extract:** the markdown rescue candidate no longer reintroduces page chrome
+  under `onlyMainContent`. It used to be the raw page, so a mega menu, footer
+  and cookie notice could win on word count. It now drops `nav`, site
+  `header`/`footer`/`aside`, `menu` and `select`, and backs out when under a
+  seventh of the markdown survives (page builders use those tags as layout
+  wrappers). The quality score also scales volume down by the nav ratio (cap
+  50%) instead of ignoring it, except for candidates with 200+ body words.
 - **MCP:** the `crw_search` `categories` description no longer points at a
   "native SearXNG category" (the MCP search backend is Camofox).
 - **CLI:** `crw --help` no longer names SearXNG in prose; it says "search
