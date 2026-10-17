@@ -298,7 +298,8 @@ pub const JS_ESCALATION_FAILED: &str = "js_escalation_failed:";
 ///   - Geo gates: 451
 ///   - Origin overload: 503
 ///   - "Not found" SPAs that 404 the route but render content via JS
-///     hydration: 404, 410
+///     hydration: 404, 410 — but only when there is something to hydrate;
+///     see `soft_block_warrants_js`
 ///   - Origin error that still serves a usable page: 500
 ///
 /// Firecrawl-comparison (April 2026 bench): the JS render path recovered
@@ -310,6 +311,29 @@ fn is_soft_block_status(status_code: u16) -> bool {
         status_code,
         401 | 403 | 404 | 405 | 406 | 410 | 412 | 429 | 451 | 500 | 503
     )
+}
+
+/// Does a soft-block status justify spending the JS ladder on this body?
+///
+/// Every code in the set above can hide a real page, but 404/410 are the two
+/// that also mean exactly what they say. They earn their place in that set
+/// through the SPA case — a route that 404s and then hydrates — which by
+/// construction ships a bundle or a redirect. `warrants_browser_retry` is the
+/// existing test for precisely that: meta-refresh, external script, or a
+/// non-trivial inline block. A 404 with none of those has nothing to hydrate,
+/// so the ladder can only rediscover the status it started from.
+///
+/// Measured before this gate, against a 181-byte fixture: ~20s and two browser
+/// sessions (chrome 8.4s, lightpanda 2.5s) for both renderers to reach
+/// `structural_failure: minimal_text on small page` and hand back the 404.
+///
+/// The other escalation terms are deliberately left alone and still fire
+/// independently, so this narrows nothing else: a 404 that IS a Cloudflare or
+/// generic bot wall escalates via `is_blocked`, and `is_thin_content` /
+/// `is_empty_2xx` are gated on 2xx so they never saw a 404 to begin with.
+fn soft_block_warrants_js(status_code: u16, html: &str) -> bool {
+    is_soft_block_status(status_code)
+        && (!matches!(status_code, 404 | 410) || detector::warrants_browser_retry(html))
 }
 
 /// Hard-block status set: egress-recoverable blocks only, NOT the softer
@@ -1171,7 +1195,8 @@ impl FallbackRenderer {
                     // swap silently because the caller expressed no preference; a
                     // `renderJs:true` caller asked for a browser and must be able
                     // to tell they did not get one.
-                    let is_auth_blocked = is_soft_block_status(http_result.status_code);
+                    let is_auth_blocked =
+                        soft_block_warrants_js(http_result.status_code, &http_result.html);
                     let started_at = std::time::Instant::now();
                     let challenged = http_result.warning.as_deref() == Some("cloudflare_mitigated")
                         || detector::looks_like_cloudflare_challenge(&http_result.html)
@@ -1314,7 +1339,7 @@ impl FallbackRenderer {
                 let is_blocked = cf_header_signal
                     || detector::looks_like_cloudflare_challenge(&result.html)
                     || is_generic_bot_wall;
-                let is_auth_blocked = is_soft_block_status(result.status_code);
+                let is_auth_blocked = soft_block_warrants_js(result.status_code, &result.html);
                 // Post-fetch thin-content trigger: HTTP returned 2xx but the
                 // body has effectively no extractable text. Catches sites whose
                 // SPA marker we don't recognize (no `id="root"`, no
@@ -4898,6 +4923,45 @@ mod tests {
 
         assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 1);
         assert_eq!(result.rendered_with.as_deref(), Some("byparr"));
+    }
+
+    // -- soft_block_warrants_js ---------------------------------------------
+
+    const HYDRATABLE_404: &str =
+        r#"<html><body><div id="root"></div><script src="/_next/app.js"></script></body></html>"#;
+    const INERT_404: &str = "<html><body>status 404</body></html>";
+
+    #[test]
+    fn absent_status_escalates_only_when_the_body_can_hydrate() {
+        for code in [404, 410] {
+            assert!(
+                soft_block_warrants_js(code, HYDRATABLE_404),
+                "{code} with a script bundle is the SPA case the ladder exists for"
+            );
+            assert!(
+                !soft_block_warrants_js(code, INERT_404),
+                "{code} with nothing to hydrate must not spend the ladder"
+            );
+        }
+    }
+
+    #[test]
+    fn other_soft_blocks_escalate_regardless_of_body() {
+        // These can hide a real page behind a wall the browser clears, so the
+        // body says nothing about whether the ladder is worth it.
+        for code in [401, 403, 405, 406, 412, 429, 451, 500, 503] {
+            assert!(
+                soft_block_warrants_js(code, INERT_404),
+                "{code} must keep escalating on an inert body"
+            );
+        }
+    }
+
+    #[test]
+    fn non_soft_block_statuses_never_escalate_through_this_gate() {
+        for code in [200, 301, 400, 402, 502] {
+            assert!(!soft_block_warrants_js(code, HYDRATABLE_404));
+        }
     }
 
     #[test]
