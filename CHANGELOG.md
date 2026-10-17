@@ -7,6 +7,12 @@ and the project uses [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [1.7.0] - 2026-10-18
+
+A compatibility release: `/v2` follows Firecrawl's success and error
+semantics, a wall no renderer tier can clear is reported as data instead of
+a gateway error, and `/v1/capabilities` describes the running build.
+
 ### Changed
 
 - **v2 scrape:** an origin 4xx/5xx page is a `success: true` document with
@@ -17,8 +23,33 @@ and the project uses [Semantic Versioning](https://semver.org/).
 - **v2 errors:** error bodies add Firecrawl's `code` next to `error_code`. A
   timeout is 408 `SCRAPE_TIMEOUT` (was 504); an unreachable target stays 422
   with `SCRAPE_SITE_ERROR`; an unsupported content type is 500.
+- **Walls:** a wall no renderer tier could clear returns HTTP 200 with
+  `success: false` and `anti_bot`, unbilled, instead of a 502. Crawl records
+  it as a failed page and follows no links from it; map reads no links or
+  sitemap entries from it; the monitor treats it as an error page.
+- **Capabilities:** `/v1/capabilities` is derived from the build and config:
+  search and its LLM features only when available, the renderer tiers
+  actually built, and new `limits` (batch, search, upload).
+- **Logging:** one log line per request with method, route template, status,
+  error code and latency, replacing the per-request trace spans. Proxy errors
+  log their cause chain with credentials redacted.
+
+### Added
+
+- **Extraction:** `[extraction.llm] timeout_ms` (default 60000) bounds each
+  JSON-extraction and change-judge LLM request.
 - **v2 search:** `sources` and `categories` accept the object form
-  (`[{"type": "web"}]`).
+  (`[{"type": "web"}]`), and the response carries `llmUsage`.
+
+### Fixed
+
+- **Documents:** `/v2/parse` enforces `[document].max_upload_bytes` instead
+  of a fixed 50 MiB.
+- **Crawl and map:** links to images, media, archives and fonts are no longer
+  fetched; a stalled page no longer turns a map with links into a 504.
+- **Renderer:** oversize bodies and a 4xx on a `.pdf` URL no longer climb the
+  browser ladder.
+- **Extraction:** LLM usage adds up across every leg on scrape, crawl and PDF.
 
 ## [1.6.1] - 2026-10-17
 
@@ -429,6 +460,7 @@ machinery is removed.
 - Structured-extraction (Anthropic) chat URL no longer doubles `/v1`.
 - Engine cap and camofox-mcp configuration corrected against a live Docker stack.
 
+[1.7.0]: https://github.com/adambenhassen/crw-camofox/compare/v1.6.1...v1.7.0
 [1.6.1]: https://github.com/adambenhassen/crw-camofox/compare/v1.6.0...v1.6.1
 [1.6.0]: https://github.com/adambenhassen/crw-camofox/compare/v1.5.0...v1.6.0
 [1.5.0]: https://github.com/adambenhassen/crw-camofox/compare/v1.4.0...v1.5.0
