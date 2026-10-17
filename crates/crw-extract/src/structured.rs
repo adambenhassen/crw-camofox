@@ -349,6 +349,18 @@ struct OpenAiRequest {
     messages: Vec<Message>,
     #[serde(skip_serializing_if = "Option::is_none")]
     tools: Option<Vec<OpenAiToolDef>>,
+    /// Reasoning budget, forwarded when configured.
+    ///
+    /// This builder is separate from the one in `llm.rs`, which has always sent
+    /// this field, and the omission here is not cosmetic: on a reasoning model
+    /// the default budget is spent on every call. Measured on `deepseek-flash`
+    /// over four pages, this path spends 8086 completion tokens with reasoning
+    /// left at its default and 201 with it set to "none". Structured extraction
+    /// is the highest-volume LLM path (`formats:["json"]`, `/v2/parse`) and the
+    /// change-tracking judge shares this builder, so the difference lands on
+    /// nearly every managed call.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    reasoning_effort: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -498,6 +510,14 @@ pub(crate) async fn call_openai(
                 parameters: schema.clone(),
             },
         }]),
+        // Same guard as `llm.rs`: a configured-but-empty value serializes as
+        // `""` and providers that validate the field answer 400, so an empty
+        // string counts as unset.
+        reasoning_effort: llm
+            .reasoning_effort
+            .as_deref()
+            .filter(|v| !v.is_empty())
+            .map(str::to_string),
     };
 
     let client = shared_client();

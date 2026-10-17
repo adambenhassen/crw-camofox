@@ -272,3 +272,80 @@ async fn anthropic_chat_forwards_configured_effort_on_current_models() {
         serde_json::from_slice(&server.received_requests().await.unwrap()[0].body).unwrap();
     assert_eq!(body["output_config"], json!({ "effort": "high" }));
 }
+
+// ── Structured-extraction path ───────────────────────────────────────────────
+//
+// `structured.rs` builds its own request, separate from the `chat()` builder
+// above. It is the highest-volume LLM path (`formats:["json"]`, `/v2/parse`) and
+// the change-tracking judge shares it, so a missing field here means nearly every
+// call pays a reasoning budget nobody asked for.
+
+fn tool_call_response() -> serde_json::Value {
+    json!({
+        "choices": [{
+            "message": {
+                "tool_calls": [{
+                    "type": "function",
+                    "function": { "name": "emit", "arguments": "{\"title\":\"x\"}" }
+                }]
+            }
+        }],
+        "usage": { "prompt_tokens": 10, "completion_tokens": 5, "total_tokens": 15 }
+    })
+}
+
+/// Run one structured extraction against `llm` and return the request body the
+/// server received.
+async fn structured_request_body(server: &MockServer, llm: &LlmConfig) -> serde_json::Value {
+    let schema = json!({
+        "type": "object",
+        "properties": { "title": { "type": "string" } }
+    });
+    crw_extract::structured::extract_structured_with_usage(
+        "# A page\n\nSome content.",
+        &schema,
+        llm,
+        None,
+    )
+    .await
+    .expect("structured extraction succeeds");
+    let requests = server.received_requests().await.unwrap();
+    serde_json::from_slice(&requests[0].body).unwrap()
+}
+
+#[tokio::test]
+async fn structured_forwards_reasoning_effort_when_set() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(tool_call_response()))
+        .mount(&server)
+        .await;
+
+    let mut llm = mock_llm(format!("{}/v1", server.uri()));
+    llm.reasoning_effort = Some("none".into());
+    let body = structured_request_body(&server, &llm).await;
+    assert_eq!(
+        body.get("reasoning_effort").and_then(|v| v.as_str()),
+        Some("none"),
+        "structured extraction must forward the configured reasoning budget"
+    );
+}
+
+#[tokio::test]
+async fn structured_omits_reasoning_effort_when_unset_or_empty() {
+    for configured in [None, Some(String::new())] {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(tool_call_response()))
+            .mount(&server)
+            .await;
+
+        let mut llm = mock_llm(format!("{}/v1", server.uri()));
+        llm.reasoning_effort = configured.clone();
+        let body = structured_request_body(&server, &llm).await;
+        assert!(
+            body.get("reasoning_effort").is_none(),
+            "an unset or empty budget must not be sent (providers 400 on \"\"), configured={configured:?}"
+        );
+    }
+}

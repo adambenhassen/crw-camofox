@@ -522,6 +522,8 @@ impl LlmUsage {
     /// Tokens add up. `calls` counts the legs. The model/provider labels are kept
     /// from the first leg, which is the managed model on every path today.
     pub fn merge(&mut self, other: LlmUsage) {
+        let self_input_before = self.input_tokens;
+        let self_cache_hit_before = self.cache_hit_input_tokens.unwrap_or(0);
         self.input_tokens = self.input_tokens.saturating_add(other.input_tokens);
         self.output_tokens = self.output_tokens.saturating_add(other.output_tokens);
         self.total_tokens = self.total_tokens.saturating_add(other.total_tokens);
@@ -531,10 +533,30 @@ impl LlmUsage {
             .saturating_add(other.executed_summaries);
         self.answer_executed |= other.answer_executed;
         self.truncated |= other.truncated;
+        // Cache counts are merged BEFORE `input_tokens` is consulted below, so
+        // capture each side's own input first.
+        let (self_input, other_input) = (self_input_before, other.input_tokens);
         self.cache_hit_input_tokens =
             sum_opt(self.cache_hit_input_tokens, other.cache_hit_input_tokens);
+        // A leg that reports no cache counts still consumed its input, and that
+        // input is a cache MISS by definition: nothing was served from cache.
+        // Carrying the other leg's `Some(x)` forward unchanged would price this
+        // leg's tokens at zero downstream, because the biller prefers an
+        // explicit miss count over deriving `input - hit`. Dormant while the
+        // provider reports no cache fields at all; live as soon as one leg does.
         self.cache_miss_input_tokens =
-            sum_opt(self.cache_miss_input_tokens, other.cache_miss_input_tokens);
+            match (self.cache_miss_input_tokens, other.cache_miss_input_tokens) {
+                (Some(a), Some(b)) => Some(a.saturating_add(b)),
+                (Some(a), None) => Some(a.saturating_add(
+                    other_input.saturating_sub(other.cache_hit_input_tokens.unwrap_or(0)),
+                )),
+                (None, Some(b)) => Some(
+                    self_input
+                        .saturating_sub(self_cache_hit_before)
+                        .saturating_add(b),
+                ),
+                (None, None) => None,
+            };
         self.estimated_cost_usd = match (self.estimated_cost_usd, other.estimated_cost_usd) {
             (Some(a), Some(b)) => Some(a + b),
             (Some(a), None) => Some(a),
@@ -1501,6 +1523,65 @@ mod tests {
         let merged = slot.expect("usage");
         assert_eq!(merged.input_tokens, 10);
         assert_eq!(merged.calls, 1);
+    }
+
+    // The biller prefers an explicit cache-miss count over deriving
+    // `input - hit`, so a leg that reports no cache fields must not be folded
+    // in as if it consumed nothing: none of its input came from cache.
+    fn leg_with_cache(input: u32, output: u32, hit: Option<u32>, miss: Option<u32>) -> LlmUsage {
+        LlmUsage {
+            cache_hit_input_tokens: hit,
+            cache_miss_input_tokens: miss,
+            ..usage(input, output)
+        }
+    }
+
+    #[test]
+    fn a_leg_without_cache_counts_still_contributes_its_input_as_a_miss() {
+        let mut slot = None;
+        LlmUsage::accumulate(
+            &mut slot,
+            Some(leg_with_cache(4500, 50, Some(500), Some(4000))),
+        );
+        LlmUsage::accumulate(&mut slot, Some(leg_with_cache(6000, 80, None, None)));
+
+        let got = slot.unwrap();
+        assert_eq!(got.input_tokens, 10500);
+        assert_eq!(got.cache_hit_input_tokens, Some(500));
+        assert_eq!(got.cache_miss_input_tokens, Some(10000));
+        assert_eq!(
+            got.cache_hit_input_tokens.unwrap() + got.cache_miss_input_tokens.unwrap(),
+            got.input_tokens
+        );
+    }
+
+    #[test]
+    fn the_reporting_leg_can_arrive_second_too() {
+        let mut slot = None;
+        LlmUsage::accumulate(&mut slot, Some(leg_with_cache(6000, 80, None, None)));
+        LlmUsage::accumulate(
+            &mut slot,
+            Some(leg_with_cache(4500, 50, Some(500), Some(4000))),
+        );
+
+        let got = slot.unwrap();
+        assert_eq!(got.cache_miss_input_tokens, Some(10000));
+        assert_eq!(
+            got.cache_hit_input_tokens.unwrap() + got.cache_miss_input_tokens.unwrap(),
+            got.input_tokens
+        );
+    }
+
+    #[test]
+    fn all_legs_silent_on_cache_stays_none_so_the_biller_derives() {
+        let mut slot = None;
+        LlmUsage::accumulate(&mut slot, Some(leg_with_cache(4000, 40, None, None)));
+        LlmUsage::accumulate(&mut slot, Some(leg_with_cache(3000, 30, None, None)));
+
+        let got = slot.unwrap();
+        assert_eq!(got.input_tokens, 7000);
+        assert_eq!(got.cache_hit_input_tokens, None);
+        assert_eq!(got.cache_miss_input_tokens, None);
     }
 
     #[test]
