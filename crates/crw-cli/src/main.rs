@@ -28,6 +28,11 @@ use teardown::{CmdError, finish, install_signal_teardown};
 #[command(
     name = "crw",
     version,
+    // Default-scrape-mode args (url, format, --reset, …) are mutually exclusive
+    // with using a subcommand. Expressed at the container level because a
+    // `#[command(subcommand)]` field is NOT a conflictable arg id — pointing
+    // `conflicts_with = "command"` at it tripped clap's debug-build assertion.
+    args_conflicts_with_subcommands = true,
     about = "Web scraper for AI agents",
     long_about = "Unified CLI for web scraping, crawling, search, and serving.\n\n\
         The fastest web scraper built for AI agents and LLM data pipelines.\n\n\
@@ -56,7 +61,7 @@ struct Cli {
 
     // --- Default scrape mode (backwards compat) ---
     /// URL to scrape (when no subcommand is given)
-    #[arg(value_name = "URL", conflicts_with = "command")]
+    #[arg(value_name = "URL")]
     url: Option<String>,
 
     /// Output format (for default scrape mode)
@@ -120,7 +125,7 @@ struct Cli {
     llm_base_url: Option<String>,
 
     /// Shortcut for `crw setup --reset` — wipe config.toml, sentinel, and shell blocks.
-    #[arg(long, conflicts_with_all = ["command", "url"])]
+    #[arg(long, conflicts_with = "url")]
     reset: bool,
 
     /// Skip confirmation prompt for `--reset`.
@@ -241,4 +246,15 @@ async fn main() {
     };
 
     finish(result);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::Cli;
+    use clap::CommandFactory;
+
+    #[test]
+    fn cli_definition_passes_clap_debug_asserts() {
+        Cli::command().debug_assert();
+    }
 }
