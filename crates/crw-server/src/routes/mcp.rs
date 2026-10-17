@@ -16,6 +16,20 @@ use uuid::Uuid;
 
 use crate::state::{AppState, validate_crawl_renderer};
 
+/// The tool error for a scrape the HTTP route answers with `anti_bot`.
+///
+/// Same exemption as the CLI: `structural_failure` and `parked_domain` are
+/// verdicts about a page we did fetch, not walls, and they keep their body,
+/// exactly as an MCP caller always got it. That exemption also keeps a small 404
+/// readable: `http_error()` only claims a missing or `structural_failure`
+/// verdict, so it never outranks a wall and needs no check of its own here.
+fn wall_error(data: &crw_core::types::ScrapeData) -> Option<String> {
+    data.block
+        .as_ref()
+        .filter(|b| b.is_wall())
+        .map(crw_core::types::BlockOutcome::message)
+}
+
 const SERVER_NAME: &str = "crw";
 const SERVER_VERSION: &str = env!("CARGO_PKG_VERSION");
 
@@ -52,6 +66,15 @@ pub async fn call_tool(state: &AppState, tool_name: &str, args: Value) -> Result
             )
             .await
             .map_err(|e| format!("{e}"))?;
+            // Mirror the HTTP route's block contract. `routes/scrape.rs` turns a
+            // wall into `success: false` + `anti_bot` with the body cleared, and
+            // `crw-mcp`'s PROXY backend turns that envelope into a tool error.
+            // This arm serializes `ScrapeData` straight to JSON, so it carries
+            // no `success` field for that guard to read, and the agent would be
+            // handed the wall as `isError: false` with its text in `markdown`.
+            if let Some(reason) = wall_error(&data) {
+                return Err(reason);
+            }
             serde_json::to_value(&data).map_err(|e| format!("serialize error: {e}"))
         }
         "crw_crawl" => {
@@ -278,5 +301,51 @@ pub async fn mcp_handler(
             [("content-type", "application/json")],
             String::new(),
         ),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crw_core::types::{BlockOutcome, ScrapeData};
+
+    fn blocked(vendor: &str) -> ScrapeData {
+        ScrapeData {
+            markdown: Some("page text".into()),
+            block: Some(BlockOutcome {
+                vendor: vendor.into(),
+                reason: "reason".into(),
+            }),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn a_wall_is_a_tool_error() {
+        for vendor in ["generic_block", "cloudflare"] {
+            let err = wall_error(&blocked(vendor)).expect(vendor);
+            assert!(err.contains("anti-bot"), "{vendor}: {err}");
+        }
+    }
+
+    /// Same exemption as the CLI: these are pages we did fetch, and an MCP
+    /// caller has always received them as data.
+    #[test]
+    fn structural_and_parked_verdicts_stay_data() {
+        for vendor in ["structural_failure", "parked_domain"] {
+            assert_eq!(wall_error(&blocked(vendor)), None, "{vendor}");
+        }
+        assert_eq!(wall_error(&ScrapeData::default()), None);
+    }
+
+    /// A small 404 is `http_error` on the route, body kept, so the tool returns
+    /// it as data too.
+    #[test]
+    fn a_small_error_page_is_returned_as_data() {
+        let mut data = blocked("structural_failure");
+        data.markdown = Some("Not found".into());
+        data.metadata.status_code = 404;
+        assert!(data.http_error().is_some(), "precondition");
+        assert_eq!(wall_error(&data), None);
     }
 }

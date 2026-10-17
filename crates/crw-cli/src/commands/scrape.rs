@@ -456,6 +456,20 @@ pub async fn run(mut args: ScrapeArgs) -> Result<(), CmdError> {
     // through the whole fetch + parse pipeline.
     drop(keep_alive_guards);
 
+    // A walled page is not output. The CLI decided success on the transport
+    // alone, so a wall printed its interstitial (or an empty body) and exited 0,
+    // and `--output` wrote it over whatever was there. The message is the one
+    // `/v1/scrape` puts in its `error` field.
+    //
+    // Placed before every format branch below for exactly that reason, and scoped
+    // to walls: `structural_failure` and `parked_domain` were already reaching
+    // the CLI and printed normally. Failing on them would silently turn a working
+    // `crw <parked-domain> > out.md` into an empty file and exit 1.
+    if let Some(reason) = wall_message(&data) {
+        eprintln!("error: {reason}");
+        return Err(CmdError::code_only(1));
+    }
+
     // AI output paths short-circuit `--format`. The backend populates
     // `data.summary` / `data.json` when those OutputFormats are requested.
     if want_summary {
@@ -811,5 +825,40 @@ fn build_request(
         goal: None,
         judge_enabled: None,
         parsers: None,
+    }
+}
+
+/// The error for a scrape that ended on a wall, `None` for anything printable.
+fn wall_message(data: &crw_core::types::ScrapeData) -> Option<String> {
+    data.block
+        .as_ref()
+        .filter(|b| b.is_wall())
+        .map(crw_core::types::BlockOutcome::message)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crw_core::types::{BlockOutcome, ScrapeData};
+
+    fn blocked(vendor: &str) -> ScrapeData {
+        ScrapeData {
+            markdown: Some("page text".into()),
+            block: Some(BlockOutcome {
+                vendor: vendor.into(),
+                reason: "reason".into(),
+            }),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn a_wall_fails_the_command_but_fetched_pages_print() {
+        let msg = wall_message(&blocked("generic_block")).expect("a wall fails");
+        assert!(msg.contains("anti-bot"), "{msg}");
+        for vendor in ["structural_failure", "parked_domain"] {
+            assert_eq!(wall_message(&blocked(vendor)), None, "{vendor}");
+        }
+        assert_eq!(wall_message(&ScrapeData::default()), None);
     }
 }

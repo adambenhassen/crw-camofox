@@ -214,7 +214,14 @@ async fn proxy_call_tool(
                         crw_core::error::reqwest_message(e)
                     )
                 })?;
-            parse_response(resp).await
+            let parsed = parse_response(resp).await?;
+            // Only a scrape's failure envelope means "there is nothing to
+            // return". The other tools' 200 bodies (a failed crawl's status,
+            // with its per-URL results) are data.
+            match failed_envelope(&parsed) {
+                Some(reason) => Err(reason),
+                None => Ok(parsed),
+            }
         }
         "crw_crawl" => {
             let resp = client
@@ -354,6 +361,36 @@ async fn parse_response(resp: reqwest::Response) -> Result<Value, String> {
     }
 
     serde_json::from_str(&body).map_err(|e| format!("invalid JSON response: {e}"))
+}
+
+/// The tool error for a `/v1/scrape` failure envelope that arrived at HTTP 200.
+/// Applied to the scrape tool only.
+///
+/// An anti-bot wall arrives this way, and deciding on the transport alone would
+/// hand the agent `isError: false` with a body-less document, which a model
+/// reports as "the page was empty" and then acts on. Surfacing it as an error
+/// puts the real reason in the model's context.
+///
+/// Keyed on the code, and only `anti_bot`, the one branch of `/v1/scrape` that
+/// clears a wall's body. `http_error` keeps the origin's error page readable on
+/// purpose, and `no_usable_content` (`structural_failure`, `parked_domain`, an
+/// empty extraction) is a page we did fetch: the CLI exempts both, and an MCP
+/// caller always got them as data. A scrape failure with no code at all is not a
+/// shape `/v1/scrape` produces, so it fails closed.
+fn failed_envelope(parsed: &Value) -> Option<String> {
+    let failed = parsed.get("success").and_then(Value::as_bool) == Some(false);
+    let code = parsed.get("errorCode").and_then(Value::as_str);
+    if !failed || code.is_some_and(|c| c != "anti_bot") {
+        return None;
+    }
+    let reason = parsed
+        .get("error")
+        .and_then(Value::as_str)
+        .unwrap_or("the request did not succeed");
+    Some(match code {
+        Some(c) => format!("{reason} [{c}]"),
+        None => reason.to_string(),
+    })
 }
 
 fn truncate(s: &str, max: usize) -> &str {
@@ -572,5 +609,88 @@ fn resolve_client_credentials(
             (file_url, file_key)
         }
         Err(_) => (None, cli_key),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn failed_envelope_is_a_tool_error_only_for_anti_bot() {
+        let wall = serde_json::json!({
+            "success": false,
+            "error": "Blocked by anti-bot (generic_block): wall",
+            "errorCode": "anti_bot",
+        });
+        assert_eq!(
+            failed_envelope(&wall).as_deref(),
+            Some("Blocked by anti-bot (generic_block): wall [anti_bot]")
+        );
+        // Pages we did fetch keep reaching the agent as data, as the CLI prints them.
+        for code in ["no_usable_content", "http_error"] {
+            let env = serde_json::json!({"success": false, "error": "x", "errorCode": code});
+            assert_eq!(failed_envelope(&env), None, "{code}");
+        }
+        assert_eq!(failed_envelope(&serde_json::json!({"success": true})), None);
+        // An unknown failure shape fails closed.
+        assert!(failed_envelope(&serde_json::json!({"success": false})).is_some());
+    }
+
+    /// A failed crawl's STATUS is still data: an agent polling a job must see
+    /// `status: "failed"` and the per-URL results, not a bare tool error. Only
+    /// the scrape tool reads its failure envelope as an error.
+    #[tokio::test]
+    async fn only_the_scrape_tool_turns_a_failure_envelope_into_an_error() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        let failed_job = serde_json::json!({
+            "success": false,
+            "status": "failed",
+            "error": "every URL failed",
+            "data": [{"url": "https://example.com/a", "status": "failed"}],
+        });
+        Mock::given(method("GET"))
+            .and(path("/v1/crawl/job-1"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(&failed_job))
+            .mount(&server)
+            .await;
+        let wall = serde_json::json!({
+            "success": false,
+            "error": "Blocked by anti-bot (generic_block): wall",
+            "errorCode": "anti_bot",
+        });
+        Mock::given(method("POST"))
+            .and(path("/v1/scrape"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(&wall))
+            .mount(&server)
+            .await;
+        let client = reqwest::Client::new();
+        let call = |tool: &'static str| {
+            let client = client.clone();
+            let base = server.uri();
+            async move {
+                proxy_call_tool(
+                    &client,
+                    &base,
+                    &None,
+                    tool,
+                    serde_json::json!({"id": "job-1", "url": "https://example.com"}),
+                )
+                .await
+            }
+        };
+
+        let out = call("crw_check_crawl_status")
+            .await
+            .expect("a failed job is data");
+        assert_eq!(out["status"], "failed");
+        assert_eq!(out["data"][0]["url"], "https://example.com/a");
+        let err = call("crw_scrape")
+            .await
+            .expect_err("a wall is a tool error");
+        assert!(err.contains("[anti_bot]"), "{err}");
     }
 }
