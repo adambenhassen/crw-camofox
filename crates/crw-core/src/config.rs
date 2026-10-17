@@ -1834,6 +1834,13 @@ mod tests {
         assert_eq!(cfg.request.deadline_ms_default, 8000);
     }
 
+    fn no_impersonated() -> ImpersonatedConfig {
+        ImpersonatedConfig {
+            enabled: false,
+            ..Default::default()
+        }
+    }
+
     fn renderer_with_chrome_only(chrome_ms: u64) -> RendererConfig {
         RendererConfig {
             mode: RendererMode::Chrome,
@@ -1842,6 +1849,7 @@ mod tests {
             chrome: Some(CdpEndpoint {
                 ws_url: "ws://chrome:9222".into(),
             }),
+            impersonated: no_impersonated(),
             ..Default::default()
         }
     }
@@ -1873,6 +1881,7 @@ mod tests {
             chrome: Some(CdpEndpoint {
                 ws_url: "ws://chrome:9222".into(),
             }),
+            impersonated: no_impersonated(),
             ..Default::default()
         };
         // http(15) + lp(2.5) + chrome(30) + 2*28 = 47.5 + 56 = 103_500.
@@ -1881,6 +1890,21 @@ mod tests {
             15_000 + 2_500 + 30_000 + 2 * 28_000
         );
         assert_eq!(r.cdp_tier_count(), 2);
+    }
+
+    #[test]
+    #[cfg(feature = "impersonated")]
+    fn impersonated_timeout_extends_the_full_ladder_budget() {
+        let mut r = RendererConfig {
+            impersonated: no_impersonated(),
+            ..Default::default()
+        };
+        let without = r.min_deadline_for_full_ladder_ms();
+        r.impersonated.enabled = true;
+        assert_eq!(
+            r.min_deadline_for_full_ladder_ms(),
+            without + r.impersonated.timeout_ms
+        );
     }
 
     #[test]
@@ -2052,6 +2076,7 @@ mod tests {
             playwright: Some(CdpEndpoint {
                 ws_url: "ws://playwright:9222".into(),
             }),
+            impersonated: no_impersonated(),
             ..Default::default()
         };
         assert_eq!(r.cdp_tier_count(), 1);
