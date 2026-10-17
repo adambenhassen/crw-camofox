@@ -51,6 +51,9 @@ use futures::{SinkExt, StreamExt};
 use serde::Deserialize;
 use tokio::sync::{Mutex, broadcast, oneshot};
 use tokio::task::JoinHandle;
+use tokio_tungstenite::tungstenite::client::IntoClientRequest;
+use tokio_tungstenite::tungstenite::handshake::client::Request as WsRequest;
+use tokio_tungstenite::tungstenite::http::{HeaderValue, Uri, header::HOST};
 use tokio_tungstenite::{connect_async, tungstenite::Message};
 
 const WS_CLOSE_TIMEOUT: Duration = Duration::from_secs(3);
@@ -76,38 +79,82 @@ fn classify_ws_error(e: &tokio_tungstenite::tungstenite::Error) -> &'static str 
     }
 }
 
-/// Rewrite a `ws://host:port/...` URL so its host is an IP literal.
+/// Build the CDP handshake request, forcing a `Host` header Chromium accepts.
 ///
-/// Chromium 148+ guards the DevTools WebSocket against DNS-rebinding by
+/// Chromium 148+ guards the DevTools WebSocket against DNS rebinding by
 /// validating the `Host` header: only `localhost` and IP literals pass, so a
 /// connect over a docker service name (`ws://chrome:9222/...`) is rejected with
-/// an HTTP handshake error. tungstenite derives the Host header from the URL
-/// authority, so resolving the hostname to an IP here makes the header an IP
-/// literal Chromium accepts. Best-effort: on any parse/DNS failure (or a host
-/// that is already an IP), the input is returned unchanged.
-async fn resolve_ws_host_to_ip(ws_url: &str) -> String {
-    let Ok(parsed) = url::Url::parse(ws_url) else {
-        return ws_url.to_string();
-    };
-    let Some(host) = parsed.host_str().map(str::to_string) else {
-        return ws_url.to_string();
-    };
-    // Already an IP literal (v4, or v6 which url reports without brackets).
-    if host.parse::<std::net::IpAddr>().is_ok() {
-        return ws_url.to_string();
+/// an HTTP handshake error. tungstenite seeds `Host` from the URL authority, so
+/// a self-host compose pointing the engine at the `chrome` service failed.
+///
+/// Overriding the header instead of rewriting the URL host keeps the hostname in
+/// the URI, and the URI host is what `TcpStream::connect` resolves. It then
+/// walks the resolver's addresses serially, within the connect timeout, rather
+/// than dying on the single one we would have pinned. That is what a
+/// `ws://localhost` endpoint needs when `localhost` resolves to `::1` first and
+/// the browser listens on `127.0.0.1` only: the refusal is immediate and the
+/// walk reaches the v4 address. An address that blackholes SYNs instead will
+/// still eat the whole budget, as it did before.
+///
+/// Narrow on purpose:
+/// - `wss://` is untouched. Chromium's DevTools endpoint is plaintext, so the
+///   guard is not in play, and a hosted CDP endpoint needs its real Host, SNI
+///   and certificate name.
+/// - An IP-literal host is untouched; the header tungstenite generates for it
+///   already passes the guard.
+fn cdp_ws_request(ws_url: &str) -> CrwResult<WsRequest> {
+    // Two tolerances `http::Uri` does not have but the `url::Url` parse this
+    // replaced did. Both are reachable: `cdp.rs` hands `/devtools/` and `token=`
+    // URLs straight here without going through discovery.
+    //
+    // Surrounding whitespace: `http::Uri` rejects it with InvalidUriChar, and a
+    // compose `.env` or TOML value can carry it (the renderer already filters on
+    // `ws_url.trim()` in `lib.rs`). Trim rather than fail every render on a space.
+    let ws_url = ws_url.trim();
+    // Scheme case: `http::Uri` keeps it and tungstenite matches only lowercase
+    // `ws` / `wss`. Lowercase the scheme and nothing else, because rewriting any
+    // more of the URL is exactly what this function exists to stop doing.
+    let lowered = ws_url.split_once("://").and_then(|(scheme, rest)| {
+        scheme
+            .bytes()
+            .any(|b| b.is_ascii_uppercase())
+            .then(|| format!("{}://{rest}", scheme.to_ascii_lowercase()))
+    });
+    let ws_url = lowered.as_deref().unwrap_or(ws_url);
+    let mut req = ws_url.into_client_request().map_err(|e| {
+        // Same sanitization as the connect error below: the URL may be
+        // config- or header-influenceable, so only a category reaches the caller.
+        tracing::warn!(error = %e, "CDP request build failed");
+        CrwError::RendererError(format!("CDP connect failed: {}", classify_ws_error(&e)))
+    })?;
+    if let Some(host) = localhost_host_header(req.uri()) {
+        req.headers_mut().insert(HOST, host);
     }
-    let port = parsed.port().unwrap_or(9222);
-    let Ok(mut addrs) = tokio::net::lookup_host((host.as_str(), port)).await else {
-        return ws_url.to_string();
-    };
-    let Some(addr) = addrs.next() else {
-        return ws_url.to_string();
-    };
-    let mut out = parsed;
-    if out.set_ip_host(addr.ip()).is_err() {
-        return ws_url.to_string();
+    Ok(req)
+}
+
+/// `Some(value)` when the `Host` header must be forced to `localhost` for
+/// Chromium's rebinding guard, `None` when the generated header already passes.
+fn localhost_host_header(uri: &Uri) -> Option<HeaderValue> {
+    // Plaintext only. Chromium's DevTools endpoint is never TLS, and a hosted
+    // `wss://` CDP endpoint needs its real Host for routing, SNI and cert name.
+    if uri.scheme_str() != Some("ws") {
+        return None;
     }
-    out.to_string()
+    let host = uri.host()?;
+    // `Uri::host` keeps the brackets on an IPv6 literal; `IpAddr` rejects them.
+    let bare = host
+        .strip_prefix('[')
+        .and_then(|h| h.strip_suffix(']'))
+        .unwrap_or(host);
+    if bare.parse::<std::net::IpAddr>().is_ok() {
+        return None;
+    }
+    let value = match uri.port_u16() {
+        Some(port) => format!("localhost:{port}"),
+        None => "localhost".to_string(),
+    };
+    HeaderValue::from_str(&value).ok()
 }
 
 type WsStream =
@@ -138,14 +185,8 @@ pub struct CdpConnection {
 impl CdpConnection {
     /// Open a WebSocket to the given CDP endpoint and spawn the reader loop.
     pub async fn connect(ws_url: &str, connect_timeout: Duration) -> CrwResult<Self> {
-        // Chromium 148+ rejects the CDP WebSocket upgrade when the `Host` header
-        // is a bare hostname (a DNS-rebinding guard: only localhost / IP literals
-        // pass). The managed stack connects via a static IP so it's unaffected,
-        // but a self-host compose points the engine at the `chrome` service name,
-        // which then fails with "http handshake rejected". Resolve the host to an
-        // IP so the handshake Host header is an IP literal Chromium accepts.
-        let ws_url = resolve_ws_host_to_ip(ws_url).await;
-        let (ws, _) = tokio::time::timeout(connect_timeout, connect_async(ws_url.as_str()))
+        let request = cdp_ws_request(ws_url)?;
+        let (ws, _) = tokio::time::timeout(connect_timeout, connect_async(request))
             .await
             .map_err(|_| CrwError::Timeout(connect_timeout.as_millis() as u64))?
             .map_err(|e| {
@@ -409,25 +450,242 @@ mod tests {
         serde_json::from_str(json).expect("valid RawCdpMessage")
     }
 
-    #[tokio::test]
-    async fn resolve_ws_host_ip_is_noop() {
-        // Already an IP literal → unchanged (the managed stack's path).
-        let u = "ws://172.30.40.31:9222/devtools/browser/abc";
-        assert_eq!(resolve_ws_host_to_ip(u).await, u);
-        // Unparseable → returned as-is, never panics.
-        assert_eq!(resolve_ws_host_to_ip("not a url").await, "not a url");
+    fn host_header(ws_url: &str) -> String {
+        let req = cdp_ws_request(ws_url).expect("request builds");
+        req.headers()
+            .get(HOST)
+            .expect("Host header present")
+            .to_str()
+            .expect("Host is ascii")
+            .to_string()
     }
 
-    #[tokio::test]
-    async fn resolve_ws_host_localhost_becomes_ip() {
-        // A resolvable hostname is rewritten to an IP literal so Chromium's
-        // Host-header rebinding guard accepts the handshake.
-        let out = resolve_ws_host_to_ip("ws://localhost:9222/devtools/browser/x").await;
-        assert!(
-            out.starts_with("ws://127.0.0.1:9222/") || out.starts_with("ws://[::1]:9222/"),
-            "localhost should resolve to a loopback IP literal, got {out}"
+    #[test]
+    fn cdp_request_forces_localhost_host_for_a_bare_hostname() {
+        // Chromium 148+ rejects `Host: chrome:9222`; `localhost:9222` passes.
+        let req = cdp_ws_request("ws://chrome:9222/devtools/browser/x").expect("builds");
+        assert_eq!(req.headers().get(HOST).unwrap(), "localhost:9222");
+        // The URI keeps the hostname so TcpStream::connect resolves it and walks
+        // every address the resolver returns (issue #564).
+        assert_eq!(req.uri().host(), Some("chrome"));
+        assert_eq!(req.uri().path(), "/devtools/browser/x");
+    }
+
+    #[test]
+    fn cdp_request_keeps_default_host_for_ip_literals() {
+        // The managed stack's static IP: already an IP literal, leave it alone.
+        assert_eq!(
+            host_header("ws://172.30.40.31:9222/devtools/browser/abc"),
+            "172.30.40.31:9222"
         );
-        assert!(out.ends_with("/devtools/browser/x"));
+        // `Uri::host` keeps the brackets on v6, so the literal check must strip
+        // them or a working `Host: [::1]:9222` would be replaced.
+        assert_eq!(
+            host_header("ws://[::1]:9222/devtools/browser/abc"),
+            "[::1]:9222"
+        );
+        assert_eq!(
+            host_header("ws://127.0.0.1:9222/devtools/browser/abc"),
+            "127.0.0.1:9222"
+        );
+    }
+
+    #[test]
+    fn cdp_request_handles_the_browserless_shape() {
+        // `config.stealth.toml` points the chrome tier at a plaintext browserless
+        // endpoint on a published loopback port. `cdp.rs` skips discovery for a
+        // `token=` URL, so this exact string reaches connect. Query and path must
+        // survive untouched; only the Host is forced.
+        let req = cdp_ws_request("ws://localhost:9224/chromium?token=crwtest&stealth=true")
+            .expect("builds");
+        assert_eq!(req.headers().get(HOST).unwrap(), "localhost:9224");
+        assert_eq!(
+            req.uri().path_and_query().map(|p| p.as_str()),
+            Some("/chromium?token=crwtest&stealth=true")
+        );
+    }
+
+    #[test]
+    fn cdp_request_is_identical_to_the_default_for_an_ip_literal() {
+        // The managed stack's chrome tier is an IP literal (`ws://172.30.40.31:9222/`).
+        // It takes no override, so the request must match what `connect_async(&str)`
+        // builds on its own, header for header.
+        let url = "ws://172.30.40.31:9222/devtools/browser/abc";
+        let ours = cdp_ws_request(url).expect("builds");
+        let default = url.into_client_request().expect("builds");
+        assert_eq!(ours.uri(), default.uri());
+        assert_eq!(ours.method(), default.method());
+        assert_eq!(ours.version(), default.version());
+        let names: Vec<String> = ours.headers().keys().map(|k| k.to_string()).collect();
+        let default_names: Vec<String> = default.headers().keys().map(|k| k.to_string()).collect();
+        assert_eq!(names, default_names);
+        for name in names.iter().filter(|n| n.as_str() != "sec-websocket-key") {
+            assert_eq!(
+                ours.headers().get(name),
+                default.headers().get(name),
+                "header {name} must be untouched"
+            );
+        }
+    }
+
+    #[test]
+    fn cdp_request_leaves_wss_untouched() {
+        // A hosted CDP endpoint needs its real Host, SNI and certificate name;
+        // Chromium's guard does not apply to it.
+        assert_eq!(
+            host_header("wss://production-sfo.example.io/?token=abc"),
+            "production-sfo.example.io"
+        );
+    }
+
+    #[test]
+    fn cdp_request_defaults_to_bare_localhost_without_a_port() {
+        assert_eq!(host_header("ws://chrome/devtools/browser/x"), "localhost");
+    }
+
+    /// The repro for issue #564, in process. `localhost` resolves to both
+    /// loopback families; the listener is bound to whichever one the resolver
+    /// does NOT return first, so the first address always refuses. Before the
+    /// fix the ws_url was pinned to that first address and the connect died
+    /// there; keeping the hostname in the URI lets `TcpStream::connect` walk on
+    /// to the second. Binding by resolver order rather than hardcoding
+    /// `127.0.0.1` makes the test reproduce the bug on a v4-first host too.
+    ///
+    /// It also asserts the `Host` header actually sent, which is what
+    /// Chromium's DNS-rebinding guard validates.
+    #[tokio::test]
+    async fn connects_through_localhost_when_the_first_resolved_address_refuses() {
+        use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+
+        let addrs: Vec<std::net::SocketAddr> = tokio::net::lookup_host(("localhost", 0))
+            .await
+            .expect("resolve localhost")
+            .collect();
+        let Some(first) = addrs.first().copied() else {
+            eprintln!("skipped: localhost resolved to nothing");
+            return;
+        };
+        // Needs a second family to skip to; a single-stack host cannot show the bug.
+        let Some(second) = addrs.iter().find(|a| a.is_ipv6() != first.is_ipv6()) else {
+            eprintln!("skipped: localhost is single-stack, the bug cannot be shown here");
+            return;
+        };
+
+        let listener = tokio::net::TcpListener::bind((second.ip(), 0))
+            .await
+            .expect("bind the second resolved family");
+        let port = listener.local_addr().unwrap().port();
+
+        // The premise is that the FIRST address refuses on this port. Ephemeral
+        // ports are per-address, so another test in the suite could be holding
+        // the same number on the other family; binding it proves it is free.
+        match tokio::net::TcpListener::bind((first.ip(), port)).await {
+            Ok(probe) => drop(probe),
+            Err(_) => {
+                eprintln!("skipped: port {port} is taken on the first resolved address");
+                return;
+            }
+        }
+
+        let server = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.expect("accept");
+            let mut reader = BufReader::new(stream);
+            let mut host = String::new();
+            let mut key = String::new();
+            loop {
+                let mut line = String::new();
+                if reader.read_line(&mut line).await.expect("read") == 0 {
+                    break;
+                }
+                let Some((name, value)) = line.split_once(':') else {
+                    if line == "\r\n" {
+                        break;
+                    }
+                    continue;
+                };
+                // Header names are case-insensitive; the key's value is not.
+                match name.to_ascii_lowercase().as_str() {
+                    "host" => host = value.trim().to_string(),
+                    "sec-websocket-key" => key = value.trim().to_string(),
+                    _ => {}
+                }
+            }
+            let accept =
+                tokio_tungstenite::tungstenite::handshake::derive_accept_key(key.as_bytes());
+            let resp = [
+                "HTTP/1.1 101 Switching Protocols",
+                "Upgrade: websocket",
+                "Connection: Upgrade",
+                &format!("Sec-WebSocket-Accept: {accept}"),
+                "",
+                "",
+            ]
+            .join("\r\n");
+            reader
+                .get_mut()
+                .write_all(resp.as_bytes())
+                .await
+                .expect("write 101");
+            host
+        });
+
+        let url = format!("ws://localhost:{port}/devtools/browser/x");
+        let conn = CdpConnection::connect(&url, Duration::from_secs(5))
+            .await
+            .expect("connect over ws://localhost past the refusing first address");
+
+        let host = server.await.expect("server task");
+        assert_eq!(host, format!("localhost:{port}"));
+        drop(conn);
+    }
+
+    #[test]
+    fn cdp_request_lowercases_the_scheme() {
+        // `http::Uri` keeps `WS`; tungstenite matches only lowercase. Reachable
+        // via the shapes `cdp.rs` passes through without discovery.
+        let req = cdp_ws_request("WS://chrome:9222/devtools/browser/x").expect("builds");
+        assert_eq!(req.uri().scheme_str(), Some("ws"));
+        assert_eq!(req.headers().get(HOST).unwrap(), "localhost:9222");
+        // Nothing but the scheme is touched.
+        assert_eq!(req.uri().host(), Some("chrome"));
+        assert_eq!(req.uri().path(), "/devtools/browser/x");
+    }
+
+    #[test]
+    fn cdp_request_tolerates_surrounding_whitespace() {
+        // A compose `.env` or TOML value can carry a stray space; `http::Uri`
+        // rejects it outright where the previous `url::Url` parse did not.
+        let req = cdp_ws_request("  ws://chrome:9222/devtools/browser/x\n").expect("builds");
+        assert_eq!(req.uri().host(), Some("chrome"));
+        assert_eq!(req.headers().get(HOST).unwrap(), "localhost:9222");
+    }
+
+    #[test]
+    fn cdp_request_keeps_a_literal_localhost_host() {
+        // Already `localhost`: the forced value is the same thing, with the port.
+        assert_eq!(
+            host_header("ws://localhost:9222/devtools/browser/x"),
+            "localhost:9222"
+        );
+    }
+
+    #[test]
+    fn cdp_request_keeps_default_host_for_a_routable_ipv6_literal() {
+        assert_eq!(
+            host_header("ws://[2001:db8::1]:9222/devtools/browser/x"),
+            "[2001:db8::1]:9222"
+        );
+    }
+
+    #[test]
+    fn cdp_request_rejects_a_malformed_url() {
+        let err = cdp_ws_request("not a url").expect_err("malformed url is an error");
+        // Sanitized: a category, never the URL itself.
+        assert!(
+            err.to_string()
+                .starts_with("Renderer error: CDP connect failed: ")
+        );
+        assert!(!err.to_string().contains("not a url"));
     }
 
     #[tokio::test]
