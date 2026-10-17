@@ -847,9 +847,15 @@ async fn scrape_url_inner(
                     {
                         Ok(result) => {
                             current_json = Some(result.value);
-                            if data.llm_usage.is_none() {
-                                data.llm_usage = result.usage;
-                            }
+                            // ACCUMULATE, never overwrite-if-empty. This is a
+                            // second structured call, independent of the
+                            // top-level `json` format, so a request asking for
+                            // both ran two models and dropped the second one's
+                            // tokens.
+                            crw_core::types::LlmUsage::accumulate(
+                                &mut data.llm_usage,
+                                result.usage,
+                            );
                         }
                         Err(e) => return Err(e),
                     }

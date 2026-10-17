@@ -16,7 +16,7 @@ use tokio::sync::Semaphore;
 use crw_core::config::{DocumentConfig, LlmConfig};
 use crw_core::error::{CrwError, CrwResult};
 use crw_core::types::{
-    ChunkResult, OutputFormat, PageMetadata, ParserSpec, ScrapeData, ScrapeRequest,
+    ChunkResult, LlmUsage, OutputFormat, PageMetadata, ParserSpec, ScrapeData, ScrapeRequest,
 };
 use crw_extract::pdf::{PdfError, PdfExtract};
 
@@ -596,9 +596,7 @@ pub async fn apply_llm_formats(
                     crw_extract::structured::extract_structured_with_usage(md, schema, llm, None)
                         .await?;
                 data.json = Some(result.value);
-                if data.llm_usage.is_none() {
-                    data.llm_usage = result.usage;
-                }
+                LlmUsage::accumulate(&mut data.llm_usage, result.usage);
             }
             (Some(_), None) => {
                 return Err(CrwError::ExtractionError(
@@ -633,9 +631,10 @@ pub async fn apply_llm_formats(
         {
             Ok(result) => {
                 data.summary = Some(result.content);
-                if data.llm_usage.is_none() {
-                    data.llm_usage = result.usage;
-                }
+                // The json leg above may already have filled this slot, and a
+                // `formats: ["json","summary"]` upload runs both: overwriting
+                // only when empty discarded whichever ran second.
+                LlmUsage::accumulate(&mut data.llm_usage, result.usage);
                 if let Some(w) = result.warning {
                     data.warnings.push(w);
                 }

@@ -9,7 +9,7 @@ use serde_json::Value;
 use uuid::Uuid;
 
 use crw_core::error::CrwError;
-use crw_core::types::{ImageResult, SearchData, SearchRequest, SearchResult};
+use crw_core::types::{ImageResult, LlmUsage, SearchData, SearchRequest, SearchResult};
 
 use super::error::V2Error;
 use crate::error::AppError;
@@ -23,6 +23,15 @@ pub struct V2SearchResponse {
     pub data: V2SearchData,
     pub credits_used: u32,
     pub id: String,
+    /// Token usage for the LLM legs this search ran (summaries, answer).
+    ///
+    /// Additive to the frozen Firecrawl envelope, which their SDKs ignore, and
+    /// the same argument as `V2Document::llm_usage`: a caller metering managed
+    /// spend off this surface had no way to see what a search cost, because
+    /// the reshape below kept only `results`. `/v1/search` has always carried
+    /// it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub llm_usage: Option<LlmUsage>,
 }
 
 #[derive(Debug, Default, Serialize)]
@@ -128,11 +137,18 @@ pub async fn search(
         .map_err(|e| CrwError::InvalidRequest(format!("Invalid search request: {e}")))?;
 
     let resp = search_inner(&state, req).await?;
-    let data = resp.data.map(|d| shape(d.results)).unwrap_or_default();
+    // Destructure rather than reshaping in place: `SearchResponseData` carries
+    // `llm_usage` next to `results`, and mapping straight to `shape(d.results)`
+    // dropped it.
+    let (data, llm_usage) = match resp.data {
+        Some(d) => (shape(d.results), d.llm_usage),
+        None => (V2SearchData::default(), None),
+    };
 
     Ok(Json(V2SearchResponse {
         success: true,
         data,
+        llm_usage,
         credits_used: 0,
         id: Uuid::new_v4().to_string(),
     }))
@@ -142,6 +158,59 @@ pub async fn search(
 mod tests {
     use super::*;
     use crw_core::types::{SearchCategory, SearchSource, SearchTimeFilter};
+
+    fn usage(input: u32, output: u32) -> LlmUsage {
+        LlmUsage {
+            input_tokens: input,
+            output_tokens: output,
+            total_tokens: input + output,
+            estimated_cost_usd: None,
+            model: "DeepSeek-V4-Pro".to_string(),
+            provider: "openai-compatible".to_string(),
+            cache_hit_input_tokens: None,
+            cache_miss_input_tokens: None,
+            truncated: false,
+            calls: 1,
+            executed_summaries: 2,
+            answer_executed: true,
+        }
+    }
+
+    fn response(llm_usage: Option<LlmUsage>) -> V2SearchResponse {
+        V2SearchResponse {
+            success: true,
+            data: V2SearchData::default(),
+            llm_usage,
+            credits_used: 0,
+            id: "id".to_string(),
+        }
+    }
+
+    #[test]
+    fn v2_search_carries_llm_usage_on_the_wire() {
+        // `/v2/search` reshapes the inner response down to its results, which
+        // dropped the usage the summarize and answer legs reported. The key
+        // must be camelCase, because that is what reads it.
+        let wire = serde_json::to_value(response(Some(usage(1200, 340)))).unwrap();
+        let u = wire
+            .get("llmUsage")
+            .expect("llmUsage must reach the wire when a model ran");
+        assert_eq!(u.get("inputTokens").unwrap(), 1200);
+        assert_eq!(u.get("outputTokens").unwrap(), 340);
+        assert_eq!(u.get("executedSummaries").unwrap(), 2);
+        assert_eq!(u.get("answerExecuted").unwrap(), true);
+    }
+
+    #[test]
+    fn v2_search_omits_llm_usage_when_no_model_ran() {
+        // A plain search keeps the Firecrawl envelope byte-identical: no
+        // `"llmUsage": null` key where their SDKs never saw one.
+        let wire = serde_json::to_value(response(None)).unwrap();
+        assert!(
+            wire.get("llmUsage").is_none(),
+            "a search with no LLM leg must not grow the key"
+        );
+    }
 
     #[test]
     fn v2_search_accepts_object_form_sources_and_categories() {

@@ -1,6 +1,8 @@
 use crw_core::config::LlmConfig;
 use crw_core::error::CrwResult;
-use crw_core::types::{CrawlRequest, CrawlState, CrawlStatus, ScrapeData, resolve_pinned_renderer};
+use crw_core::types::{
+    CrawlRequest, CrawlState, CrawlStatus, LlmUsage, ScrapeData, resolve_pinned_renderer,
+};
 use crw_extract::readability::extract_links;
 use crw_renderer::FallbackRenderer;
 use futures::StreamExt;
@@ -596,9 +598,10 @@ async fn run_crawl_inner(opts: CrawlOptions<'_>) {
             {
                 Ok(result) => {
                     data.json = Some(result.value);
-                    if data.llm_usage.is_none() {
-                        data.llm_usage = result.usage;
-                    }
+                    // One leg per page today, but the same trap as the other
+                    // call sites: accumulate so a second leg here cannot go
+                    // unbilled the way it did in single.rs and pdf.rs.
+                    LlmUsage::accumulate(&mut data.llm_usage, result.usage);
                 }
                 Err(e) => {
                     tracing::warn!(url = url.as_str(), "Crawl LLM extraction failed: {e}")
