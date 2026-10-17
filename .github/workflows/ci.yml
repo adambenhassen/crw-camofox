@@ -21,9 +21,12 @@ jobs:
           sudo docker image prune -af
           df -h /
 
+      # Pinned to the Dockerfile builder (rust:1.98) so a new stable release
+      # cannot fail CI with no code change. Bump both together.
       - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@master
         with:
+          toolchain: 1.98.1
           components: clippy, rustfmt
 
       - name: Cache cargo registry & build

@@ -5,6 +5,9 @@
 # under QEMU for linux/arm64, which emulated the *entire* Rust compile and took
 # ~2h per release. Cross-compiling on the native runner brings arm64 back to
 # minutes; only the tiny runtime layer (ca-certificates) still touches QEMU.
+#
+# The Rust version matches the toolchain pinned in .github/workflows; bump both
+# together.
 FROM --platform=$BUILDPLATFORM rust:1.98-bookworm AS builder
 
 # Provided automatically by buildx: amd64 | arm64. BUILDARCH is the native arch

@@ -31,8 +31,11 @@ jobs:
 
       - uses: astral-sh/setup-uv@v8
 
+      # Pinned to the Dockerfile builder (rust:1.98). Bump both together.
       - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.98.1
 
       # Cache-proof internal-pin invariant. Runs here too (not just ci.yml) so
       # that once the release-please bump PR triggers this workflow (via the
