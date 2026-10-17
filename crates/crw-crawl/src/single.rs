@@ -403,9 +403,16 @@ async fn scrape_url_inner(
         // hide the real outcome behind a fabricated timeout.
         let escalation_budget = deadline.remaining();
         let has_escalation_budget = escalation_budget >= crw_renderer::MIN_TIER_BUDGET;
+        // The same condemnation the choke applies below: the ladder tail carried
+        // a wall verdict and the body is no bigger than an error page. The ladder
+        // already spent every tier on this page, so a second one cannot differ.
+        // It matters when the kept body came from LightPanda: that reads as a low
+        // tier, and the wall used to arrive as an error that never got here.
+        let ladder_condemned = fetch_result.wall.is_some() && data.is_error_page_sized();
         let should_escalate = (md_is_byte_thin || escalate_for_quality)
             && used_low_tier
             && !js_ladder_exhausted
+            && !ladder_condemned
             && should_escalate_status
             && escalation_eligible
             && has_escalation_target
@@ -504,15 +511,41 @@ async fn scrape_url_inner(
                             let js_score = js_md_quality.as_ref().map(|q| q.score).unwrap_or(0.0);
                             let before_score = md_quality.as_ref().map(|q| q.score).unwrap_or(0.0);
                             let http_was_thin = md_is_byte_thin;
-                            let accept = accept_js_escalation(
-                                md_bytes,
-                                http_was_thin,
-                                before_score,
-                                js_md_len,
-                                js_score,
-                                retry_threshold,
-                            );
-                            if accept {
+                            // A render the ladder condemned as a wall is not a page
+                            // to accept, however much more markdown it holds than
+                            // the thin prior: the wall text would replace the
+                            // prior's own, truthful verdict. Same size rule as the
+                            // choke, which is the only place a carried wall is
+                            // trusted. The prior is kept, exactly as when this
+                            // render was an error.
+                            let walled = js_fetch.wall.is_some() && js_data.is_error_page_sized();
+                            let accept = !walled
+                                && accept_js_escalation(
+                                    md_bytes,
+                                    http_was_thin,
+                                    before_score,
+                                    js_md_len,
+                                    js_score,
+                                    retry_threshold,
+                                );
+                            if walled {
+                                let reason = js_fetch
+                                    .wall
+                                    .as_ref()
+                                    .map(|w| w.reason.as_str())
+                                    .unwrap_or_default();
+                                tracing::info!(
+                                    url = %req.url,
+                                    reason,
+                                    "JS escalation met a wall, keeping the prior tier's result",
+                                );
+                                let failed =
+                                    format!("{} {reason}", crw_renderer::JS_ESCALATION_FAILED);
+                                effective_warning = Some(match effective_warning {
+                                    Some(w) => format!("{w}; {failed}"),
+                                    None => failed,
+                                });
+                            } else if accept {
                                 data = js_data;
                                 // `classify_block` below reads `fetch_result.html`, and
                                 // leaving the DISCARDED tier's shell there means a

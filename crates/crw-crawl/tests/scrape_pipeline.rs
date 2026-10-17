@@ -401,3 +401,86 @@ async fn a_wall_no_tier_can_clear_is_a_generic_block_not_a_structural_failure() 
     assert_eq!(block.vendor, "generic_block", "{block:?}");
     assert!(block.is_wall());
 }
+
+/// A tier that counts how often the ladder reaches it.
+struct Counting {
+    inner: Arc<dyn PageFetcher>,
+    calls: Arc<std::sync::atomic::AtomicUsize>,
+}
+
+#[async_trait::async_trait]
+impl PageFetcher for Counting {
+    async fn fetch(
+        &self,
+        url: &str,
+        headers: &HashMap<String, String>,
+        wait_for_ms: Option<u64>,
+        deadline: Deadline,
+    ) -> CrwResult<FetchResult> {
+        self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        self.inner.fetch(url, headers, wait_for_ms, deadline).await
+    }
+
+    fn name(&self) -> &str {
+        self.inner.name()
+    }
+
+    fn supports_js(&self) -> bool {
+        true
+    }
+
+    async fn is_available(&self) -> bool {
+        true
+    }
+}
+
+/// The ladder tail's wall verdict means every tier already ran. The scrape's
+/// post-extract escalation must not run the whole ladder a second time on a page
+/// whose kept body came from LightPanda (a "low" tier).
+#[tokio::test]
+async fn a_condemned_wall_is_not_escalated_a_second_time() {
+    let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let camofox = Arc::new(Counting {
+        inner: tier("camofox", Ok(generic_wall())),
+        calls: calls.clone(),
+    }) as Arc<dyn PageFetcher>;
+    let r = renderer_with_http(
+        tier("http", Ok(generic_wall())),
+        vec![tier("lightpanda", Ok(generic_wall())), camofox],
+    );
+    let data = scrape(&r).await.expect("a wall is a verdict, not an error");
+    assert_eq!(
+        data.block.as_ref().map(|b| b.vendor.as_str()),
+        Some("generic_block"),
+        "{:?}",
+        data.block
+    );
+    assert_eq!(
+        calls.load(std::sync::atomic::Ordering::SeqCst),
+        1,
+        "the ladder ran once; a second run cannot differ"
+    );
+}
+
+/// A thin real page from LightPanda, then a camofox escalation that meets a
+/// wall. The wall text must not replace the page the first tier really read:
+/// the prior keeps its own verdict, and the failed escalation is visible.
+#[tokio::test]
+async fn an_escalation_that_meets_a_wall_keeps_the_prior_page() {
+    let r = renderer(vec![
+        tier("lightpanda", Ok(thin_render())),
+        tier("camofox", Ok(generic_wall())),
+    ]);
+    let data = scrape(&r).await.expect("the thin page still ships");
+    assert_eq!(data.metadata.rendered_with.as_deref(), Some("lightpanda"));
+    assert!(
+        data.block.is_none(),
+        "the wall must not become the verdict: {:?}",
+        data.block
+    );
+    let warning = data.warning.unwrap_or_default();
+    assert!(
+        warning.contains(crw_renderer::JS_ESCALATION_FAILED),
+        "{warning}"
+    );
+}
