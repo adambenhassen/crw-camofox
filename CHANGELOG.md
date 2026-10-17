@@ -18,6 +18,8 @@ and the project uses [Semantic Versioning](https://semver.org/).
 
 - **MCP:** the `crw_search` `categories` description no longer points at a
   "native SearXNG category" (the MCP search backend is Camofox).
+- **CLI:** `crw --help` no longer names SearXNG in prose; it says "search
+  backend". The `--searxng-url` flag and `CRW_SEARXNG_URL` are unchanged.
 - **Scrape:** a selector that matches nothing (`includeTags`, `cssSelector`,
   `xpath`) returns `success: true` with an empty document and the
   `selector_no_match` warning, billed normally. It no longer fails as
