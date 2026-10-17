@@ -55,6 +55,30 @@ fn is_safe_url(url: &url::Url) -> bool {
     crw_core::url_safety::validate_safe_url(url).is_ok()
 }
 
+/// A link whose path names an image, media, archive, font or installer file.
+///
+/// Link discovery takes every same-origin `a[href]`, and lightbox galleries link
+/// straight to `.jpg`. Fetching those read the whole binary only to return an
+/// unsupported-content placeholder, and each one used up a slot of the caller's
+/// crawl `limit`. Documents the extractor parses (pdf, docx, ...) are not here.
+fn is_static_asset(url: &url::Url) -> bool {
+    const ASSET_EXTENSIONS: &[&str] = &[
+        "jpg", "jpeg", "png", "gif", "webp", "avif", "svg", "ico", "bmp", "tif", "tiff", "heic",
+        "mp4", "webm", "mov", "avi", "mkv", "m4v", "mp3", "wav", "ogg", "m4a", "flac", "zip", "gz",
+        "tgz", "tar", "rar", "7z", "bz2", "xz", "woff", "woff2", "ttf", "otf", "eot", "exe", "dmg",
+        "msi", "apk", "iso", "flv", "deb", "rpm", "jar",
+    ];
+    let Some(name) = url.path_segments().and_then(|mut s| s.next_back()) else {
+        return false;
+    };
+    let Some((_, ext)) = name.rsplit_once('.') else {
+        return false;
+    };
+    ASSET_EXTENSIONS
+        .iter()
+        .any(|asset| ext.eq_ignore_ascii_case(asset))
+}
+
 /// Send a failed crawl state.
 fn send_failed(id: Uuid, state_tx: &tokio::sync::watch::Sender<CrawlState>, error: String) {
     let _ = state_tx.send(CrawlState {
@@ -93,6 +117,9 @@ fn enqueue_discovered_links(
             // with `CrawlRequest::headers` it would replay the caller's
             // credentials to a different service on the same host.
             if link_url.origin().ascii_serialization() != origin {
+                continue;
+            }
+            if is_static_asset(&link_url) {
                 continue;
             }
             // Dedup on the canonical key, but enqueue the link as the page
@@ -1152,7 +1179,17 @@ pub async fn discover_urls(opts: DiscoverOptions<'_>) -> CrwResult<DiscoverResul
             // Merge each page's links as it lands. `visited` and the filter counters
             // have a single owner here, and `urls.sort()` below keeps the output
             // deterministic regardless of the order pages completed in.
-            while let Some(page) = in_flight.next().await {
+            //
+            // The wait itself is bounded by the BFS deadline. A page whose recovery
+            // tier runs past its own budget used to hold this loop open until the
+            // route's outer timeout fired and dropped every URL already found
+            // (a 504 with zero links); now the loop stops and returns them.
+            while let Ok(Some(page)) = tokio::time::timeout_at(
+                tokio::time::Instant::from_std(bfs_deadline_at),
+                in_flight.next(),
+            )
+            .await
+            {
                 if all_urls.len() >= max_urls || std::time::Instant::now() >= bfs_deadline_at {
                     break;
                 }
@@ -1188,7 +1225,8 @@ pub async fn discover_urls(opts: DiscoverOptions<'_>) -> CrwResult<DiscoverResul
                     if all_urls.len() >= max_urls {
                         break;
                     }
-                    if depth >= max_depth {
+                    // Listed like any other URL, but never fetched to look for links.
+                    if depth >= max_depth || is_static_asset(&link_url) {
                         continue;
                     }
                     // robots gate applies to FETCHING only. Hacker News disallows
@@ -1405,6 +1443,19 @@ mod tests {
     }
 
     #[test]
+    fn enqueue_skips_binary_assets_but_keeps_pages_and_pdfs() {
+        let queued: Vec<String> =
+            enqueued_urls(&["/gallery/a.jpg", "/files/x.zip", "/p", "/r.pdf"])
+                .into_iter()
+                .map(|(u, _)| u)
+                .collect();
+        assert_eq!(
+            queued,
+            ["https://example.com/p", "https://example.com/r.pdf"]
+        );
+    }
+
+    #[test]
     fn enqueue_keeps_path_and_query_case_of_the_link_as_written() {
         // The crawl used to enqueue its own dedup key, so a mixed-case path went
         // out lowercased and 404'd on any case-sensitive origin.
@@ -1434,6 +1485,20 @@ mod tests {
         let queue = enqueued_urls(&["/a/", "/a"]);
         assert_eq!(queue.len(), 1);
         assert_eq!(queue[0].0, "https://example.com/a/");
+    }
+
+    #[test]
+    fn static_assets_are_recognised_by_path_extension() {
+        let asset = |u: &str| is_static_asset(&url::Url::parse(u).unwrap());
+        assert!(asset("https://example.com/img/about/vault_before.jpg"));
+        assert!(asset("https://example.com/wp-content/uploads/27.JPG?ver=2"));
+        assert!(asset("https://example.com/video/intro.mp4#t=3"));
+        assert!(!asset("https://example.com/report.pdf"));
+        assert!(!asset("https://example.com/docs/guide"));
+        assert!(!asset("https://example.com/docs/"));
+        assert!(!asset("https://example.com/page.html?img=a.jpg"));
+        assert!(!asset("https://example.com/v1.2/release-notes"));
+        assert!(!asset("https://example.com/topics/node.js"));
     }
 
     #[test]
