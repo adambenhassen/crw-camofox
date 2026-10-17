@@ -15,6 +15,7 @@ use crw_core::error::CrwError;
 use crw_core::types::{OutputFormat, ScrapeRequest};
 
 use super::adapters::expires_at_rfc3339;
+use super::error::V2Error;
 use crate::error::AppError;
 use crate::state::{AppState, ExtractStatus};
 
@@ -44,10 +45,10 @@ pub struct V2ExtractStartResponse {
 pub async fn start_extract(
     State(state): State<AppState>,
     body: Result<Json<V2ExtractRequest>, JsonRejection>,
-) -> Result<Json<V2ExtractStartResponse>, AppError> {
+) -> Result<Json<V2ExtractStartResponse>, V2Error> {
     let Json(req) = body.map_err(AppError::from)?;
     if req.urls.is_empty() {
-        return Err(AppError::from(CrwError::InvalidRequest(
+        return Err(V2Error::from(CrwError::InvalidRequest(
             "`urls` is required for extract on this engine (prompt-only extraction \
              without URLs is not supported)"
                 .into(),
@@ -104,7 +105,7 @@ pub struct V2ExtractStatusResponse {
 pub async fn get_extract(
     State(state): State<AppState>,
     Path(id): Path<Uuid>,
-) -> Result<Json<V2ExtractStatusResponse>, AppError> {
+) -> Result<Json<V2ExtractStatusResponse>, V2Error> {
     let rec = {
         let jobs = state.extract_jobs.read().await;
         jobs.get(&id)

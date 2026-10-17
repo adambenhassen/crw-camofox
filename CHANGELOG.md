@@ -7,6 +7,17 @@ and the project uses [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Changed
+
+- **v2 scrape:** an origin 4xx/5xx page is a `success: true` document with
+  `metadata.statusCode` and `metadata.error` (the reason phrase), whatever its
+  size, as Firecrawl returns it. Walls stay `success: false` and unbilled at
+  any status. A 200 with nothing usable is a 500 `SCRAPE_ALL_ENGINES_FAILED`,
+  and `metadata.url` is the post-redirect URL.
+- **v2 errors:** error bodies add Firecrawl's `code` next to `error_code`. A
+  timeout is 408 `SCRAPE_TIMEOUT` (was 504); an unreachable target stays 422
+  with `SCRAPE_SITE_ERROR`; an unsupported content type is 500.
+
 ## [1.6.1] - 2026-10-17
 
 An upstream-sync release: crawl, extraction and wall handling fixes ported

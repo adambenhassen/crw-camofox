@@ -1,8 +1,12 @@
 //! `/v1/scrape` and `/v2/scrape` must classify the same origin response the same
-//! way: a real page succeeds, an origin error page is `http_error`, a wall is
-//! `anti_bot` with its body cleared, an empty page is `no_usable_content`, and a
-//! CDN answering for a dead origin is `target_unreachable`. The SaaS bills from
-//! `success`, so the two surfaces disagreeing is a billing bug.
+//! way: a real page succeeds, a wall is `anti_bot` with its body cleared, an
+//! empty page is `no_usable_content`, and a CDN answering for a dead origin is
+//! `target_unreachable`. The SaaS bills from `success`, so the two surfaces
+//! disagreeing is a billing bug.
+//!
+//! The one deliberate split is a plain origin 4xx/5xx page: `/v1` calls it
+//! `http_error`, `/v2` returns it as a `success:true` document carrying the
+//! status, as Firecrawl does.
 //!
 //! Own test binary because it sets `CRW_ALLOW_LOOPBACK_FOR_TESTS`, which is
 //! process-global.
@@ -47,6 +51,10 @@ async fn origin() -> MockServer {
         ),
         ("/empty", html(200, "")),
         (
+            "/moved",
+            ResponseTemplate::new(302).insert_header("location", "/ok"),
+        ),
+        (
             "/dead",
             html(
                 522,
@@ -88,21 +96,22 @@ async fn v1_and_v2_classify_origin_responses_alike() {
     let server = app();
     let url = |p: &str| format!("{}{p}", origin.uri());
 
-    // (path, v1 success, v1 error_code)
+    // (path, v1 success, v1 error_code, v2 success)
     let cases = [
-        ("/ok", true, None),
-        ("/missing", false, Some("http_error")),
-        ("/wall", false, Some("anti_bot")),
-        ("/empty", false, Some("no_usable_content")),
+        ("/ok", true, None, true),
+        // The deliberate split: Firecrawl returns an origin 404 as a document.
+        ("/missing", false, Some("http_error"), true),
+        ("/wall", false, Some("anti_bot"), false),
+        ("/empty", false, Some("no_usable_content"), false),
     ];
-    for (p, success, code) in cases {
+    for (p, success, code, v2_success) in cases {
         let (_, one) = v1(&server, &url(p)).await;
         assert_eq!(one["success"], success, "v1 {p}: {one}");
         assert_eq!(one["error_code"].as_str(), code, "v1 {p}: {one}");
 
         let (_, two) = v2(&server, &url(p)).await;
-        assert_eq!(two["success"], success, "v2 {p} must agree with v1: {two}");
-        if !success {
+        assert_eq!(two["success"], v2_success, "v2 {p}: {two}");
+        if !v2_success {
             assert!(two["error"].is_string(), "v2 {p} must say why: {two}");
         }
     }
@@ -139,4 +148,76 @@ async fn cdn_answering_for_a_dead_origin_is_unreachable_on_both_surfaces() {
     let (status, two) = v2(&server, &url).await;
     assert_eq!(status, 422, "{two}");
     assert_eq!(two["success"], false, "{two}");
+    // Firecrawl's taxonomy as well as ours; never its 200 DNS answer.
+    assert_eq!(two["code"], "SCRAPE_SITE_ERROR", "{two}");
+    assert_eq!(two["error_code"], "target_unreachable", "{two}");
+}
+
+/// An origin 4xx is a document on `/v2` whatever its size: `success:true`, the
+/// status and its reason phrase in the metadata, and billed.
+#[tokio::test]
+async fn v2_returns_an_origin_error_page_as_a_billed_document() {
+    let origin = origin().await;
+    let server = app();
+    let (status, body) = v2(&server, &format!("{}/missing", origin.uri())).await;
+
+    assert_eq!(status, 200, "{body}");
+    assert_eq!(body["success"], true, "{body}");
+    let meta = &body["data"]["metadata"];
+    assert_eq!(meta["statusCode"], 404, "{body}");
+    assert_eq!(meta["error"], "Not Found", "{body}");
+    assert_eq!(meta["creditsUsed"], 1, "{body}");
+    assert!(
+        body["data"]["markdown"]
+            .as_str()
+            .is_some_and(|m| m.contains("No such page")),
+        "the error page stays readable: {body}"
+    );
+}
+
+/// A wall stays a failure at its 403: no body, nothing billed. Firecrawl would
+/// bill it as a document.
+#[tokio::test]
+async fn v2_fails_a_wall_served_with_a_4xx_unbilled() {
+    let origin = origin().await;
+    let server = app();
+    let (status, body) = v2(&server, &format!("{}/wall", origin.uri())).await;
+
+    assert_eq!(status, 200, "{body}");
+    assert_eq!(body["success"], false, "{body}");
+    assert_eq!(body["data"]["metadata"]["creditsUsed"], 0, "{body}");
+    assert!(
+        body["data"]["markdown"]
+            .as_str()
+            .unwrap_or_default()
+            .is_empty(),
+        "{body}"
+    );
+}
+
+/// `metadata.url` is where a redirect landed; `sourceURL` stays what was asked.
+#[tokio::test]
+async fn v2_reports_the_redirect_target_in_metadata_url() {
+    let origin = origin().await;
+    let server = app();
+    let asked = format!("{}/moved", origin.uri());
+    let (_, body) = v2(&server, &asked).await;
+
+    assert_eq!(body["success"], true, "{body}");
+    let meta = &body["data"]["metadata"];
+    assert_eq!(meta["sourceURL"], asked, "{body}");
+    assert_eq!(meta["url"], format!("{}/ok", origin.uri()), "{body}");
+}
+
+/// A 200 with nothing in it is an engine failure, not a 200 carrying
+/// `success:false`.
+#[tokio::test]
+async fn v2_answers_an_empty_200_with_all_engines_failed() {
+    let origin = origin().await;
+    let server = app();
+    let (status, body) = v2(&server, &format!("{}/empty", origin.uri())).await;
+
+    assert_eq!(status, 500, "{body}");
+    assert_eq!(body["success"], false, "{body}");
+    assert_eq!(body["code"], "SCRAPE_ALL_ENGINES_FAILED", "{body}");
 }

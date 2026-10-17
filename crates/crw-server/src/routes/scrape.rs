@@ -86,6 +86,7 @@ pub async fn scrape(
             data: Some(data),
             error: Some(error_msg),
             error_code: Some("http_error".into()),
+            code: None,
             warning: None,
         }));
     }
@@ -117,6 +118,7 @@ pub async fn scrape(
             data: Some(data),
             error: Some(error_msg),
             error_code: Some(error_code.into()),
+            code: None,
             warning: None,
         }));
     }
@@ -145,6 +147,7 @@ pub async fn scrape(
             data: Some(data),
             error: Some(error_msg),
             error_code: Some("no_usable_content".into()),
+            code: None,
             warning: None,
         }));
     }
