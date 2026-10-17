@@ -673,12 +673,6 @@ fn split_caller_headers(
     (ua, extra)
 }
 
-/// Strip "Mozilla/5.0 " so lightpanda accepts the UA — its `validateUserAgent`
-/// rejects any "Mozilla" (`error.Reserved`). The "...Chrome/<ver>..." token survives.
-fn lightpanda_safe_ua(ua: &str) -> &str {
-    ua.strip_prefix("Mozilla/5.0 ").unwrap_or(ua)
-}
-
 async fn connect_chrome_with_retry_inner(
     name: &str,
     configured_ws_url: &str,
@@ -2426,8 +2420,11 @@ impl CdpRenderer {
         // trips "your browser is outdated" gates). Session-scoped (so pooled
         // contexts don't leak it) and best-effort: a tier that rejects the method
         // must NOT abort an otherwise-fine render — hence `.ok()`, not `?`.
-        // lightpanda rejects "Mozilla" UAs (→ `lightpanda_safe_ua`); it routes
-        // Network.* → Emulation.* internally, so the method name is fine. Skip if empty.
+        // lightpanda routes Network.* to Emulation.* internally, so the method
+        // name is fine. It refuses any UA containing "Mozilla" and keeps its own
+        // `Lightpanda/1.0`. That is deliberate: rewriting the value to get past
+        // its check sends an identity no client sends (#622), which origins
+        // block more often than the honest default. Skip if empty.
         //
         // A caller-supplied `User-Agent` wins over the tier default, the same
         // precedence the HTTP fetcher gives it (http_only.rs applies caller
@@ -2435,14 +2432,9 @@ impl CdpRenderer {
         let (caller_ua, extra_headers) = split_caller_headers(headers);
         let effective_ua = caller_ua.as_deref().unwrap_or(&self.user_agent);
         if !effective_ua.is_empty() {
-            let ua: &str = if self.name == "lightpanda" {
-                lightpanda_safe_ua(effective_ua)
-            } else {
-                effective_ua
-            };
             conn.send_recv(
                 "Network.setUserAgentOverride",
-                serde_json::json!({ "userAgent": ua }),
+                serde_json::json!({ "userAgent": effective_ua }),
                 Some(&session_id),
                 self.page_timeout,
             )
@@ -2999,7 +2991,7 @@ fn is_spa_text_ready(text_len: i64) -> bool {
 mod tests {
     use super::{
         CdpRenderer, attribute_auth_failure, build_auth_response, is_content_stable,
-        lightpanda_safe_ua, outbound_block_label, split_caller_headers,
+        outbound_block_label, split_caller_headers,
     };
     use crw_core::error::CrwError;
     use std::collections::HashMap;
@@ -3259,17 +3251,50 @@ mod tests {
         assert_eq!(r.user_agent, ua);
     }
 
-    #[test]
-    fn lightpanda_safe_ua_strips_mozilla_keeps_chrome() {
-        let full = "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 \
-                    (KHTML, like Gecko) Chrome/150.0.0.0 Safari/537.36";
-        let safe = lightpanda_safe_ua(full);
-        // lightpanda's validateUserAgent rejects ANY "Mozilla" → must be gone.
-        assert!(!safe.to_ascii_lowercase().contains("mozilla"));
-        // ...but the Chrome version token that UA gates check must survive.
-        assert!(safe.contains("Chrome/150"));
-        // A UA without the prefix is returned unchanged (no double-strip).
-        assert_eq!(lightpanda_safe_ua("Chrome/150.0.0.0"), "Chrome/150.0.0.0");
+    #[tokio::test]
+    async fn lightpanda_receives_the_user_agent_unchanged() {
+        // #622: lightpanda used to get the UA with "Mozilla/5.0 " cut off, an
+        // identity no client sends. The override must carry the UA as given.
+        use futures::{SinkExt, StreamExt};
+        use tokio_tungstenite::tungstenite::Message;
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let ws_url = format!("ws://{}/devtools/browser/t", listener.local_addr().unwrap());
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        // Minimal browser: answers each command with the ids a render needs,
+        // reports the UA override, then stops answering.
+        tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let mut ws = tokio_tungstenite::accept_async(stream).await.unwrap();
+            while let Some(Ok(Message::Text(text))) = ws.next().await {
+                let req: serde_json::Value = serde_json::from_str(&text).unwrap();
+                if req["method"] == "Network.setUserAgentOverride" {
+                    let _ = tx.send(req["params"]["userAgent"].clone());
+                    std::future::pending::<()>().await;
+                }
+                let reply = serde_json::json!({
+                    "id": req["id"],
+                    "result": { "targetId": "t", "sessionId": "s" },
+                });
+                ws.send(Message::Text(reply.to_string().into()))
+                    .await
+                    .unwrap();
+            }
+        });
+
+        let ua = "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 \
+                  (KHTML, like Gecko) Chrome/150.0.0.0 Safari/537.36";
+        let r = CdpRenderer::new("lightpanda", &ws_url, 5_000, 1).with_user_agent(ua);
+        let deadline = crw_core::Deadline::now_plus(std::time::Duration::from_secs(10));
+        let headers = HashMap::new();
+        let seen = tokio::select! {
+            biased;
+            seen = rx.recv() => seen,
+            res = r.fetch_with_ws("http://example.com/", &headers, None, deadline) => {
+                panic!("render ended before the UA override: {:?}", res.err())
+            }
+        };
+        assert_eq!(seen.as_ref().and_then(|v| v.as_str()), Some(ua));
     }
 
     /// A `fetch_with_ws` cancelled mid-flight (its future dropped) must still
