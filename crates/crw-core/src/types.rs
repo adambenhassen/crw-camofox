@@ -941,6 +941,13 @@ pub const HTTP_ERROR_VENDOR: &str = "http_error";
 pub const PARKED_DOMAIN_VENDOR: &str = "parked_domain";
 
 impl BlockOutcome {
+    /// A real wall: a vendor shell or a generic block. `structural_failure` and
+    /// `parked_domain` are verdicts about a page that was fetched (thin, empty or
+    /// for sale), not walls, so surfaces that fail on a wall keep their body.
+    pub fn is_wall(&self) -> bool {
+        self.vendor != STRUCTURAL_FAILURE_VENDOR && self.vendor != PARKED_DOMAIN_VENDOR
+    }
+
     /// Standard anti-bot block error string shared by the v1 and v2 handlers so
     /// the two API surfaces label the same block identically.
     ///
@@ -1330,6 +1337,20 @@ mod tests {
             reason: "datadome interstitial".into(),
         });
         assert!(d.http_error().is_none());
+    }
+
+    #[test]
+    fn only_vendor_and_generic_blocks_are_walls() {
+        let block = |vendor: &str| BlockOutcome {
+            vendor: vendor.into(),
+            reason: "r".into(),
+        };
+        for vendor in ["generic_block", "cloudflare", "datadome"] {
+            assert!(block(vendor).is_wall(), "{vendor}");
+        }
+        for vendor in [STRUCTURAL_FAILURE_VENDOR, PARKED_DOMAIN_VENDOR] {
+            assert!(!block(vendor).is_wall(), "{vendor}");
+        }
     }
 
     #[test]

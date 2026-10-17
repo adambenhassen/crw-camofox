@@ -1435,6 +1435,21 @@ async fn enrich_with_scrape(
 }
 
 fn apply_scrape_to_result(slot: &mut SearchResult, data: ScrapeData, formats: &[OutputFormat]) {
+    // A wall is not enrichment. `scrape_url` reports it as a verdict on the
+    // document rather than an `Err`, and `clear_body()` runs in the scrape
+    // ROUTE, not here, so without this the interstitial ("Checking your browser",
+    // a deny page) lands in `slot.markdown` as if it were the result: counted as
+    // a successful result, and taken as evidence by answer synthesis. Same shape
+    // as the `Err(msg)` arm in the caller: name the reason, ship no body.
+    //
+    // Walls only. `structural_failure` and `parked_domain` are pages that were
+    // fetched (thin, empty or for sale) and keep their body, as they always did
+    // here and as the CLI and MCP surfaces treat them.
+    if let Some(block) = data.block.as_ref().filter(|b| b.is_wall()) {
+        slot.error = Some(block.message());
+        slot.metadata = Some(data.metadata);
+        return;
+    }
     if formats.contains(&OutputFormat::Markdown) {
         slot.markdown = data.markdown;
     }
@@ -1457,6 +1472,84 @@ fn apply_scrape_to_result(slot: &mut SearchResult, data: ScrapeData, formats: &[
 mod tests {
     use super::*;
     use crw_core::types::SearchSource;
+
+    fn blank_slot(url: &str) -> SearchResult {
+        SearchResult {
+            url: url.to_string(),
+            title: String::new(),
+            description: String::new(),
+            snippet: String::new(),
+            position: 1,
+            score: None,
+            published_date: None,
+            category: None,
+            markdown: None,
+            html: None,
+            raw_html: None,
+            links: None,
+            metadata: None,
+            summary: None,
+            error: None,
+            truncated: None,
+        }
+    }
+
+    fn blocked_data(vendor: &str) -> ScrapeData {
+        ScrapeData {
+            markdown: Some("Checking your browser before you access...".to_string()),
+            block: Some(crw_core::types::BlockOutcome {
+                vendor: vendor.to_string(),
+                reason: "anti-bot wall that no renderer tier could clear".to_string(),
+            }),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn walled_enrichment_reports_the_reason_and_ships_no_body() {
+        // A wall reaches `apply_scrape_to_result` as `Ok(data)` carrying a block
+        // verdict. Copying its markdown into the slot makes the interstitial look
+        // like the page, and answer synthesis reads it as evidence.
+        for vendor in ["generic_block", "cloudflare"] {
+            let mut slot = blank_slot("https://example.com/walled");
+            apply_scrape_to_result(&mut slot, blocked_data(vendor), &[OutputFormat::Markdown]);
+
+            assert!(
+                slot.markdown.is_none(),
+                "{vendor}: wall text became the body"
+            );
+            let err = slot.error.expect("a walled slot names its reason");
+            assert!(err.contains("anti-bot"), "{vendor}: {err}");
+        }
+    }
+
+    #[test]
+    fn structural_and_parked_enrichment_keep_their_body() {
+        for vendor in [
+            crw_core::types::STRUCTURAL_FAILURE_VENDOR,
+            crw_core::types::PARKED_DOMAIN_VENDOR,
+        ] {
+            let mut slot = blank_slot("https://example.com/thin");
+            apply_scrape_to_result(&mut slot, blocked_data(vendor), &[OutputFormat::Markdown]);
+
+            assert!(slot.markdown.is_some(), "{vendor}");
+            assert!(slot.error.is_none(), "{vendor}");
+        }
+    }
+
+    #[test]
+    fn unblocked_enrichment_still_fills_the_body() {
+        let mut slot = blank_slot("https://example.com/real");
+        let data = ScrapeData {
+            markdown: Some("# A real page".to_string()),
+            ..Default::default()
+        };
+
+        apply_scrape_to_result(&mut slot, data, &[OutputFormat::Markdown]);
+
+        assert_eq!(slot.markdown.as_deref(), Some("# A real page"));
+        assert!(slot.error.is_none());
+    }
 
     fn scrape_opts(timeout: Option<u64>) -> SearchScrapeOptions {
         SearchScrapeOptions {
