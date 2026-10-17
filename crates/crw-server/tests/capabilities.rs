@@ -344,6 +344,27 @@ async fn llm_required_formats_are_declared() {
     );
 }
 
+#[tokio::test]
+async fn byok_header_guard_is_visible_and_formats_stay_llm_gated() {
+    // With the guard on, the server key alone does not unlock json/summary on
+    // the scrape path: the guard name is advertised and the formats stay
+    // declared as LLM-gated.
+    let body = caps(&app_from(
+        r#"
+[extraction.llm]
+provider = "anthropic"
+api_key = "sk-test"
+model = "claude-sonnet-4-20250514"
+require_byok_header = "x-tenant-key"
+"#,
+    ))
+    .await;
+
+    assert_eq!(body["llm"]["serverKeyConfigured"], json!(true));
+    assert_eq!(body["llm"]["requireByokHeader"], json!("x-tenant-key"));
+    assert_eq!(body["formats"]["llmRequired"], json!(["json", "summary"]));
+}
+
 // ── The v2 alias serves the identical document ──────────────────────────────
 
 #[tokio::test]

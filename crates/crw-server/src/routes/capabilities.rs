@@ -45,7 +45,7 @@ pub struct DocumentCapabilities {
     /// support is compiled in and enabled; empty otherwise. The SaaS gates the
     /// `parsers` option and the upload UI on this.
     pub parsers: Vec<&'static str>,
-    /// File-upload (`POST /v2/parse`) availability + limits.
+    /// File-upload availability + limits.
     pub file_upload: FileUploadCapabilities,
 }
 
@@ -53,6 +53,7 @@ pub struct DocumentCapabilities {
 #[serde(rename_all = "camelCase")]
 pub struct FileUploadCapabilities {
     pub supported: bool,
+    /// Upload path, as a value a client can join onto its API base.
     pub endpoint: &'static str,
     /// The ENFORCED body cap — the same value the `/v2/parse` body-limit layer
     /// applies (`document.max_upload_bytes`, clamped by the hard ceiling).
@@ -69,6 +70,16 @@ pub struct LlmCapabilities {
     /// `crw_extract::llm::SUPPORTED_PROVIDERS`, the same list the dispatcher
     /// validates against, so the advertisement cannot drift from reality.
     pub providers: Vec<&'static str>,
+    ///
+    /// The dispatcher accepts a custom `baseUrl`, but ONLY as part of a BYOK
+    /// request: `baseUrl` is read while building the per-request LLM config,
+    /// which is only built when the request also carries `llmApiKey`. Sending
+    /// `baseUrl` without a key leaves the server's own endpoint in force. The
+    /// server would otherwise be pointing its OWN key at a caller-chosen host,
+    /// so this is deliberate.
+    ///
+    /// Build-invariant: the dispatcher always compiles this in, so unlike the
+    /// other fields here there is no config that turns it off.
     pub supports_base_url: bool,
     /// True when a server-wide LLM key is configured (self-hosted /
     /// no-SaaS deploys). SaaS-fronted deploys set
@@ -90,6 +101,11 @@ pub struct FormatCapabilities {
     /// Formats that additionally need an LLM — a server key
     /// (`llm.serverKeyConfigured`) or a per-request `llmApiKey`. Without one,
     /// requesting them is a hard error, never a silent downgrade.
+    ///
+    /// When `llm.requireByokHeader` is set, the server key alone is NOT enough:
+    /// the scrape path rejects these formats unless the request carries
+    /// `llmApiKey`, even on a deploy that has a server key. Search has no such
+    /// guard.
     pub llm_required: Vec<&'static str>,
     /// Change-tracking diff modes this instance supports. Empty when the
     /// `changeTracking` format is unavailable. The SaaS capability-gate checks
