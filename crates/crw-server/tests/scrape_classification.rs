@@ -20,9 +20,8 @@ use wiremock::matchers::{method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
 fn html(status: u16, body: &str) -> ResponseTemplate {
-    ResponseTemplate::new(status)
-        .insert_header("content-type", "text/html")
-        .set_body_string(body.to_string())
+    // `set_body_string` would overwrite the content type with text/plain.
+    ResponseTemplate::new(status).set_body_raw(body.as_bytes().to_vec(), "text/html")
 }
 
 async fn origin() -> MockServer {
@@ -133,6 +132,63 @@ async fn v1_and_v2_classify_origin_responses_alike() {
             .is_empty(),
         "v2 wall body must be cleared: {two}"
     );
+}
+
+/// A selector that matches nothing is the caller's answer, not a failed fetch:
+/// `success:true` on both surfaces, an empty document, the `selector_no_match`
+/// warning, billed. The same empty body WITHOUT a selector still fails (`/empty`
+/// in the table above).
+#[tokio::test]
+async fn an_unmatched_selector_is_a_successful_empty_document_on_both_surfaces() {
+    let origin = origin().await;
+    let server = app();
+    let url = format!("{}/ok", origin.uri());
+
+    for extra in [
+        json!({ "includeTags": [".missing"] }),
+        json!({ "cssSelector": ".missing" }),
+        json!({ "xpath": "//section[@id='missing']" }),
+    ] {
+        let mut body = json!({ "url": url });
+        body.as_object_mut()
+            .unwrap()
+            .extend(extra.as_object().unwrap().clone());
+
+        let one: Value = server.post("/v1/scrape").json(&body).await.json();
+        assert_eq!(one["success"], true, "v1 {extra}: {one}");
+        assert!(one["error_code"].is_null(), "v1 {extra}: {one}");
+        assert!(
+            one["data"]["markdown"]
+                .as_str()
+                .unwrap_or_default()
+                .trim()
+                .is_empty(),
+            "v1 {extra}: {one}"
+        );
+        assert!(
+            one["data"]["warnings"]
+                .as_array()
+                .is_some_and(|w| w.iter().any(|w| w == "selector_no_match")),
+            "v1 {extra}: {one}"
+        );
+
+        // `/v2` only exposes `includeTags`; the other two are unknown fields there.
+        if extra.get("includeTags").is_none() {
+            continue;
+        }
+        let resp = server.post("/v2/scrape").json(&body).await;
+        let two: Value = resp.json();
+        assert_eq!(resp.status_code().as_u16(), 200, "v2 {extra}: {two}");
+        assert_eq!(two["success"], true, "v2 {extra}: {two}");
+        assert_eq!(
+            two["data"]["warning"], "selector_no_match",
+            "v2 {extra}: {two}"
+        );
+        assert_eq!(
+            two["data"]["metadata"]["creditsUsed"], 1,
+            "v2 {extra}: {two}"
+        );
+    }
 }
 
 #[tokio::test]

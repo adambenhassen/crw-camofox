@@ -7,6 +7,13 @@ and the project uses [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Fixed
+
+- **Scrape:** a selector that matches nothing (`includeTags`, `cssSelector`,
+  `xpath`) returns `success: true` with an empty document and the
+  `selector_no_match` warning, billed normally. It no longer fails as
+  `no_usable_content` and no longer triggers a JS-render escalation.
+
 ## [1.7.0] - 2026-10-18
 
 A compatibility release: `/v2` follows Firecrawl's success and error

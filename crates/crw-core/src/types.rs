@@ -859,6 +859,12 @@ impl ScrapeData {
     /// `chunk_strategy` rather than a format, and is a derived view of markdown
     /// rather than an independent ask.
     pub fn has_no_content(&self, formats: &[OutputFormat]) -> bool {
+        // A caller-supplied selector that matched nothing is the answer to the
+        // question asked, not a failed fetch: the document is empty by request and
+        // carries `selector_no_match`. Failing it would refund a correct result.
+        if self.selector_matched_nothing() {
+            return false;
+        }
         // An explicitly empty `formats` array asked for nothing, so nothing is
         // missing. `serde`'s default only fills in `[Markdown]` when the field is
         // absent — `"formats": []` reaches here as an empty slice, and `.any()`
@@ -869,6 +875,13 @@ impl ScrapeData {
             return false;
         }
         !formats.iter().any(|f| self.format_delivered(*f))
+    }
+
+    /// True when a selector the caller supplied (`includeTags`, `cssSelector`,
+    /// `xpath`) matched nothing, so the empty content is the requested narrowing
+    /// and not a fetch or extraction failure.
+    pub fn selector_matched_nothing(&self) -> bool {
+        self.warnings.iter().any(|w| w == "selector_no_match")
     }
 
     /// Whether the one field that carries `format` came back with something in it.
@@ -1426,6 +1439,17 @@ mod tests {
         assert!(!d.has_no_content(&[]));
         let empty = page(200, 0);
         assert!(!empty.has_no_content(&[]));
+    }
+
+    #[test]
+    fn has_no_content_accepts_a_selector_that_matched_nothing() {
+        // The caller narrowed to something the page does not have: the empty
+        // document is the answer. Without the warning the same shape is a failure.
+        let mut d = page(200, 0);
+        assert!(d.has_no_content(&[OutputFormat::Markdown]));
+        d.warnings.push("selector_no_match".to_string());
+        assert!(d.selector_matched_nothing());
+        assert!(!d.has_no_content(&[OutputFormat::Markdown]));
     }
 
     #[test]

@@ -360,6 +360,9 @@ async fn scrape_url_inner(
         && !needs_temp_fetcher
         && !renderer.js_renderer_names().is_empty()
         && req.formats.contains(&OutputFormat::Markdown)
+        // A caller selector that matched nothing left the content empty on
+        // purpose; a JS render would run the same selector and match nothing too.
+        && !data.selector_matched_nothing()
         // Never JS-render a PDF: even when parsing is disabled (`parsers: []`)
         // the document has no DOM to escalate into.
         && fetch_result.content_type.as_deref() != Some("application/pdf");

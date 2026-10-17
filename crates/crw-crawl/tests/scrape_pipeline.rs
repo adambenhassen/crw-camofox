@@ -341,20 +341,22 @@ async fn scrape_with(
 }
 
 /// A selector the caller supplied that matches nothing yields an empty document
-/// carrying `selector_no_match`, not the whole page and not a wall verdict. A
-/// JS tier is available, so the empty result's escalation must not bring the
-/// page back either.
+/// carrying `selector_no_match`, not the whole page and not a wall verdict. The
+/// empty result is the caller's answer, so it must not trigger the thin-page JS
+/// escalation either (the same selector would match nothing there too).
 #[tokio::test]
-async fn unmatched_selector_ships_empty_with_a_warning() {
+async fn unmatched_selector_ships_empty_with_a_warning_and_no_escalation() {
     for extra in [
         serde_json::json!({ "includeTags": [".missing"] }),
         serde_json::json!({ "cssSelector": ".missing" }),
         serde_json::json!({ "xpath": "//section[@id='missing']" }),
     ] {
-        let r = renderer_with_http(
-            tier("http", Ok(article(30))),
-            vec![tier("camofox", Ok(article(30)))],
-        );
+        let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let camofox = Arc::new(Counting {
+            inner: tier("camofox", Ok(article(30))),
+            calls: calls.clone(),
+        }) as Arc<dyn PageFetcher>;
+        let r = renderer_with_http(tier("http", Ok(article(30))), vec![camofox]);
         let data = scrape_with(&r, extra.clone()).await.expect("scrape");
         assert!(
             data.markdown
@@ -374,6 +376,11 @@ async fn unmatched_selector_ships_empty_with_a_warning() {
             1,
             "{extra}: {:?}",
             data.warnings
+        );
+        assert_eq!(
+            calls.load(std::sync::atomic::Ordering::SeqCst),
+            0,
+            "{extra}: the empty result is the answer, not a thin page to escalate"
         );
     }
 }
