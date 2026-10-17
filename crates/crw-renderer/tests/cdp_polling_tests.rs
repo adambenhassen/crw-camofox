@@ -22,13 +22,9 @@
 use std::collections::HashMap;
 use std::time::Duration;
 
-use axum::Router;
-use axum::response::Html;
-use axum::routing::get;
 use crw_core::Deadline;
 use crw_renderer::cdp::CdpRenderer;
 use crw_renderer::traits::PageFetcher;
-use tokio::net::TcpListener;
 
 fn tdl() -> Deadline {
     Deadline::now_plus(Duration::from_secs(60))
@@ -63,14 +59,19 @@ const DELAYED_CONTENT_HTML: &str = r#"<!doctype html>
 </body>
 </html>"#;
 
-async fn spawn_delayed_site() -> String {
-    let app = Router::new().route("/", get(|| async { Html(DELAYED_CONTENT_HTML) }));
-    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let addr = listener.local_addr().unwrap();
-    tokio::spawn(async move {
-        axum::serve(listener, app).await.unwrap();
-    });
-    format!("http://{addr}")
+/// The page as a `data:` URL. The CDP tier's outbound guard refuses private
+/// addresses, so a loopback test server would be blocked; `data:` never
+/// reaches a socket and the guard lets it through.
+fn delayed_site_url() -> String {
+    let mut url = String::from("data:text/html,");
+    for b in DELAYED_CONTENT_HTML.bytes() {
+        if b.is_ascii_alphanumeric() {
+            url.push(b as char);
+        } else {
+            url.push_str(&format!("%{b:02X}"));
+        }
+    }
+    url
 }
 
 fn cdp_ws_url() -> Option<String> {
@@ -81,7 +82,7 @@ fn cdp_ws_url() -> Option<String> {
 #[ignore = "requires CRW_CDP_WS_URL pointing to a live Chrome/CDP endpoint"]
 async fn polls_until_delayed_content_appears() {
     let ws_url = cdp_ws_url().expect("CRW_CDP_WS_URL must be set for this test");
-    let base_url = spawn_delayed_site().await;
+    let base_url = delayed_site_url();
 
     let renderer = CdpRenderer::new("chrome", &ws_url, 30_000, 2);
 
@@ -110,7 +111,7 @@ async fn explicit_wait_for_opts_out_of_polling() {
     // skipped. We pass 500 ms (well under the 2500 ms content injection),
     // so the returned HTML should still contain the placeholder.
     let ws_url = cdp_ws_url().expect("CRW_CDP_WS_URL must be set for this test");
-    let base_url = spawn_delayed_site().await;
+    let base_url = delayed_site_url();
 
     let renderer = CdpRenderer::new("chrome", &ws_url, 30_000, 2);
 
