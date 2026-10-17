@@ -377,3 +377,27 @@ async fn unmatched_selector_ships_empty_with_a_warning() {
         );
     }
 }
+
+/// A generic interstitial every tier serves: the HTTP tier, then the whole JS
+/// ladder. Short enough that the page classifier calls it `structural_failure`.
+fn generic_wall() -> String {
+    "<html><body><p>Checking your browser before accessing the site</p></body></html>".to_string()
+}
+
+/// The ladder used to raise this as an error (HTTP 502 at the server). It now
+/// comes back as data, and the choke must name it `anti_bot`, not let the
+/// classifier's `structural_failure` ("nothing usable was fetched") win.
+#[tokio::test]
+async fn a_wall_no_tier_can_clear_is_a_generic_block_not_a_structural_failure() {
+    let r = renderer_with_http(
+        tier("http", Ok(generic_wall())),
+        vec![
+            tier("lightpanda", Ok(generic_wall())),
+            tier("camofox", Ok(generic_wall())),
+        ],
+    );
+    let data = scrape(&r).await.expect("a wall is a verdict, not an error");
+    let block = data.block.expect("the wall must be stamped");
+    assert_eq!(block.vendor, "generic_block", "{block:?}");
+    assert!(block.is_wall());
+}

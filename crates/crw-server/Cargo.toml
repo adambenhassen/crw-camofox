@@ -53,6 +53,7 @@ futures = { workspace = true }
 tokio = { workspace = true }
 axum-test = { workspace = true }
 wiremock = { workspace = true }
+async-trait = "0.1"
 serde_json = { workspace = true }
 toml = { workspace = true }
 crw-server = { path = ".", features = ["test-utils"] }

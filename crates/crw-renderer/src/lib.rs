@@ -291,6 +291,54 @@ fn is_origin_fault_for_breaker(e: &CrwError) -> bool {
 /// A shared constant so the producer and that consumer cannot drift.
 pub const JS_ESCALATION_FAILED: &str = "js_escalation_failed:";
 
+/// Did the JS ladder end on a generic anti-bot wall no tier could clear?
+///
+/// The ladder tail hands such a body back as `Ok` with the verdict on
+/// [`FetchResult::wall`]. It used to raise `CrwError::HttpError`, which the
+/// server maps to 502: a target refusing us was reported as our own gateway
+/// failing, and SDKs retried it. Carried as data, the scrape choke turns it into
+/// `success: false` + `anti_bot` at HTTP 200, like every other wall.
+///
+/// The predicate is the tail's own condition (`looks_like_generic_bot_wall` is
+/// narrower than the page classifier and is not run on every page), so it
+/// identifies exactly the results that used to be that error. `wall` alone does
+/// not: the ladder also stamps it on vendor walls it returned as ordinary `Ok`
+/// results, and those keep their existing handling.
+pub fn is_unclearable_wall(r: &FetchResult) -> bool {
+    r.wall.is_some() && detector::looks_like_generic_bot_wall(&r.html)
+}
+
+/// A ladder result that is nothing but a wall loses to a usable fallback body.
+///
+/// While the wall verdict was an error this preference was automatic: the ladder
+/// "failed", and the fallback arm substituted the HTTP body whenever that body
+/// was not itself a wall. Now that the verdict travels as data the preference has
+/// to be stated, or a wall every tier rejected would displace a page we can
+/// serve. Demoting re-enters the existing substitution arm unchanged, so the
+/// fallback keeps its warning, timing and metric.
+///
+/// `may_substitute` is false for a hard renderer pin, where there is no
+/// substitution to prefer and the caller is better served by the verdict itself.
+fn demote_wall_to_ladder_failure(
+    js: CrwResult<FetchResult>,
+    fallback_html: &str,
+    may_substitute: bool,
+) -> CrwResult<FetchResult> {
+    match js {
+        Ok(r)
+            if may_substitute
+                && is_unclearable_wall(&r)
+                && !detector::looks_like_generic_bot_wall(fallback_html) =>
+        {
+            let reason = r.wall.map(|w| w.reason).unwrap_or_default();
+            Err(CrwError::RendererError(format!(
+                "anti-bot wall that no renderer tier could clear ({reason})"
+            )))
+        }
+        other => other,
+    }
+}
+
 /// Soft-block / soft-error status codes where the body often contains real
 /// content despite the status header. Sources:
 ///   - UA/header-based bot filters: 401, 403, 405, 406, 412
@@ -1209,8 +1257,10 @@ impl FallbackRenderer {
                     let challenged = http_result.warning.as_deref() == Some("cloudflare_mitigated")
                         || detector::looks_like_cloudflare_challenge(&http_result.html)
                         || detector::looks_like_generic_bot_wall(&http_result.html);
-                    match self
-                        .fetch_with_js(
+                    // A ladder result that is nothing but a wall must not
+                    // displace a usable HTTP body: see the helper.
+                    let js_outcome = demote_wall_to_ladder_failure(
+                        self.fetch_with_js(
                             url,
                             headers,
                             wait_for_ms,
@@ -1218,14 +1268,23 @@ impl FallbackRenderer {
                             challenged,
                             deadline,
                         )
-                        .await
-                    {
+                        .await,
+                        &http_result.html,
+                        !is_hard_pinned,
+                    );
+                    match js_outcome {
                         Ok(js_result) => Ok(js_result),
                         // An explicit renderer pin is a caller contract that
                         // forbids silent substitution: fail closed. So does a
-                        // shell that IS the wall the ladder just refused to clear:
-                        // returning it hands back exactly what every tier
-                        // rejected. A shell that is not a wall still substitutes.
+                        // shell that IS a wall: returning it hands back a wall
+                        // as content. A shell that is not a wall still
+                        // substitutes.
+                        //
+                        // A ladder that ran into the wall does not land here:
+                        // its tail answers `Ok` carrying the verdict, which the
+                        // arm above passes through. An `Err` means no tier
+                        // produced a body (a timeout, a full pool, every breaker
+                        // open), so the failure is ours and keeps its 5xx.
                         Err(e)
                             if is_hard_pinned
                                 || detector::looks_like_generic_bot_wall(&http_result.html) =>
@@ -1442,8 +1501,9 @@ impl FallbackRenderer {
                             "HTTP 2xx but body is thin, escalating to JS renderer"
                         );
                     }
-                    match self
-                        .fetch_with_js(
+                    // Same preference as the sibling arm above.
+                    let js_outcome = demote_wall_to_ladder_failure(
+                        self.fetch_with_js(
                             url,
                             headers,
                             wait_for_ms,
@@ -1451,16 +1511,20 @@ impl FallbackRenderer {
                             is_blocked,
                             deadline,
                         )
-                        .await
-                    {
+                        .await,
+                        &result.html,
+                        !is_hard_pinned,
+                    );
+                    match js_outcome {
                         Ok(js_result) => Ok(js_result),
                         Err(e)
                             if is_hard_pinned
                                 || detector::looks_like_generic_bot_wall(&result.html) =>
                         {
                             // Pinned: the caller's contract forbids substitution.
-                            // Wall: see the sibling arm — the shell is the very
-                            // thing the ladder rejected, so it is not a fallback.
+                            // Wall: see the sibling arm. The shell is not a
+                            // fallback, and an `Err` here is our own failure,
+                            // not the ladder's verdict on the wall.
                             Err(e)
                         }
                         Err(e) => {
@@ -2271,12 +2335,19 @@ impl FallbackRenderer {
             // Scoped deliberately to the generic phrase-list wall. A genuinely thin
             // but real page still ships, because returning the best available body
             // is the point of this tail.
+            //
+            // The verdict travels as DATA, not as an error. It used to be
+            // `CrwError::HttpError`, which `crw-server` maps to 502, so a target
+            // refusing us was reported as our own gateway failing and SDKs
+            // retried it. `crw_crawl::single` stamps it at the shared choke,
+            // where every other wall becomes `success: false` + `anti_bot`.
+            // Callers holding a usable HTTP body demote this result back to a
+            // ladder failure first (`demote_wall_to_ladder_failure`).
             if detector::looks_like_generic_bot_wall(&result.html) {
-                return Err(CrwError::HttpError(format!(
-                    "blocked by an anti-bot wall that none of the {} renderer tier(s) \
-                     attempted could clear",
-                    chain.len().max(1),
-                )));
+                result.wall.get_or_insert_with(|| BlockOutcome {
+                    vendor: "generic_block".to_string(),
+                    reason: "anti-bot wall that no renderer tier could clear".to_string(),
+                });
             }
             Ok(result)
         } else {
@@ -3793,19 +3864,18 @@ mod tests {
             )
             .await;
 
-        match out {
-            Err(CrwError::HttpError(msg)) => {
-                assert!(
-                    msg.contains("anti-bot wall"),
-                    "expected the wall to be named, got: {msg}"
-                );
-            }
-            Ok(r) => panic!(
-                "a wall no tier could clear must not ship as a success: rendered_with={:?} html={:?}",
-                r.rendered_with, r.html
-            ),
-            Err(e) => panic!("expected HttpError naming the wall, got {e:?}"),
-        }
+        // The judgement is unchanged: a wall no tier could clear is not content.
+        // Only its carrier moved. It used to be `CrwError::HttpError`, which the
+        // server maps to 502 and which told the caller our gateway had broken
+        // when the target had refused us. It now rides on the result, so the
+        // scrape choke can turn it into `success: false` + `anti_bot` at 200.
+        let out = out.expect("a wall is a verdict about the page, not a transport failure");
+        let wall = out
+            .wall
+            .as_ref()
+            .expect("a wall no tier could clear must carry its verdict");
+        assert_eq!(wall.vendor, "generic_block");
+        assert!(is_unclearable_wall(&out));
     }
 
     /// The other half of the same gate: a page that is merely thin, with no
@@ -3840,10 +3910,11 @@ mod tests {
                 tdl(),
             )
             .await;
+        let out = out.expect("a thin but wall-free body must still be returned");
         assert!(
-            out.is_ok(),
-            "a thin but wall-free body must still be returned, got {:?}",
-            out.err()
+            out.wall.is_none(),
+            "a wall-free thin page must not be turned into anti_bot by the tail: {:?}",
+            out.wall
         );
     }
 
@@ -3877,11 +3948,154 @@ mod tests {
                 tdl(),
             )
             .await;
+        let out = out.expect("a wall is a verdict about the page, not a transport failure");
         assert!(
-            out.is_err(),
-            "the wall must not come back through the HTTP shell: {:?}",
-            out.ok().map(|r| (r.rendered_with, r.html.len()))
+            is_unclearable_wall(&out),
+            "the wall must come back carrying its verdict, not as content: {:?}",
+            (out.rendered_with.as_deref(), out.html.len(), &out.wall)
         );
+    }
+
+    /// The same substitution, with a shell that is NOT a wall. The recall half of
+    /// the pair: the HTTP body is real content the ladder failed to improve on,
+    /// so it ships clean, with no verdict. Getting this wrong turns every failed
+    /// escalation into a block.
+    #[tokio::test]
+    async fn http_shell_fallback_still_substitutes_a_real_page() {
+        let wall = "<html><body><h1>Security Check</h1>\
+                    <p>Checking your browser before accessing the site</p></body></html>";
+        let real = "<html><body><article><h1>Real page</h1><p>\
+                    Enough prose here that nothing could mistake this for an \
+                    interstitial shell of any kind whatsoever.</p></article></body></html>";
+        let lp = Arc::new(MockFetcher {
+            name: "lightpanda",
+            behavior: MockBehavior::Ok(wall.to_string()),
+        }) as Arc<dyn PageFetcher>;
+        let mut r = make_renderer_with_mocks(vec![lp]);
+        r.http = Arc::new(MockFetcher {
+            name: "http",
+            behavior: MockBehavior::Ok(real.to_string()),
+        });
+
+        let out = r
+            .fetch(
+                "https://example.com",
+                &HashMap::new(),
+                Some(true),
+                None,
+                None,
+                tdl(),
+            )
+            .await
+            .expect("a real HTTP body must still substitute for a failed ladder");
+        assert!(out.html.contains("Real page"));
+        assert!(out.wall.is_none(), "a real page carries no verdict");
+    }
+
+    /// The production default path: no `renderJs`, a 403 that still serves the
+    /// real page, and a ladder that only ever meets a wall. The walled ladder
+    /// result must lose to the real HTTP body, which ships with no verdict.
+    #[tokio::test]
+    async fn auto_mode_403_with_real_content_beats_a_walled_ladder() {
+        let wall = "<html><body><h1>Security Check</h1>\
+                    <p>Checking your browser before accessing the site</p></body></html>";
+        let article = format!(
+            "<html><body><article><h1>Real page</h1><p>{}</p></article></body></html>",
+            "Genuine prose that no detector could mistake for an interstitial. ".repeat(20)
+        );
+        let lp = Arc::new(MockFetcher {
+            name: "lightpanda",
+            behavior: MockBehavior::Ok(wall.to_string()),
+        }) as Arc<dyn PageFetcher>;
+        let camofox = Arc::new(MockFetcher {
+            name: "camofox",
+            behavior: MockBehavior::Ok(wall.to_string()),
+        }) as Arc<dyn PageFetcher>;
+        let mut r = make_renderer_with_mocks(vec![lp, camofox]);
+        r.http = Arc::new(MockFetcher {
+            name: "http",
+            behavior: MockBehavior::OkStatus(403, article),
+        });
+
+        let out = r
+            .fetch(
+                "https://example.com",
+                &HashMap::new(),
+                None,
+                None,
+                None,
+                tdl(),
+            )
+            .await
+            .expect("the real HTTP body must ship");
+
+        assert!(
+            out.html.contains("Real page"),
+            "the wall displaced the page"
+        );
+        assert_eq!(out.status_code, 403);
+        assert!(
+            out.wall.is_none(),
+            "a real page carries no verdict: {:?}",
+            out.wall
+        );
+        assert!(
+            out.warning
+                .as_deref()
+                .is_some_and(|w| w.contains(JS_ESCALATION_FAILED)),
+            "precondition: the ladder ran and lost, warning={:?}",
+            out.warning
+        );
+    }
+
+    /// A walled HTTP shell behind a ladder that failed for OUR reasons: no tier
+    /// produced a body (a timeout, a full pool). That is not a verdict on the
+    /// wall, so it must not become `anti_bot`; it keeps the ladder's own error.
+    /// Covers both fallback arms: forced JS, and the auto arm a 403 escalates
+    /// through.
+    #[tokio::test]
+    async fn a_ladder_that_never_reached_the_wall_keeps_its_own_error() {
+        let wall = "<html><body><h1>Security Check</h1>\
+                    <p>Checking your browser before accessing the site</p></body></html>";
+        for (render_js, http) in [
+            (Some(true), MockBehavior::Ok(wall.to_string())),
+            (None, MockBehavior::OkStatus(403, wall.to_string())),
+        ] {
+            for (tier, expect_timeout) in [
+                (MockBehavior::Timeout, true),
+                (MockBehavior::Err("cdp pool exhausted".into()), false),
+            ] {
+                let lp = Arc::new(MockFetcher {
+                    name: "lightpanda",
+                    behavior: tier,
+                }) as Arc<dyn PageFetcher>;
+                let mut r = make_renderer_with_mocks(vec![lp]);
+                r.http = Arc::new(MockFetcher {
+                    name: "http",
+                    behavior: http.clone(),
+                });
+
+                let out = r
+                    .fetch(
+                        "https://example.com",
+                        &HashMap::new(),
+                        render_js,
+                        None,
+                        None,
+                        tdl(),
+                    )
+                    .await;
+
+                match out {
+                    Err(CrwError::Timeout(_)) if expect_timeout => {}
+                    Err(CrwError::RendererError(_)) if !expect_timeout => {}
+                    other => panic!(
+                        "render_js={render_js:?}: expected the ladder's own error, got {:?}",
+                        other.map(|r| r.wall)
+                    ),
+                }
+            }
+        }
     }
 
     /// The same rule when the JS tier TIMES OUT instead of reporting a navigation

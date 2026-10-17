@@ -592,6 +592,23 @@ async fn scrape_url_inner(
     if data.block.is_none() && data.is_error_page_sized() {
         data.block = fetch_result.wall.clone();
     }
+    // A generic wall the whole ladder failed to clear. The renderer used to raise
+    // it as an error (HTTP 502, which SDKs retry); it now carries the verdict.
+    // The ladder's "no tier could clear this" is a stronger claim than the
+    // classifier's `structural_failure` ("a page was fetched and held nothing
+    // usable"), which would route the result to `no_usable_content` instead of
+    // `anti_bot`, so it replaces that verdict. A NAMED verdict from the classifier
+    // still wins (the routing registry learns vendors from it). Scoped to this
+    // case on purpose: every other carried wall keeps the rule above, where a
+    // structural verdict stands.
+    if crw_renderer::is_unclearable_wall(&fetch_result)
+        && data
+            .block
+            .as_ref()
+            .is_none_or(|b| b.vendor == crw_core::types::STRUCTURAL_FAILURE_VENDOR)
+    {
+        data.block = fetch_result.wall.clone();
+    }
     // Surface redirect mismatch as warning. Helps detect cases like
     // northernair.ca/history.htm silently 302'ing to the homepage — extraction
     // looks "successful" but the user got the wrong page.
@@ -1539,6 +1556,27 @@ mod tests {
         )
         .expect("a Cloudflare challenge must not ship");
         assert_eq!(b.vendor, "cloudflare");
+    }
+
+    /// Why the choke lets the ladder's carried verdict replace a structural one:
+    /// on its own, the classifier calls a short generic interstitial "nothing
+    /// usable was fetched", which would answer `no_usable_content`, not `anti_bot`.
+    #[test]
+    fn classifier_alone_calls_a_short_generic_wall_structural() {
+        let md = "Checking your browser before accessing the site";
+        let html = format!("<html><body><p>{md}</p></body></html>");
+        assert!(crw_renderer::detector::looks_like_generic_bot_wall(&html));
+        let b = classify_block(
+            200,
+            Some("text/html"),
+            &html,
+            Some(md),
+            THRESH,
+            "https://a.example/",
+            None,
+        )
+        .expect("a short wall is not clean content");
+        assert_eq!(b.vendor, crw_core::types::STRUCTURAL_FAILURE_VENDOR);
     }
 
     #[test]
