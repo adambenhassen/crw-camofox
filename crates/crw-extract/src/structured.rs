@@ -287,7 +287,7 @@ pub(crate) async fn call_anthropic(
     let status = resp.status();
     let text = resp.text().await.map_err(|e| {
         CrwError::ExtractionError(format!(
-            "Failed to read Anthropic response: {}",
+            "Failed to read Anthropic response ({status}): {}",
             request_error_text(e, budget)
         ))
     })?;
@@ -559,7 +559,7 @@ pub(crate) async fn call_openai(
     let status = resp.status();
     let text = resp.text().await.map_err(|e| {
         CrwError::ExtractionError(format!(
-            "Failed to read OpenAI response: {}",
+            "Failed to read OpenAI response ({status}): {}",
             request_error_text(e, budget)
         ))
     })?;
