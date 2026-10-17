@@ -326,7 +326,7 @@ impl PageSource for EngineSource {
                     )
                     .await
                     {
-                        Ok(data) => out.push(scrape_to_page(url, data)),
+                        Ok(data) => out.push(scrape_target_page(url, data)),
                         Err(e) => out.push(FetchedPage {
                             url: url.clone(),
                             markdown: String::new(),
@@ -443,6 +443,24 @@ impl EngineSource {
                 return Ok(data);
             }
         }
+    }
+}
+
+/// A scrape target's page. A walled scrape is a failed fetch, not a page: its
+/// interstitial text would otherwise be hashed as the page's content, and the
+/// next clean fetch would read as a change. `scrape_url` reports a wall as a
+/// verdict on an `Ok` document (it used to be an `Err` for the generic case), so
+/// the verdict has to be read here, as the other surfaces read it.
+fn scrape_target_page(url: &str, data: crw_core::types::ScrapeData) -> FetchedPage {
+    match data.block.as_ref().filter(|b| b.is_wall()) {
+        Some(block) => FetchedPage {
+            url: url.to_string(),
+            markdown: String::new(),
+            json: None,
+            content_type: None,
+            error: Some(block.message()),
+        },
+        None => scrape_to_page(url, data),
     }
 }
 
@@ -660,6 +678,34 @@ mod tests {
         .unwrap();
         assert_eq!(r.counts.error, 1);
         assert_eq!(r.pages[0].status, PageStatus::Error);
+    }
+
+    #[test]
+    fn a_walled_scrape_is_an_error_page_not_content() {
+        let mut data = crw_core::types::ScrapeData {
+            markdown: Some("Checking your browser".into()),
+            ..Default::default()
+        };
+        data.block = Some(crw_core::types::BlockOutcome {
+            vendor: "generic_block".into(),
+            reason: "wall".into(),
+        });
+        let page = scrape_target_page("https://ex.com/a", data);
+        assert!(page.error.is_some_and(|e| e.contains("generic_block")));
+        assert!(page.markdown.is_empty());
+
+        // A thin or parked page is still a page.
+        let mut data = crw_core::types::ScrapeData {
+            markdown: Some("short".into()),
+            ..Default::default()
+        };
+        data.block = Some(crw_core::types::BlockOutcome {
+            vendor: crw_core::types::STRUCTURAL_FAILURE_VENDOR.into(),
+            reason: "thin".into(),
+        });
+        let page = scrape_target_page("https://ex.com/a", data);
+        assert!(page.error.is_none());
+        assert_eq!(page.markdown, "short");
     }
 
     #[test]
