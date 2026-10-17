@@ -18,7 +18,7 @@ use axum_test::TestServer;
 use crw_core::Deadline;
 use crw_core::config::{AppConfig, RendererMode};
 use crw_core::error::CrwResult;
-use crw_core::types::FetchResult;
+use crw_core::types::{CrawlRequest, CrawlState, CrawlStatus, FetchResult, ScrapeRequest};
 use crw_renderer::FallbackRenderer;
 use crw_renderer::http_only::HttpFetcher;
 use crw_renderer::traits::PageFetcher;
@@ -108,10 +108,15 @@ async fn origin() -> MockServer {
 }
 
 fn app() -> TestServer {
+    TestServer::new(create_app(walled_state()))
+}
+
+fn walled_state() -> AppState {
     // SAFETY: one binary per tests/*.rs, set before any fetcher is built.
     unsafe { std::env::set_var("CRW_ALLOW_LOOPBACK_FOR_TESTS", "1") };
     let mut cfg = AppConfig::default();
     cfg.renderer.mode = RendererMode::None;
+    cfg.crawler.respect_robots_txt = false;
     let mut state = AppState::new(cfg).expect("AppState");
     let tier = |name| {
         Arc::new(StaticTier {
@@ -137,7 +142,19 @@ fn app() -> TestServer {
         vec![tier("lightpanda"), tier("camofox")],
     );
     state.renderer = Arc::new(renderer);
-    TestServer::new(create_app(state))
+    state
+}
+
+async fn settled(state: &AppState, id: uuid::Uuid) -> CrawlState {
+    for _ in 0..200 {
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        let jobs = state.crawl_jobs.read().await;
+        let s = jobs.get(&id).expect("job").rx.borrow().clone();
+        if !matches!(s.status, CrawlStatus::InProgress) {
+            return s;
+        }
+    }
+    panic!("job did not settle");
 }
 
 async fn post(server: &TestServer, route: &str, url: &str) -> (u16, Value) {
@@ -183,6 +200,10 @@ async fn v2_scrape_fails_a_wall_no_tier_can_clear_without_a_502() {
             .is_some_and(|e| e.contains("anti-bot")),
         "v2 must say why: {body}"
     );
+    assert_eq!(
+        body["data"]["metadata"]["creditsUsed"], 0,
+        "a wall is never billed: {body}"
+    );
     assert!(
         body["data"]["markdown"]
             .as_str()
@@ -214,4 +235,38 @@ async fn a_walled_ladder_does_not_displace_a_403_page_with_real_content() {
             .contains("real paragraph of article prose"),
         "the real page must survive: {body}"
     );
+}
+
+/// Batch and crawl take the same verdict through `scrape_url` / the renderer:
+/// the wall is counted `blocked` (so `completed - blocked` leaves it unbilled)
+/// and its shell is cleared.
+#[tokio::test]
+async fn batch_counts_a_wall_no_tier_can_clear_as_blocked() {
+    let origin = origin().await;
+    let state = walled_state();
+    let url = format!("{}/wall", origin.uri());
+    let id = state
+        .start_batch_job(vec![url], ScrapeRequest::default())
+        .await;
+    let s = settled(&state, id).await;
+
+    assert_eq!((s.completed, s.blocked), (1, 1), "{s:?}");
+    let page = &s.data[0];
+    assert!(page.block.as_ref().is_some_and(|b| b.is_wall()), "{page:?}");
+    assert!(page.markdown.is_none(), "the shell must be cleared");
+}
+
+#[tokio::test]
+async fn crawl_counts_a_wall_no_tier_can_clear_as_blocked() {
+    let origin = origin().await;
+    let state = walled_state();
+    let req: CrawlRequest =
+        serde_json::from_value(json!({ "url": format!("{}/wall", origin.uri()) }))
+            .expect("crawl request");
+    let id = state.start_crawl_job(req).await;
+    let s = settled(&state, id).await;
+
+    assert_eq!((s.completed, s.blocked), (1, 1), "{s:?}");
+    assert!(s.data[0].block.as_ref().is_some_and(|b| b.is_wall()));
+    assert!(s.data[0].markdown.is_none());
 }

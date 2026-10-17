@@ -337,6 +337,32 @@ async fn run_crawl_inner(opts: CrawlOptions<'_>) {
             }
         };
 
+        // A generic wall no renderer tier could clear. The renderer used to raise
+        // it as an error, which the arm above turned into a failed page; it now
+        // carries the verdict on the result, so take the same exit: no
+        // extraction, no links followed from the wall, and counted in `blocked`
+        // so the caller's `completed - blocked` keeps it unbilled.
+        if crw_renderer::is_unclearable_wall(&fetch_result)
+            && let Some(verdict) = fetch_result.wall.take()
+        {
+            tracing::warn!(
+                url,
+                reason = %verdict.reason,
+                "Crawl: no browser tier could do better for this page, not crawled"
+            );
+            let mut page = failed_page(&url, fetch_result.status_code, verdict.reason.clone());
+            page.block = Some(verdict);
+            push_failed_page(
+                page,
+                id,
+                &state_tx,
+                &mut results,
+                &mut blocked,
+                visited.len() as u32,
+            );
+            continue;
+        }
+
         // The CDN answered for a dead origin, so this page has no content and no
         // links worth following: its body is the CDN's error page. It is
         // recorded as a blocked page rather than a crawled one: a crawl of a
@@ -935,6 +961,12 @@ pub async fn discover_urls(opts: DiscoverOptions<'_>) -> CrwResult<DiscoverResul
                     .fetch(&u, &empty, Some(true), None, None, deadline)
                     .await
                 {
+                    // A wall no tier could clear is not the sitemap, whatever
+                    // markup it holds. It used to arrive as the error below.
+                    Ok(r) if crw_renderer::is_unclearable_wall(&r) => {
+                        tracing::debug!("sitemap escalation render hit a wall for {u}");
+                        None
+                    }
                     Ok(r) => Some(r.html),
                     Err(e) => {
                         tracing::debug!("sitemap escalation render failed for {u}: {e}");
@@ -1107,6 +1139,11 @@ pub async fn discover_urls(opts: DiscoverOptions<'_>) -> CrwResult<DiscoverResul
                         .fetch(&url, &empty_headers, None, None, None, discover_deadline)
                         .await
                         .ok()?;
+                    // A wall no tier could clear has no links worth listing.
+                    // Dropped exactly as the error it used to arrive as.
+                    if crw_renderer::is_unclearable_wall(&result) {
+                        return None;
+                    }
                     Some((url, result.html))
                 }
             }))
