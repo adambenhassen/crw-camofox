@@ -32,8 +32,11 @@ pub fn create_app(state: AppState) -> Router {
     // v1 + v2 routers merged before the shared auth + rate-limit layers, so the
     // /v2/* surface (issue #62) inherits auth, rate-limiting, body-limit and the
     // timeout layer identically to v1. `/mcp` is version-less.
+    // The `/v2/parse` body limit is installed at router-build time, so the
+    // effective upload cap is resolved here from config and passed in.
+    let max_upload_bytes = routes::v2::parse::effective_max_upload_bytes(&state.config);
     let api_routes = routes::v1::router()
-        .merge(routes::v2::router())
+        .merge(routes::v2::router(max_upload_bytes))
         .route(
             "/mcp",
             post(routes::mcp::mcp_handler).fallback(method_not_allowed),
