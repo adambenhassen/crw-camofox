@@ -7,6 +7,18 @@ and the project uses [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [1.6.1] - 2026-10-17
+
+Ships 1.6.0. The 1.6.0 tag never published an image: its release check
+failed on a lint that Rust 1.99 added. No functional change from 1.6.0.
+
+### Changed
+
+- **Build:** CI, release and preflight now use Rust 1.98.1, the same version
+  as the Docker builder, instead of the newest stable. A new Rust release can
+  no longer fail a release with no code change.
+- **Dependencies:** `async-trait` 0.1.92, which passes clippy 1.99.
+
 ## [1.6.0] - 2026-10-17
 
 An upstream-sync release: crawl, extraction and wall handling fixes ported
@@ -405,6 +417,7 @@ machinery is removed.
 - Structured-extraction (Anthropic) chat URL no longer doubles `/v1`.
 - Engine cap and camofox-mcp configuration corrected against a live Docker stack.
 
+[1.6.1]: https://github.com/adambenhassen/crw-camofox/compare/v1.6.0...v1.6.1
 [1.6.0]: https://github.com/adambenhassen/crw-camofox/compare/v1.5.0...v1.6.0
 [1.5.0]: https://github.com/adambenhassen/crw-camofox/compare/v1.4.0...v1.5.0
 [1.4.0]: https://github.com/adambenhassen/crw-camofox/compare/v1.3.0...v1.4.0
