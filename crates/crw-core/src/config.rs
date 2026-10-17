@@ -1423,6 +1423,10 @@ pub struct LlmConfig {
     /// value when it is one of their levels (`low` to `max`), else `low`.
     #[serde(default)]
     pub reasoning_effort: Option<String>,
+    /// Budget in milliseconds for one structured-extraction LLM call; the
+    /// change-tracking judge uses it too. Raise it for slow self-hosted models.
+    #[serde(default = "default_llm_timeout_ms")]
+    pub timeout_ms: u64,
 }
 
 impl Default for LlmConfig {
@@ -1439,8 +1443,13 @@ impl Default for LlmConfig {
             require_byok_header: None,
             temperature: None,
             reasoning_effort: None,
+            timeout_ms: default_llm_timeout_ms(),
         }
     }
+}
+
+fn default_llm_timeout_ms() -> u64 {
+    60_000
 }
 
 fn default_llm_max_concurrency() -> usize {
@@ -2241,6 +2250,33 @@ model = "deepseek-chat"
         let llm = cfg.extraction.llm.expect("llm config present");
         assert_eq!(llm.provider, "deepseek");
         assert_eq!(llm.api_key, "sk-test");
+    }
+
+    #[test]
+    fn llm_timeout_ms_defaults_to_sixty_seconds() {
+        assert_eq!(LlmConfig::default().timeout_ms, 60_000);
+        let l: LlmConfig = toml::from_str("api_key = \"k\"").unwrap();
+        assert_eq!(l.timeout_ms, 60_000, "an absent key keeps the old bound");
+    }
+
+    #[test]
+    fn llm_timeout_ms_reads_from_toml_and_env() {
+        let l: LlmConfig = toml::from_str("api_key = \"k\"\ntimeout_ms = 120000").unwrap();
+        assert_eq!(l.timeout_ms, 120_000);
+
+        let _g = ENV_LOCK.lock().unwrap();
+        clear_renderer_env();
+        unsafe {
+            std::env::set_var("CRW_EXTRACTION__LLM__API_KEY", "sk-env-key");
+            std::env::set_var("CRW_EXTRACTION__LLM__TIMEOUT_MS", "120000");
+        }
+        let cfg = AppConfig::load().unwrap();
+        unsafe {
+            std::env::remove_var("CRW_EXTRACTION__LLM__API_KEY");
+            std::env::remove_var("CRW_EXTRACTION__LLM__TIMEOUT_MS");
+        }
+        let llm = cfg.extraction.llm.expect("llm config from env");
+        assert_eq!(llm.timeout_ms, 120_000);
     }
 
     #[test]

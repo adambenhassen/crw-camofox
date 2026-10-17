@@ -106,3 +106,70 @@ async fn anthropic_thinking_block_before_text_json_is_skipped() {
         .unwrap();
     assert_eq!(value, json!({ "name": "Bob" }));
 }
+
+/// A model slower than `[extraction.llm] timeout_ms` fails with an error that
+/// names the key, on both transports. The pooled client's fixed 60 s bound would
+/// otherwise let the 1.5 s answer through.
+#[tokio::test]
+async fn timeout_ms_bounds_extraction_and_names_itself() {
+    let server = MockServer::start().await;
+    let answer = json!({ "name": "Ada" });
+    let openai = json!({
+        "choices": [{ "message": { "tool_calls": [{
+            "id": "c1", "type": "function",
+            "function": { "name": "extract_data", "arguments": answer.to_string() }
+        }] } }],
+        "usage": { "prompt_tokens": 5, "completion_tokens": 5, "total_tokens": 10 }
+    });
+    let anthropic = json!({
+        "content": [{ "type": "tool_use", "id": "t1", "name": "extract_data", "input": answer }],
+        "usage": { "input_tokens": 5, "output_tokens": 5 }
+    });
+    for (route, body) in [
+        ("/v1/chat/completions", openai),
+        ("/v1/messages", anthropic),
+    ] {
+        Mock::given(method("POST"))
+            .and(path(route))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_json(body)
+                    .set_delay(std::time::Duration::from_millis(1500)),
+            )
+            .mount(&server)
+            .await;
+    }
+    let schema = json!({ "type": "object", "properties": { "name": { "type": "string" } } });
+    let base = format!("{}/v1", server.uri());
+    for llm in [
+        LlmConfig {
+            provider: "openai".into(),
+            ..anthropic_llm(base.clone())
+        },
+        anthropic_llm(base.clone()),
+    ] {
+        let provider = llm.provider.clone();
+        let slow = LlmConfig {
+            timeout_ms: 1000,
+            ..llm.clone()
+        };
+        let err = crw_extract::structured::extract_structured("Ada.", &schema, &slow)
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.contains("timed out after 1s") && err.contains("timeout_ms"),
+            "{provider}: {err}"
+        );
+
+        // Control: a budget above the model's latency still answers.
+        let roomy = LlmConfig {
+            timeout_ms: 10_000,
+            ..llm
+        };
+        let value = crw_extract::structured::extract_structured("Ada.", &schema, &roomy)
+            .await
+            .unwrap_or_else(|e| panic!("{provider}: {e}"));
+        assert_eq!(value, answer, "{provider}");
+    }
+}

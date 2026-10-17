@@ -131,3 +131,36 @@ async fn judge_rejects_invalid_confidence_via_schema() {
         "confidence outside low|medium|high must fail schema validation"
     );
 }
+
+/// The judge shares `[extraction.llm] timeout_ms`: a slow model fails with the
+/// budget named instead of riding the pooled client's fixed 60 s bound.
+#[tokio::test]
+async fn judge_honours_timeout_ms() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/v1/chat/completions"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .set_body_json(tool_call_response(json!({
+                    "meaningful": false,
+                    "confidence": "low",
+                    "reason": "Nothing changed."
+                })))
+                .set_delay(std::time::Duration::from_millis(1500)),
+        )
+        .mount(&server)
+        .await;
+
+    let llm = LlmConfig {
+        timeout_ms: 1000,
+        ..mock_llm(format!("{}/v1", server.uri()))
+    };
+    let err = judge_change("goal", Some("+x\n"), None, &llm, None)
+        .await
+        .expect_err("a model slower than timeout_ms must fail")
+        .to_string();
+    assert!(
+        err.contains("timed out after 1s") && err.contains("timeout_ms"),
+        "{err}"
+    );
+}

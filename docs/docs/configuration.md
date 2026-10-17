@@ -110,6 +110,7 @@ provider = "anthropic"       # "anthropic", "openai", "azure", or "openai-compat
 api_key = ""
 model = "claude-sonnet-4-6"
 max_tokens = 4096
+timeout_ms = 60000           # LLM budget for one JSON extraction call (also the change-tracking judge)
 # reasoning_effort = ""      # forwarded when set; Anthropic generation 5 models run at "low" when unset
 max_html_bytes = 100000      # content fed to LLM is truncated at this byte count
 max_concurrency = 4          # bounded fan-out for per-result summaries in /v1/search
@@ -169,6 +170,7 @@ Use the `CRW_` prefix with `__` as a nesting separator:
 | `extraction.llm.base_url` | `CRW_EXTRACTION__LLM__BASE_URL` |
 | `extraction.llm.max_html_bytes` | `CRW_EXTRACTION__LLM__MAX_HTML_BYTES` |
 | `extraction.llm.max_concurrency` | `CRW_EXTRACTION__LLM__MAX_CONCURRENCY` |
+| `extraction.llm.timeout_ms` | `CRW_EXTRACTION__LLM__TIMEOUT_MS` |
 | `extraction.llm.require_byok_header` | `CRW_EXTRACTION__LLM__REQUIRE_BYOK_HEADER` |
 | _(boot guard)_ | `CRW_DISABLE_SERVER_LLM_KEY` — when set to `1`, refuses to boot if `[extraction.llm].api_key` is also configured. Use behind a SaaS BYOK proxy. |
 

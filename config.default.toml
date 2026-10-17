@@ -159,6 +159,7 @@ always_run = false
 # base_url = "https://custom-endpoint.example.com"  # optional, for OpenAI-compatible APIs
 # max_concurrency = 4           # bound for per-result search-summary fan-out
 # max_html_bytes = 100000       # truncate content past this before sending
+# timeout_ms = 60000            # LLM budget for one JSON extraction call (also the change-tracking judge)
 # require_byok_header = ""      # SaaS-only: header name that must be set on LLM-touching requests
 #
 # DeepSeek example (OpenAI-compatible):

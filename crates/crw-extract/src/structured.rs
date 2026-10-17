@@ -5,8 +5,24 @@ use crw_core::types::LlmUsage;
 use serde::{Deserialize, Serialize};
 use std::sync::OnceLock;
 
-/// Request timeout for LLM API calls.
+/// Default timeout of the pooled client. Extraction and the judge set their own
+/// per-request budget from `[extraction.llm] timeout_ms`.
 const LLM_REQUEST_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60);
+
+/// Caller-facing reason for a failed provider request. reqwest words a timeout
+/// as a bare "error sending request"; when the request hit the budget from
+/// `[extraction.llm] timeout_ms`, say how long it waited and how to raise it.
+/// Every other failure keeps its usual text.
+fn request_error_text(e: reqwest::Error, budget: std::time::Duration) -> String {
+    if e.is_timeout() {
+        format!(
+            "timed out after {:.0}s (raise [extraction.llm] timeout_ms for slower models)",
+            budget.as_secs_f64()
+        )
+    } else {
+        crw_core::error::reqwest_message(e)
+    }
+}
 
 /// Default UTF-8-safe truncation ceiling on markdown sent to the LLM for
 /// structured extraction. Matches the Next.js side's pre-flight cap so the
@@ -250,9 +266,11 @@ pub(crate) async fn call_anthropic(
     };
 
     let client = shared_client();
+    let budget = std::time::Duration::from_millis(llm.timeout_ms);
     let resp = crate::llm::send_provider_post(
         client
             .post(&url)
+            .timeout(budget)
             .header("x-api-key", &llm.api_key)
             .header("anthropic-version", "2023-06-01")
             .header("content-type", "application/json")
@@ -262,7 +280,7 @@ pub(crate) async fn call_anthropic(
     .map_err(|e| {
         CrwError::ExtractionError(format!(
             "Anthropic API request failed: {}",
-            crw_core::error::reqwest_message(e)
+            request_error_text(e, budget)
         ))
     })?;
 
@@ -270,7 +288,7 @@ pub(crate) async fn call_anthropic(
     let text = resp.text().await.map_err(|e| {
         CrwError::ExtractionError(format!(
             "Failed to read Anthropic response: {}",
-            crw_core::error::reqwest_message(e)
+            request_error_text(e, budget)
         ))
     })?;
 
@@ -521,9 +539,11 @@ pub(crate) async fn call_openai(
     };
 
     let client = shared_client();
+    let budget = std::time::Duration::from_millis(llm.timeout_ms);
     let resp = crate::llm::send_provider_post(
         client
             .post(&url)
+            .timeout(budget)
             .header("Authorization", format!("Bearer {}", llm.api_key))
             .header("content-type", "application/json")
             .json(&body),
@@ -532,7 +552,7 @@ pub(crate) async fn call_openai(
     .map_err(|e| {
         CrwError::ExtractionError(format!(
             "OpenAI API request failed: {}",
-            crw_core::error::reqwest_message(e)
+            request_error_text(e, budget)
         ))
     })?;
 
@@ -540,7 +560,7 @@ pub(crate) async fn call_openai(
     let text = resp.text().await.map_err(|e| {
         CrwError::ExtractionError(format!(
             "Failed to read OpenAI response: {}",
-            crw_core::error::reqwest_message(e)
+            request_error_text(e, budget)
         ))
     })?;
 
