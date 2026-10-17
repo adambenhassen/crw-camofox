@@ -26,6 +26,7 @@ pub mod readability;
 pub mod selector;
 pub mod structured;
 pub mod tables;
+pub mod untrusted;
 
 use crw_core::error::{CrwError, CrwResult};
 use crw_core::types::{
