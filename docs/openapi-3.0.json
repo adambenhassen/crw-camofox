@@ -764,7 +764,8 @@
             "enum": [
               "scraping",
               "completed",
-              "failed"
+              "failed",
+              "cancelled"
             ]
           },
           "completed": {

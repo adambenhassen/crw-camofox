@@ -185,7 +185,7 @@ Status response shape:
 ```json
 {
   "success": true,
-  "status": "scraping | completed | failed",
+  "status": "scraping | completed | failed | cancelled",
   "total": 12,
   "completed": 12,
   "data": [

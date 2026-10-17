@@ -164,6 +164,7 @@ fn status_str(s: CrawlStatus) -> &'static str {
         CrawlStatus::InProgress => "scraping",
         CrawlStatus::Completed => "completed",
         CrawlStatus::Failed => "failed",
+        CrawlStatus::Cancelled => "cancelled",
     }
 }
 

@@ -116,6 +116,9 @@ pub(crate) fn validate_crawl_renderer(req: &CrawlRequest, state: &AppState) -> C
 /// Tracks a crawl job receiver + creation time for TTL cleanup.
 pub struct CrawlJob {
     pub rx: watch::Receiver<CrawlState>,
+    /// Sender kept alongside the receiver so cancel handlers can flip the
+    /// job to a terminal `Cancelled` state after aborting the task.
+    pub tx: watch::Sender<CrawlState>,
     pub created_at: Instant,
     /// Handle to abort the crawl task.
     pub abort_handle: Option<tokio::task::AbortHandle>,
@@ -258,7 +261,7 @@ impl AppState {
                 jobs.retain(|_id, job| {
                     let is_done = matches!(
                         job.rx.borrow().status,
-                        CrawlStatus::Completed | CrawlStatus::Failed
+                        CrawlStatus::Completed | CrawlStatus::Failed | CrawlStatus::Cancelled
                     );
                     // Keep if not done, or if done but within TTL.
                     !is_done || job.created_at.elapsed() < ttl
@@ -308,6 +311,7 @@ impl AppState {
                 id,
                 CrawlJob {
                     rx,
+                    tx: tx.clone(),
                     created_at: Instant::now(),
                     abort_handle: None,
                 },
@@ -397,6 +401,7 @@ impl AppState {
                 id,
                 CrawlJob {
                     rx,
+                    tx: tx.clone(),
                     created_at: Instant::now(),
                     abort_handle: None,
                 },
@@ -506,7 +511,9 @@ impl AppState {
                             }
                             st.data.push(d);
                             st.completed += 1;
-                            if st.completed >= total {
+                            // Only flip to Completed from InProgress — never
+                            // overwrite a terminal Cancelled set by DELETE.
+                            if st.completed >= total && st.status == CrawlStatus::InProgress {
                                 st.status = CrawlStatus::Completed;
                             }
                         });

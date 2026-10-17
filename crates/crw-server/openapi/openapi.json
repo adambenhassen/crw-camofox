@@ -422,7 +422,7 @@
         "type": "object",
         "required": ["status"],
         "properties": {
-          "status":    { "type": "string", "enum": ["scraping", "completed", "failed"] },
+          "status":    { "type": "string", "enum": ["scraping", "completed", "failed", "cancelled"] },
           "completed": { "type": "integer" },
           "total":     { "type": "integer" },
           "data":      { "type": "array", "items": { "$ref": "#/components/schemas/ScrapeResponse" } }
