@@ -1409,7 +1409,9 @@ pub struct LlmConfig {
     pub temperature: Option<f32>,
     /// Optional reasoning-effort hint forwarded to OpenAI-compatible providers
     /// that support it. `None` (default) and the empty string send no key,
-    /// preserving each provider's default behavior.
+    /// preserving each provider's default behavior. Anthropic models that think
+    /// by default (generation 5 on) always get `output_config.effort`: this
+    /// value when it is one of their levels (`low` to `max`), else `low`.
     #[serde(default)]
     pub reasoning_effort: Option<String>,
 }
@@ -1440,7 +1442,7 @@ fn default_llm_provider() -> String {
     "anthropic".into()
 }
 fn default_llm_model() -> String {
-    "claude-sonnet-4-20250514".into()
+    "claude-sonnet-4-6".into()
 }
 fn default_llm_max_tokens() -> u32 {
     4096

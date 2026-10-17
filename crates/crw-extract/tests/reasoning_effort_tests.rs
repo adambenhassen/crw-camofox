@@ -198,3 +198,77 @@ async fn non_retryable_status_errors_on_first_response() {
     assert!(res.is_err());
     assert_eq!(seen.load(Ordering::SeqCst), 1, "400 must not be retried");
 }
+
+fn anthropic_llm(base_url: String, model: &str) -> LlmConfig {
+    LlmConfig {
+        provider: "anthropic".into(),
+        api_key: "test-key".into(),
+        model: model.into(),
+        base_url: Some(base_url),
+        ..Default::default()
+    }
+}
+
+async fn mount_anthropic_text(server: &MockServer, content: serde_json::Value) {
+    Mock::given(method("POST"))
+        .and(path("/v1/messages"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "content": content,
+            "usage": { "input_tokens": 12, "output_tokens": 6 }
+        })))
+        .mount(server)
+        .await;
+}
+
+#[tokio::test]
+async fn anthropic_chat_skips_thinking_blocks() {
+    let server = MockServer::start().await;
+    mount_anthropic_text(
+        &server,
+        json!([
+            { "type": "thinking", "thinking": "", "signature": "c2ln" },
+            { "type": "redacted_thinking", "data": "ZGF0YQ==" },
+            { "type": "text", "text": "hello" }
+        ]),
+    )
+    .await;
+
+    let llm = anthropic_llm(format!("{}/v1/messages", server.uri()), "claude-sonnet-5-5");
+    let res = chat(&llm, "sys", "user").await.expect("chat succeeds");
+    assert_eq!(res.content, "hello");
+}
+
+/// Thinking counts toward `max_tokens` on current models, so the small
+/// helper budgets need a low effort there; older ids get no field.
+#[tokio::test]
+async fn anthropic_chat_sends_effort_only_to_models_that_think_by_default() {
+    let server = MockServer::start().await;
+    mount_anthropic_text(&server, json!([{ "type": "text", "text": "ok" }])).await;
+
+    for model in ["claude-sonnet-5-5", "claude-sonnet-4-6"] {
+        let llm = anthropic_llm(format!("{}/v1/messages", server.uri()), model);
+        chat(&llm, "sys", "user").await.expect("chat succeeds");
+    }
+    let bodies: Vec<serde_json::Value> = server
+        .received_requests()
+        .await
+        .unwrap()
+        .iter()
+        .map(|r| serde_json::from_slice(&r.body).unwrap())
+        .collect();
+    assert_eq!(bodies[0]["output_config"], json!({ "effort": "low" }));
+    assert!(bodies[1].get("output_config").is_none());
+}
+
+#[tokio::test]
+async fn anthropic_chat_forwards_configured_effort_on_current_models() {
+    let server = MockServer::start().await;
+    mount_anthropic_text(&server, json!([{ "type": "text", "text": "ok" }])).await;
+
+    let mut llm = anthropic_llm(format!("{}/v1/messages", server.uri()), "claude-opus-5-5");
+    llm.reasoning_effort = Some("high".into());
+    chat(&llm, "sys", "user").await.expect("chat succeeds");
+    let body: serde_json::Value =
+        serde_json::from_slice(&server.received_requests().await.unwrap()[0].body).unwrap();
+    assert_eq!(body["output_config"], json!({ "effort": "high" }));
+}

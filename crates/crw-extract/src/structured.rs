@@ -164,6 +164,10 @@ struct AnthropicRequest {
     messages: Vec<Message>,
     #[serde(skip_serializing_if = "Option::is_none")]
     tools: Option<Vec<AnthropicTool>>,
+    /// `{"effort": ...}` on models that think by default, see
+    /// [`crate::llm::anthropic_effort`].
+    #[serde(skip_serializing_if = "Option::is_none")]
+    output_config: Option<serde_json::Value>,
 }
 
 #[derive(Serialize)]
@@ -211,6 +215,10 @@ enum AnthropicContentBlock {
         name: String,
         input: serde_json::Value,
     },
+    /// `thinking`, `redacted_thinking` and any other block type: skipped, so a
+    /// reply that opens with thinking still yields its tool call or text.
+    #[serde(other)]
+    Other,
 }
 
 /// Call Anthropic with a tool-use forcing the given `schema`. `prompt` is the
@@ -237,6 +245,8 @@ pub(crate) async fn call_anthropic(
             description: tool_desc.into(),
             input_schema: schema.clone(),
         }]),
+        output_config: crate::llm::anthropic_effort(&llm.model, llm.reasoning_effort.as_deref())
+            .map(|effort| serde_json::json!({ "effort": effort })),
     };
 
     let client = shared_client();

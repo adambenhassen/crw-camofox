@@ -108,8 +108,9 @@ only_main_content = true
 [extraction.llm]
 provider = "anthropic"       # "anthropic", "openai", "azure", or "openai-compatible"
 api_key = ""
-model = "claude-sonnet-4-20250514"
+model = "claude-sonnet-4-6"
 max_tokens = 4096
+# reasoning_effort = ""      # forwarded when set; Anthropic generation 5 models run at "low" when unset
 max_html_bytes = 100000      # content fed to LLM is truncated at this byte count
 max_concurrency = 4          # bounded fan-out for per-result summaries in /v1/search
 # base_url = ""              # for OpenAI-compatible endpoints (DeepSeek, Azure, Ollama, …)
