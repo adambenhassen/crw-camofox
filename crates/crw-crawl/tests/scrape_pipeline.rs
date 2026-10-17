@@ -261,3 +261,59 @@ async fn accepted_escalation_reports_the_kept_renders_truncation() {
     assert_eq!(data.metadata.rendered_with.as_deref(), Some("camofox"));
     assert!(data.truncated, "the kept camofox render was cut off");
 }
+
+/// A page too thin to be real content: the scrape choke stamps a block verdict
+/// on it instead of failing the fetch.
+fn thin_page() -> String {
+    "<html><body><p>Hi</p></body></html>".to_string()
+}
+
+/// A blocked page is `success:false` on every surface, so json-mode change
+/// tracking (a model call) must not run on it. Counts the requests that reach
+/// the LLM endpoint instead of reading the result, since a skipped phase and a
+/// failed one are different outcomes here.
+#[tokio::test]
+async fn change_tracking_does_not_call_the_llm_on_a_blocked_page() {
+    let llm_server = wiremock::MockServer::start().await;
+    let llm = crw_core::config::LlmConfig {
+        provider: "openai".into(),
+        api_key: "test-key".into(),
+        base_url: Some(llm_server.uri()),
+        ..serde_json::from_value(serde_json::json!({ "api_key": "test-key" })).expect("llm")
+    };
+    let r = renderer_with_http(
+        tier("http", Ok(thin_page())),
+        vec![tier("lightpanda", Ok(thin_page()))],
+    );
+    let req: ScrapeRequest = serde_json::from_value(serde_json::json!({
+        "url": "https://walled.example/page",
+        "formats": ["markdown", "changeTracking"],
+        "changeTracking": {
+            "modes": ["json"],
+            "schema": {"type": "object", "properties": {"price": {"type": "string"}}},
+        },
+    }))
+    .expect("request");
+
+    let data = scrape_url(
+        &req,
+        &r,
+        Some(&llm),
+        &ExtractionConfig::default(),
+        "crw-test",
+        false,
+        None,
+        Deadline::from_request_ms(30_000),
+    )
+    .await
+    .expect("a block is a verdict on the document, not an error");
+
+    assert!(data.block.is_some(), "precondition: {:?}", data.markdown);
+    assert!(data.change_tracking.is_none());
+    let calls = llm_server.received_requests().await.unwrap_or_default();
+    assert!(
+        calls.is_empty(),
+        "{} LLM call(s) on a blocked page",
+        calls.len()
+    );
+}

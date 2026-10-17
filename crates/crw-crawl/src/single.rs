@@ -762,7 +762,12 @@ async fn scrape_url_inner(
     // sibling `change_tracking` field. The diff is computed against the
     // caller-supplied `previous` snapshot — opencore stores nothing. The LLM
     // judge is injected by the M2 orchestration layer, not here.
-    if req.formats.contains(&OutputFormat::ChangeTracking) {
+    //
+    // Never diff a page that did not come back. A blocked page is `success:false`
+    // on every surface, so its diff is never read, while json-mode tracking and
+    // the meaningful-change judge below are real model calls on a request nobody
+    // is charged for. The json and summary legs above skip on the same verdict.
+    if req.formats.contains(&OutputFormat::ChangeTracking) && data.block.is_none() {
         let Some(ct_opts) = &req.change_tracking else {
             return Err(crw_core::error::CrwError::InvalidRequest(
                 "formats includes 'changeTracking' but no 'changeTracking' options were provided."
