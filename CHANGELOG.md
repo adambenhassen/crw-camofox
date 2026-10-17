@@ -7,6 +7,42 @@ and the project uses [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [1.6.0] - 2026-10-17
+
+An upstream-sync release: crawl, extraction and wall handling fixes ported
+from upstream crw, plus fixes for cancelled jobs and selectors that match
+nothing.
+
+### Changed
+
+- **Walls:** a blocked page is now an error on every surface. MCP `crw_scrape`
+  (embedded and `crw-mcp`) returns `isError`, the CLI exits 1, search results
+  drop the wall body, and change tracking skips blocked pages. Structural and
+  parked pages stay data.
+- **Selectors:** an `includeTags`, CSS or XPath selector that matches nothing
+  returns empty content with a `selector_no_match` warning, not the whole page.
+- **Jobs:** cancelling a crawl or batch job moves it to a terminal `cancelled`
+  status.
+- **LightPanda:** receives the configured user agent unchanged; LightPanda
+  refuses Mozilla-prefixed values and sends `Lightpanda/1.0`.
+- **Extraction:** the default Anthropic model is `claude-sonnet-4-6`.
+- **Batch:** `/v2/batch/scrape` caps a request at `crawler.max_batch_urls`
+  (10000), validates URLs concurrently, and accepts bodies up to 8 MB.
+
+### Fixed
+
+- **Crawl:** robots.txt fetches have timeouts and fail open; the exact `crw`
+  agent group wins; rules match path and query; URL case is preserved; body
+  reads are capped on every HTTP tier.
+- **Extraction:** Claude thinking blocks no longer break structured
+  extraction; `reasoning_effort` reaches the structured path; LLM usage adds up
+  across every leg; the change judge's untrusted-content fence can no longer
+  be forged by page content.
+- **Renderer:** a bare 404, 410 or 500 skips the JS ladder; a `<body` inside a
+  head script no longer zeroes the body-text measure; CDP connects over every
+  resolved address.
+- **CLI:** debug builds no longer panic on start.
+
 ## [1.5.0] - 2026-09-16
 
 A fingerprint release: a Chrome-impersonated HTTP tier sits between the plain
@@ -369,6 +405,7 @@ machinery is removed.
 - Structured-extraction (Anthropic) chat URL no longer doubles `/v1`.
 - Engine cap and camofox-mcp configuration corrected against a live Docker stack.
 
+[1.6.0]: https://github.com/adambenhassen/crw-camofox/compare/v1.5.0...v1.6.0
 [1.5.0]: https://github.com/adambenhassen/crw-camofox/compare/v1.4.0...v1.5.0
 [1.4.0]: https://github.com/adambenhassen/crw-camofox/compare/v1.3.0...v1.4.0
 [1.3.0]: https://github.com/adambenhassen/crw-camofox/compare/v1.2.0...v1.3.0

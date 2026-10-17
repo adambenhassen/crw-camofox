@@ -851,7 +851,7 @@ checksum = "460fbee9c2c2f33933d720630a6a0bac33ba7053db5344fac858d4b8952d77d5"
 
 [[package]]
 name = "crw-cli"
-version = "1.5.0"
+version = "1.6.0"
 dependencies = [
  "axum",
  "base64 0.23.1",
@@ -883,7 +883,7 @@ dependencies = [
 
 [[package]]
 name = "crw-core"
-version = "1.5.0"
+version = "1.6.0"
 dependencies = [
  "config",
  "crw-mcp-proto",
@@ -902,7 +902,7 @@ dependencies = [
 
 [[package]]
 name = "crw-crawl"
-version = "1.5.0"
+version = "1.6.0"
 dependencies = [
  "async-trait",
  "crw-core",
@@ -930,7 +930,7 @@ dependencies = [
 
 [[package]]
 name = "crw-diff"
-version = "1.5.0"
+version = "1.6.0"
 dependencies = [
  "crw-core",
  "hex",
@@ -945,7 +945,7 @@ dependencies = [
 
 [[package]]
 name = "crw-extract"
-version = "1.5.0"
+version = "1.6.0"
 dependencies = [
  "crw-core",
  "ego-tree",
@@ -977,7 +977,7 @@ dependencies = [
 
 [[package]]
 name = "crw-mcp"
-version = "1.5.0"
+version = "1.6.0"
 dependencies = [
  "base64 0.23.1",
  "clap",
@@ -994,7 +994,7 @@ dependencies = [
 
 [[package]]
 name = "crw-mcp-proto"
-version = "1.5.0"
+version = "1.6.0"
 dependencies = [
  "jsonschema",
  "serde",
@@ -1004,7 +1004,7 @@ dependencies = [
 
 [[package]]
 name = "crw-monitor"
-version = "1.5.0"
+version = "1.6.0"
 dependencies = [
  "crw-core",
  "crw-crawl",
@@ -1027,7 +1027,7 @@ dependencies = [
 
 [[package]]
 name = "crw-renderer"
-version = "1.5.0"
+version = "1.6.0"
 dependencies = [
  "async-trait",
  "axum",
@@ -1058,7 +1058,7 @@ dependencies = [
 
 [[package]]
 name = "crw-search"
-version = "1.5.0"
+version = "1.6.0"
 dependencies = [
  "crw-core",
  "futures",
@@ -1076,7 +1076,7 @@ dependencies = [
 
 [[package]]
 name = "crw-server"
-version = "1.5.0"
+version = "1.6.0"
 dependencies = [
  "axum",
  "axum-test",
