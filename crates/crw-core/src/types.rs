@@ -170,8 +170,14 @@ pub struct ScrapeRequest {
     pub url: String,
     #[serde(default = "default_formats")]
     pub formats: Vec<OutputFormat>,
-    #[serde(default = "default_true", alias = "only_main_content")]
-    pub only_main_content: bool,
+    /// Absent (or null) = the server's `[extraction].only_main_content`
+    /// (true unless configured); an explicit value always wins.
+    #[serde(
+        default,
+        alias = "only_main_content",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub only_main_content: Option<bool>,
     /// null = auto-detect, true = force JS, false = skip JS
     #[serde(alias = "render_js")]
     pub render_js: Option<bool>,
@@ -387,16 +393,15 @@ fn default_formats() -> Vec<OutputFormat> {
 
 impl Default for ScrapeRequest {
     /// Matches the serde defaults exactly (`formats: ["markdown"]`,
-    /// `only_main_content: true`, everything else empty/None). Hand-written
-    /// rather than derived because `#[derive(Default)]` would give
-    /// `formats: vec![]` / `only_main_content: false`, contradicting the wire
+    /// everything else empty/None). Hand-written rather than derived because
+    /// `#[derive(Default)]` would give `formats: vec![]`, contradicting the wire
     /// defaults — the v2 adapters build `ScrapeRequest { .., ..Default::default() }`
     /// and rely on these matching.
     fn default() -> Self {
         Self {
             url: String::new(),
             formats: default_formats(),
-            only_main_content: true,
+            only_main_content: None,
             render_js: None,
             wait_for: None,
             include_tags: Vec::new(),
@@ -1122,8 +1127,10 @@ pub struct CrawlRequest {
     pub max_pages: Option<u32>,
     #[serde(default = "default_formats")]
     pub formats: Vec<OutputFormat>,
-    #[serde(default = "default_true")]
-    pub only_main_content: bool,
+    /// Absent (or null) = the server's `[extraction].only_main_content`
+    /// (true unless configured); an explicit value always wins.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub only_main_content: Option<bool>,
     #[serde(default, alias = "json_schema")]
     pub json_schema: Option<serde_json::Value>,
     /// null = auto-detect (use global default), true = force JS, false = skip JS.
@@ -2206,8 +2213,10 @@ impl SearchTimeFilter {
 pub struct SearchScrapeOptions {
     #[serde(default = "default_formats")]
     pub formats: Vec<OutputFormat>,
-    #[serde(default = "default_true")]
-    pub only_main_content: bool,
+    /// Absent (or null) = the server's `[extraction].only_main_content`
+    /// (true unless configured); an explicit value always wins.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub only_main_content: Option<bool>,
     /// Residential-proxy exit country (ISO 3166-1 alpha-2) for the per-result page scrape.
     /// Populated by the SaaS layer from the caller's IP (geo-aware proxy). `None` = engine default.
     #[serde(default)]

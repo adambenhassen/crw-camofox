@@ -261,7 +261,7 @@ pub async fn run(mut args: ScrapeArgs) -> Result<(), CmdError> {
         let req = build_request(
             args.url.clone(),
             request_formats.clone(),
-            !args.raw,
+            args.raw.then_some(false),
             None, // render_js = None → auto, but with no JS renderer it stays HTTP
             args.css.clone(),
             args.xpath.clone(),
@@ -407,7 +407,7 @@ pub async fn run(mut args: ScrapeArgs) -> Result<(), CmdError> {
         let req = build_request(
             args.url,
             request_formats,
-            !args.raw,
+            args.raw.then_some(false),
             if force_js { Some(true) } else { None },
             args.css,
             args.xpath,
@@ -779,7 +779,7 @@ async fn run_local_file(args: &ScrapeArgs) -> Result<(), CmdError> {
 fn build_request(
     url: String,
     formats: Vec<OutputFormat>,
-    only_main_content: bool,
+    only_main_content: Option<bool>,
     render_js: Option<bool>,
     css: Option<String>,
     xpath: Option<String>,

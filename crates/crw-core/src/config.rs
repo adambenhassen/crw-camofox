@@ -1320,6 +1320,7 @@ fn default_job_ttl() -> u64 {
 pub struct ExtractionConfig {
     #[serde(default = "default_format")]
     pub default_format: String,
+    /// Default for scrape/crawl/search requests that omit `onlyMainContent`.
     #[serde(default = "default_true_ext")]
     pub only_main_content: bool,
     #[serde(default)]

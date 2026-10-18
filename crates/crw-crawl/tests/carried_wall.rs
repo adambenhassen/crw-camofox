@@ -146,7 +146,7 @@ async fn crawl(renderer: Arc<FallbackRenderer>, url: String) -> CrawlState {
             max_depth: Some(1),
             max_pages: Some(5),
             formats: vec![OutputFormat::Markdown],
-            only_main_content: false,
+            only_main_content: Some(false),
             json_schema: None,
             // Auto, the default: the renderer escalates a walled HTTP body.
             render_js: None,
@@ -166,6 +166,7 @@ async fn crawl(renderer: Arc<FallbackRenderer>, url: String) -> CrawlState {
         jitter_factor: 0.0,
         deadline_ms_per_page: 15_000,
         per_host_max_concurrent: 1,
+        only_main_content_default: true,
         http_retry_threshold_bytes: 0,
     })
     .await;

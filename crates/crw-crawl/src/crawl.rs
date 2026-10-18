@@ -46,6 +46,9 @@ pub struct CrawlOptions<'a> {
     /// Cap on concurrent in-flight requests per eTLD+1 host. `1` enforces
     /// strict politeness; raise via config when scraping owned infrastructure.
     pub per_host_max_concurrent: u32,
+    /// From `ExtractionConfig::only_main_content`: what a crawl request that
+    /// omits `onlyMainContent` gets, the same default a single scrape applies.
+    pub only_main_content_default: bool,
     /// From `ExtractionConfig::http_retry_threshold_bytes`. `classify_block` takes
     /// it, and a crawl that judged blocks differently from a single scrape of the
     /// same URL would bill the customer for a wall on one surface and refund it
@@ -215,6 +218,7 @@ async fn run_crawl_inner(opts: CrawlOptions<'_>) {
         jitter_factor: _,
         deadline_ms_per_page,
         per_host_max_concurrent,
+        only_main_content_default,
         http_retry_threshold_bytes,
     } = opts;
 
@@ -494,7 +498,7 @@ async fn run_crawl_inner(opts: CrawlOptions<'_>) {
                 credit_cost: fetch_result.credit_cost,
                 warnings: fetch_result.warnings.clone(),
                 formats: req.formats.clone(),
-                only_main_content: req.only_main_content,
+                only_main_content: req.only_main_content.unwrap_or(only_main_content_default),
                 include_tags: Vec::new(),
                 exclude_tags: Vec::new(),
                 css_selector: None,

@@ -31,7 +31,7 @@ fn scrape_request_default_formats() {
     let req: ScrapeRequest = serde_json::from_str(r#"{"url":"https://example.com"}"#).unwrap();
     assert_eq!(req.url, "https://example.com");
     assert_eq!(req.formats, vec![OutputFormat::Markdown]);
-    assert!(req.only_main_content);
+    assert_eq!(req.only_main_content, None);
     assert!(req.render_js.is_none());
     assert!(req.wait_for.is_none());
     assert!(req.include_tags.is_empty());
@@ -113,7 +113,7 @@ fn page_metadata_skip_serializing_none() {
 fn crawl_request_default_formats() {
     let req: CrawlRequest = serde_json::from_str(r#"{"url":"https://example.com"}"#).unwrap();
     assert_eq!(req.formats, vec![OutputFormat::Markdown]);
-    assert!(req.only_main_content);
+    assert_eq!(req.only_main_content, None);
     assert!(req.max_depth.is_none());
     assert!(req.max_pages.is_none());
 }
@@ -210,7 +210,7 @@ fn scrape_request_with_all_fields() {
 
     let req: ScrapeRequest = serde_json::from_value(input).unwrap();
     assert_eq!(req.formats.len(), 3);
-    assert!(!req.only_main_content);
+    assert_eq!(req.only_main_content, Some(false));
     assert_eq!(req.render_js, Some(true));
     assert_eq!(req.wait_for, Some(2000));
     assert_eq!(req.include_tags, vec!["article"]);
@@ -470,4 +470,23 @@ fn scrape_data_cached_is_omitted_unless_true() {
     data.cached = true;
     let v = serde_json::to_value(&data).unwrap();
     assert_eq!(v["cached"], true);
+}
+
+#[test]
+fn scrape_request_only_main_content_omitted_or_null_is_server_default() {
+    for body in [
+        serde_json::json!({ "url": "https://example.com" }),
+        serde_json::json!({ "url": "https://example.com", "onlyMainContent": null }),
+    ] {
+        let req: ScrapeRequest = serde_json::from_value(body).unwrap();
+        assert_eq!(req.only_main_content, None);
+        // Omitted stays omitted on the wire.
+        let back = serde_json::to_value(&req).unwrap();
+        assert!(back.get("onlyMainContent").is_none());
+    }
+    let req: ScrapeRequest = serde_json::from_value(
+        serde_json::json!({ "url": "https://example.com", "only_main_content": true }),
+    )
+    .unwrap();
+    assert_eq!(req.only_main_content, Some(true));
 }

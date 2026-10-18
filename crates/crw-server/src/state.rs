@@ -329,6 +329,7 @@ impl AppState {
         let jitter_factor = self.config.crawler.stealth.jitter_factor;
         let deadline_ms_per_page = self.config.effective_deadline_ms(None, req.wait_for);
         let per_host_max_concurrent = self.config.crawler.per_host_max_concurrent;
+        let only_main_content_default = self.config.extraction.only_main_content;
         let http_retry_threshold_bytes = self.config.extraction.http_retry_threshold_bytes;
 
         let handle = tokio::spawn(async move {
@@ -362,6 +363,7 @@ impl AppState {
                 jitter_factor,
                 deadline_ms_per_page,
                 per_host_max_concurrent,
+                only_main_content_default,
                 http_retry_threshold_bytes,
             })
             .await;

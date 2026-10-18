@@ -14,6 +14,12 @@ and the project uses [Semantic Versioning](https://semver.org/).
   (for example `rawHtml` or `links` only). The block check now judges the
   page by the markdown it would have extracted to, as it does for a markdown
   request.
+- **Config:** `[extraction] only_main_content` (env
+  `CRW_EXTRACTION__ONLY_MAIN_CONTENT`) is now the default for a scrape, crawl
+  or search request that omits `onlyMainContent`, on `/v1` and `/v2`. It was
+  ignored and the default was always `true`. An explicit value on the request
+  still wins, `crw scrape`/`crw crawl` follow the config unless `--raw` is
+  passed, and the shipped default stays `true`. Upstream `53a6baf2`.
 
 ## [1.8.0] - 2026-10-18
 

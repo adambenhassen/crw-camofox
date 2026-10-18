@@ -104,7 +104,7 @@ async fn crawl(r: &Arc<FallbackRenderer>, url: &str) {
             max_depth: Some(0),
             max_pages: Some(1),
             formats: vec![OutputFormat::Markdown],
-            only_main_content: false,
+            only_main_content: Some(false),
             json_schema: None,
             render_js: Some(false),
             wait_for: None,
@@ -123,6 +123,7 @@ async fn crawl(r: &Arc<FallbackRenderer>, url: &str) {
         jitter_factor: 0.0,
         deadline_ms_per_page: 15_000,
         per_host_max_concurrent: 1,
+        only_main_content_default: true,
         http_retry_threshold_bytes: 0,
     })
     .await;

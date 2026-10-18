@@ -136,7 +136,7 @@ pub async fn run(mut args: CrawlArgs) -> Result<(), CmdError> {
         max_depth: Some(args.depth),
         max_pages: Some(args.limit),
         formats: vec![output_format],
-        only_main_content: !args.raw,
+        only_main_content: args.raw.then_some(false),
         json_schema: None,
         render_js: if args.js { Some(true) } else { None },
         wait_for: None,
@@ -175,6 +175,7 @@ pub async fn run(mut args: CrawlArgs) -> Result<(), CmdError> {
         jitter_factor: 0.2,
         deadline_ms_per_page: args.timeout,
         per_host_max_concurrent: 1,
+        only_main_content_default: crawl_extraction_cfg.only_main_content,
         http_retry_threshold_bytes: crawl_extraction_cfg.http_retry_threshold_bytes,
     };
 

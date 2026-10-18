@@ -1566,7 +1566,7 @@ mod tests {
     fn scrape_opts(timeout: Option<u64>) -> SearchScrapeOptions {
         SearchScrapeOptions {
             formats: vec![OutputFormat::Markdown],
-            only_main_content: true,
+            only_main_content: Some(true),
             country: None,
             timeout,
         }

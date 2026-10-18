@@ -275,7 +275,7 @@ impl EngineSource {
         crw_core::types::ScrapeRequest {
             url: url.to_string(),
             formats: vec![OutputFormat::Markdown],
-            only_main_content: self.config.extraction.only_main_content,
+            only_main_content: Some(self.config.extraction.only_main_content),
             render_js: None,
             wait_for: None,
             include_tags: vec![],
@@ -383,7 +383,7 @@ impl EngineSource {
             max_depth: None,
             max_pages,
             formats: vec![OutputFormat::Markdown],
-            only_main_content: self.config.extraction.only_main_content,
+            only_main_content: Some(self.config.extraction.only_main_content),
             json_schema: None,
             render_js: None,
             wait_for: None,
@@ -422,6 +422,7 @@ impl EngineSource {
                 jitter_factor: cfg.crawler.stealth.jitter_factor,
                 deadline_ms_per_page: cfg.effective_deadline_ms(None, None),
                 per_host_max_concurrent: cfg.crawler.per_host_max_concurrent,
+                only_main_content_default: cfg.extraction.only_main_content,
                 http_retry_threshold_bytes: cfg.extraction.http_retry_threshold_bytes,
             })
             .await;
