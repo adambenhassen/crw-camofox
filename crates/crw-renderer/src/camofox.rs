@@ -15,6 +15,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use async_trait::async_trait;
 use crw_core::Deadline;
 use crw_core::error::{CrwError, CrwResult};
+use crw_core::log_url::{LogErr, LogUrl, url_for_error};
 use crw_core::types::FetchResult;
 use serde::Deserialize;
 use serde_json::json;
@@ -285,7 +286,7 @@ impl CamofoxRenderer {
             return;
         };
         if deadline.remaining() < MIN_EVAL_BUDGET {
-            tracing::debug!(url, "camofox: no budget left for clearance capture");
+            tracing::debug!(url = %LogUrl(&url), "camofox: no budget left for clearance capture");
             return;
         }
         let cookies: Vec<Cookie> = match self.tab_cookies(tab_id, deadline.remaining()).await {
@@ -296,7 +297,11 @@ impl CamofoxRenderer {
                 .filter(|c| cookie_matches_host(&c.domain, &host) && !c.domain.trim().is_empty())
                 .collect(),
             Err(e) => {
-                tracing::debug!(url, error = %e, "camofox: cookie export failed");
+                tracing::debug!(
+                    url = %LogUrl(&url),
+                    error = %LogErr(&e),
+                    "camofox: cookie export failed",
+                );
                 return;
             }
         };
@@ -314,7 +319,11 @@ impl CamofoxRenderer {
         {
             Ok(r) => r.result.unwrap_or_default(),
             Err(e) => {
-                tracing::debug!(url, error = %e, "camofox: user agent read failed");
+                tracing::debug!(
+                    url = %LogUrl(&url),
+                    error = %LogErr(&e),
+                    "camofox: user agent read failed",
+                );
                 return;
             }
         };
@@ -386,10 +395,18 @@ impl CamofoxRenderer {
                 Err(e) => {
                     failed_in_a_row += 1;
                     if failed_in_a_row >= 2 {
-                        tracing::debug!(url, error = %e, "camofox: challenge probe failed twice; ending the wait");
+                        tracing::debug!(
+                            url = %LogUrl(&url),
+                            error = %LogErr(&e),
+                            "camofox: challenge probe failed twice; ending the wait",
+                        );
                         break;
                     }
-                    tracing::debug!(url, error = %e, "camofox: challenge probe failed; retrying once");
+                    tracing::debug!(
+                        url = %LogUrl(&url),
+                        error = %LogErr(&e),
+                        "camofox: challenge probe failed; retrying once",
+                    );
                     ChallengeState::Challenge
                 }
             };
@@ -397,10 +414,10 @@ impl CamofoxRenderer {
                 ChallengeState::Clear => {
                     if polls > 0 {
                         tracing::info!(
-                            url,
+                            url = %LogUrl(&url),
                             polls,
                             elapsed_ms = started.elapsed().as_millis() as u64,
-                            "camofox: challenge cleared"
+                            "camofox: challenge cleared",
                         );
                         crw_core::metrics::metrics()
                             .render_route_decision_total
@@ -410,15 +427,18 @@ impl CamofoxRenderer {
                     return;
                 }
                 ChallengeState::Wall => {
-                    tracing::debug!(url, "camofox: Cloudflare block page on screen; not waiting");
+                    tracing::debug!(
+                        url = %LogUrl(&url),
+                        "camofox: Cloudflare block page on screen; not waiting",
+                    );
                     return;
                 }
                 ChallengeState::Challenge => {}
             }
             if polls == 0 {
                 tracing::info!(
-                    url,
-                    "camofox: Cloudflare challenge on screen, waiting for it to clear"
+                    url = %LogUrl(&url),
+                    "camofox: Cloudflare challenge on screen, waiting for it to clear",
                 );
             }
             polls += 1;
@@ -434,10 +454,10 @@ impl CamofoxRenderer {
         }
         if polls > 0 {
             tracing::warn!(
-                url,
+                url = %LogUrl(&url),
                 polls,
                 elapsed_ms = started.elapsed().as_millis() as u64,
-                "camofox: challenge did not clear within budget"
+                "camofox: challenge did not clear within budget",
             );
             crw_core::metrics::metrics()
                 .render_route_decision_total
@@ -512,8 +532,8 @@ impl CamofoxRenderer {
                 Ok(Ok(Err(transient))) => {
                     tracing::info!(
                         attempt,
-                        error = %transient,
-                        "camofox: tab create failed, retrying"
+                        error = %LogErr(&transient),
+                        "camofox: tab create failed, retrying",
                     );
                     tokio::time::sleep(backoff.min(deadline.remaining())).await;
                     backoff *= 2;
@@ -563,9 +583,9 @@ impl CamofoxRenderer {
                 // tell that the navigation itself committed; we never use the
                 // snapshot, so carry on.
                 tracing::warn!(
-                    url,
-                    error = %e,
-                    "camofox: navigate reported failure but the page committed; continuing"
+                    url = %LogUrl(&url),
+                    error = %LogErr(&e),
+                    "camofox: navigate reported failure but the page committed; continuing",
                 );
                 Ok(())
             }
@@ -848,7 +868,11 @@ async fn error_detail(resp: reqwest::Response) -> String {
         .and_then(|v| v.get("error")?.as_str().map(str::to_string))
         .unwrap_or_else(|| {
             if !raw.trim().is_empty() {
-                tracing::debug!(status, body = %raw.trim(), "camofox: non-JSON error body");
+                tracing::debug!(
+                    status,
+                    body = %LogErr(&raw.trim()),
+                    "camofox: non-JSON error body",
+                );
             }
             String::new()
         });
@@ -933,7 +957,8 @@ impl PageFetcher for CamofoxRenderer {
     ) -> CrwResult<FetchResult> {
         if deadline.expired() {
             return Err(CrwError::RendererError(format!(
-                "camofox: deadline expired before fetch of {url}"
+                "camofox: deadline expired before fetch of {}",
+                url_for_error(url)
             )));
         }
         let start = Instant::now();

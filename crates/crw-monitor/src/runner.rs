@@ -20,6 +20,7 @@ use crate::types::{
 };
 use crate::{MonitorError, MonitorResult};
 use crw_core::config::LlmConfig;
+use crw_core::log_url::{LogErr, LogUrl};
 use crw_core::types::{
     ChangeStatus, ChangeTrackingMode, ChangeTrackingOptions, ChangeTrackingSnapshot,
 };
@@ -200,7 +201,11 @@ pub async fn run_check<S: PageSource>(
                     ct.judgment = Some(judgment);
                 }
                 Err(e) => {
-                    tracing::warn!(url = %url, error = %e, "judge failed; storing page unjudged");
+                    tracing::warn!(
+                        url = %LogUrl(&url),
+                        error = %LogErr(&e),
+                        "judge failed; storing page unjudged",
+                    );
                 }
             }
         }

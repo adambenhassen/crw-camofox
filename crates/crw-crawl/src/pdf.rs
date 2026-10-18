@@ -15,6 +15,7 @@ use tokio::sync::Semaphore;
 
 use crw_core::config::{DocumentConfig, LlmConfig};
 use crw_core::error::{CrwError, CrwResult};
+use crw_core::log_url::{LogErr, LogUrl};
 use crw_core::types::{
     ChunkResult, LlmUsage, OutputFormat, PageMetadata, ParserSpec, ScrapeData, ScrapeRequest,
 };
@@ -393,7 +394,11 @@ pub async fn convert_pdf_bytes(
         Err(err) => {
             // Soft-fail: empty markdown + a warning. Upload callers map this to
             // an HTTP error themselves (they call the strict variant).
-            tracing::warn!(url = %source.source_url, "pdf conversion failed: {err}");
+            tracing::warn!(
+                url = %LogUrl(&source.source_url),
+                "pdf conversion failed: {err}",
+                err = LogErr(&err),
+            );
             let mut data = empty_pdf_scrape_data(req, &source, source.elapsed_ms + convert_ms);
             data.warnings.push(err.to_string());
             data.warning = Some(err.to_string());

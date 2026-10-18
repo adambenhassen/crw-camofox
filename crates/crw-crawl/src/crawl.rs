@@ -1,5 +1,6 @@
 use crw_core::config::LlmConfig;
 use crw_core::error::CrwResult;
+use crw_core::log_url::{LogErr, LogUrl};
 use crw_core::types::{
     CrawlRequest, CrawlState, CrawlStatus, LlmUsage, ScrapeData, resolve_pinned_renderer,
 };
@@ -281,15 +282,14 @@ async fn run_crawl_inner(opts: CrawlOptions<'_>) {
     // Fails open. An unreadable robots.txt is not a licence to fail the job:
     // the crawl proceeds with no rules, so an origin that 503s the file cannot
     // stop a crawl outright.
-    let robots =
-        if respect_robots {
-            RobotsTxt::fetch(&origin, &client).await.unwrap_or_else(|e| {
-            tracing::warn!(error = %e, "robots.txt unavailable, crawling without its rules");
+    let robots = if respect_robots {
+        RobotsTxt::fetch(&origin, &client).await.unwrap_or_else(|e| {
+            tracing::warn!(error = %LogErr(&e), "robots.txt unavailable, crawling without its rules");
             RobotsTxt::default()
         })
-        } else {
-            RobotsTxt::default()
-        };
+    } else {
+        RobotsTxt::default()
+    };
 
     let semaphore = Arc::new(Semaphore::new(max_concurrency));
     // Key the rate limiter by eTLD+1 so subdomains under the same registered
@@ -323,7 +323,7 @@ async fn run_crawl_inner(opts: CrawlOptions<'_>) {
         if let Ok(parsed) = url::Url::parse(&url)
             && !robots.is_url_allowed(&parsed)
         {
-            tracing::debug!(url, "Blocked by robots.txt");
+            tracing::debug!(url = %LogUrl(&url), "Blocked by robots.txt");
             continue;
         }
 
@@ -353,7 +353,11 @@ async fn run_crawl_inner(opts: CrawlOptions<'_>) {
         {
             Ok(r) => r,
             Err(e) => {
-                tracing::warn!(url, error = %e, "Crawl: failed to fetch page");
+                tracing::warn!(
+                    url = %LogUrl(&url),
+                    error = %LogErr(&e),
+                    "Crawl: failed to fetch page",
+                );
                 push_failed_page(
                     failed_page(&url, 0, e.to_string()),
                     id,
@@ -375,9 +379,9 @@ async fn run_crawl_inner(opts: CrawlOptions<'_>) {
             && let Some(verdict) = fetch_result.wall.take()
         {
             tracing::warn!(
-                url,
+                url = %LogUrl(&url),
                 reason = %verdict.reason,
-                "Crawl: no browser tier could do better for this page, not crawled"
+                "Crawl: no browser tier could do better for this page, not crawled",
             );
             let mut page = failed_page(&url, fetch_result.status_code, verdict.reason.clone());
             page.block = Some(verdict);
@@ -401,9 +405,9 @@ async fn run_crawl_inner(opts: CrawlOptions<'_>) {
         // see which URL failed and why.
         if crate::single::is_cdn_origin_error(fetch_result.status_code) {
             tracing::warn!(
-                url,
+                url = %LogUrl(&url),
                 status = fetch_result.status_code,
-                "Crawl: CDN could not reach the origin"
+                "Crawl: CDN could not reach the origin",
             );
             push_failed_page(
                 failed_page(
@@ -454,7 +458,11 @@ async fn run_crawl_inner(opts: CrawlOptions<'_>) {
             match crate::pdf::convert_pdf_bytes(bytes, &pdf_req, source).await {
                 Ok(data) => data,
                 Err(err) => {
-                    tracing::warn!(url, error = %err, "Crawl: PDF conversion failed");
+                    tracing::warn!(
+                        url = %LogUrl(&url),
+                        error = %LogErr(&err),
+                        "Crawl: PDF conversion failed",
+                    );
                     push_failed_page(
                         failed_page(
                             &url,
@@ -504,7 +512,11 @@ async fn run_crawl_inner(opts: CrawlOptions<'_>) {
             {
                 Ok(data) => data,
                 Err(err) => {
-                    tracing::warn!(url, error = %err, "Crawl: extraction failed");
+                    tracing::warn!(
+                        url = %LogUrl(&url),
+                        error = %LogErr(&err),
+                        "Crawl: extraction failed",
+                    );
                     push_failed_page(
                         failed_page(
                             &url,
@@ -604,7 +616,11 @@ async fn run_crawl_inner(opts: CrawlOptions<'_>) {
                     LlmUsage::accumulate(&mut data.llm_usage, result.usage);
                 }
                 Err(e) => {
-                    tracing::warn!(url = url.as_str(), "Crawl LLM extraction failed: {e}")
+                    tracing::warn!(
+                        url = %LogUrl(url.as_str()),
+                        "Crawl LLM extraction failed: {e}",
+                        e = LogErr(&e),
+                    )
                 }
             }
         }
@@ -911,7 +927,7 @@ pub async fn discover_urls(opts: DiscoverOptions<'_>) -> CrwResult<DiscoverResul
             match tokio::time::timeout(budget / 2, RobotsTxt::fetch(&origin, &client)).await {
                 Ok(Ok(robots)) => robots,
                 Ok(Err(error)) => {
-                    tracing::warn!(error = %error, "robots.txt unavailable, discovering without its rules");
+                    tracing::warn!(error = %LogErr(&error), "robots.txt unavailable, discovering without its rules");
                     RobotsTxt::default()
                 }
                 Err(_) => {
@@ -994,12 +1010,19 @@ pub async fn discover_urls(opts: DiscoverOptions<'_>) -> CrwResult<DiscoverResul
                     // A wall no tier could clear is not the sitemap, whatever
                     // markup it holds. It used to arrive as the error below.
                     Ok(r) if crw_renderer::is_unclearable_wall(&r) => {
-                        tracing::debug!("sitemap escalation render hit a wall for {u}");
+                        tracing::debug!(
+                            "sitemap escalation render hit a wall for {u}",
+                            u = LogUrl(&u),
+                        );
                         None
                     }
                     Ok(r) => Some(r.html),
                     Err(e) => {
-                        tracing::debug!("sitemap escalation render failed for {u}: {e}");
+                        tracing::debug!(
+                            "sitemap escalation render failed for {u}: {e}",
+                            u = LogUrl(&u),
+                            e = LogErr(&e),
+                        );
                         None
                     }
                 }

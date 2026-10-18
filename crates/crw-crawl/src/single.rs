@@ -1,6 +1,7 @@
 use crw_core::Deadline;
 use crw_core::config::{BUILTIN_UA_POOL, ExtractionConfig, LlmConfig};
 use crw_core::error::CrwResult;
+use crw_core::log_url::{LogErr, LogUrl};
 use crw_core::types::{
     BlockOutcome, ChangeTrackingMode, FetchResult, OutputFormat, RequestedRenderer, ScrapeData,
     ScrapeRequest, resolve_pinned_renderer, resolve_render_js,
@@ -531,7 +532,7 @@ async fn scrape_url_inner(
             && !has_escalation_budget
         {
             tracing::debug!(
-                url = %req.url,
+                url = %LogUrl(&req.url),
                 remaining_ms = escalation_budget.as_millis() as u64,
                 min_ms = crw_renderer::MIN_TIER_BUDGET.as_millis() as u64,
                 "skipping JS escalation: not enough deadline left to attempt it"
@@ -544,7 +545,7 @@ async fn scrape_url_inner(
             && !has_escalation_target
         {
             tracing::debug!(
-                url = %req.url,
+                url = %LogUrl(&req.url),
                 pool = ?renderer.js_renderer_names(),
                 "skipping JS escalation: no tier above lightpanda in this pool"
             );
@@ -562,7 +563,7 @@ async fn scrape_url_inner(
         if should_escalate {
             let quality_score_before = md_quality.as_ref().map(|q| q.score);
             tracing::info!(
-                url = %req.url,
+                url = %LogUrl(&req.url),
                 status = fetch_result.status_code,
                 html_len = fetch_result.html.len(),
                 prior = prior_renderer,
@@ -601,8 +602,9 @@ async fn scrape_url_inner(
                     {
                         Err(e) => {
                             tracing::warn!(
-                                url = %req.url,
-                                "JS escalation rendered the page but extraction failed, keeping the prior tier's result: {e}"
+                                url = %LogUrl(&req.url),
+                                "JS escalation rendered the page but extraction failed, keeping the prior tier's result: {e}",
+                                e = LogErr(&e),
                             );
                         }
                         Ok(js_data) => {
@@ -642,7 +644,7 @@ async fn scrape_url_inner(
                                     .map(|w| w.reason.as_str())
                                     .unwrap_or_default();
                                 tracing::info!(
-                                    url = %req.url,
+                                    url = %LogUrl(&req.url),
                                     reason,
                                     "JS escalation met a wall, keeping the prior tier's result",
                                 );
@@ -680,7 +682,7 @@ async fn scrape_url_inner(
                                 // soft-block status into the response top-level warning.
                                 effective_warning = js_warning;
                                 tracing::info!(
-                                    url = %req.url,
+                                    url = %LogUrl(&req.url),
                                     from_status = fetch_result.status_code,
                                     to_status = js_status,
                                     md_len = js_md_len,
@@ -691,7 +693,7 @@ async fn scrape_url_inner(
                                 escalated_fetch = Some(js_fetch);
                             } else {
                                 tracing::info!(
-                                    url = %req.url,
+                                    url = %LogUrl(&req.url),
                                     md_bytes,
                                     js_md_len,
                                     before = before_score,
@@ -703,7 +705,11 @@ async fn scrape_url_inner(
                     }
                 }
                 Err(e) => {
-                    tracing::warn!(url = %req.url, "JS escalation after empty markdown failed: {e}");
+                    tracing::warn!(
+                        url = %LogUrl(&req.url),
+                        "JS escalation after empty markdown failed: {e}",
+                        e = LogErr(&e),
+                    );
                     // The caller gets the thin prior page; say why it is not the
                     // rendered one.
                     let failed = format!("{} {e}", crw_renderer::JS_ESCALATION_FAILED);
@@ -788,7 +794,7 @@ async fn scrape_url_inner(
     // maps to 422.
     if is_cdn_origin_error(fetch_result.status_code) {
         tracing::warn!(
-            url = %req.url,
+            url = %LogUrl(&req.url),
             status = fetch_result.status_code,
             elapsed_ms = fetch_result.elapsed_ms,
             "CDN could not reach the origin; failing instead of returning its error page"
@@ -813,7 +819,7 @@ async fn scrape_url_inner(
         data.markdown.as_deref(),
     ) {
         tracing::warn!(
-            url = %req.url,
+            url = %LogUrl(&req.url),
             elapsed_ms = fetch_result.elapsed_ms,
             "render budget expired with no extractable content; failing instead of returning an empty page"
         );

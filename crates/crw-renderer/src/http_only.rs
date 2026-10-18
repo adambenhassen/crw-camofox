@@ -1,6 +1,7 @@
 use async_trait::async_trait;
 use crw_core::Deadline;
 use crw_core::error::{CrwError, CrwResult};
+use crw_core::log_url::{LogErr, LogUrl, url_for_error};
 use crw_core::types::FetchResult;
 use std::collections::HashMap;
 use std::time::Instant;
@@ -450,7 +451,8 @@ impl PageFetcher for HttpFetcher {
     ) -> CrwResult<FetchResult> {
         if deadline.expired() {
             return Err(CrwError::HttpError(format!(
-                "deadline expired before HTTP fetch of {url}"
+                "deadline expired before HTTP fetch of {}",
+                url_for_error(url)
             )));
         }
         let start = Instant::now();
@@ -643,7 +645,8 @@ impl PageFetcher for HttpFetcher {
                 Err(_) if use_proxy && (proxy_first || armed_mid_loop) && !direct_rescue_used => {
                     tracing::warn!(
                         "proxy attempt for {url} exhausted its budget while latched ({}ms); falling back to direct",
-                        remaining.as_millis()
+                        remaining.as_millis(),
+                        url = LogUrl(&url),
                     );
                     use_proxy = false;
                     direct_rescue_used = true;
@@ -663,13 +666,14 @@ impl PageFetcher for HttpFetcher {
                         // starvation delaying both egresses' timers alike) rather than a
                         // dead target, this line is how an operator tells the two apart.
                         tracing::warn!(
-                            url,
+                            url = %LogUrl(&url),
                             "direct connect-timeout and proxy rescue both failed; \
-                             reporting target_unreachable (was: timeout)"
+                             reporting target_unreachable (was: timeout)",
                         );
                         return Err(CrwError::TargetUnreachable(format!(
-                            "Could not reach {url}: no response from the origin over \
-                             either egress"
+                            "Could not reach {}: no response from the origin over \
+                             either egress",
+                            url_for_error(url)
                         )));
                     }
                     return Err(CrwError::Timeout(remaining.as_millis() as u64));
@@ -680,7 +684,8 @@ impl PageFetcher for HttpFetcher {
                     tracing::debug!(
                         "HTTP {} from {url}, retrying (attempt {})",
                         r.status(),
-                        attempt + 1
+                        attempt + 1,
+                        url = LogUrl(&url),
                     );
                     drop(r);
                     attempt += 1;
@@ -707,7 +712,8 @@ impl PageFetcher for HttpFetcher {
                     let armed_by_header = challenge_header(r.headers()).is_some();
                     tracing::warn!(
                         "HTTP {} from {url} (origin rate-limited or header-announced challenge); retrying once via proxy (ratelimit_bypassed)",
-                        r.status()
+                        r.status(),
+                        url = LogUrl(&url),
                     );
                     drop(r);
                     // The proxy was armed mid-loop, so `proxy_first` is false and
@@ -768,7 +774,8 @@ impl PageFetcher for HttpFetcher {
                 {
                     tracing::warn!(
                         "HTTP {} from {url} via proxy while latched; falling back to direct",
-                        r.status()
+                        r.status(),
+                        url = LogUrl(&url),
                     );
                     drop(r);
                     use_proxy = false;
@@ -796,7 +803,8 @@ impl PageFetcher for HttpFetcher {
                     // unsuccessful, 407) is in its sources. Masks proxy userinfo.
                     tracing::warn!(
                         "proxy egress failed for {url} while latched ({}); falling back to direct",
-                        crw_core::error::reqwest_error_chain(e)
+                        crw_core::error::reqwest_error_chain(e),
+                        url = LogUrl(&url),
                     );
                     use_proxy = false;
                     direct_rescue_used = true;
@@ -805,7 +813,9 @@ impl PageFetcher for HttpFetcher {
                     if !use_relaxed && self.relaxed_client.is_some() && is_cert_error(&e) =>
                 {
                     tracing::warn!(
-                        "TLS verification failed for {url} ({e}); retrying once with relaxed TLS (tls_unverified)"
+                        "TLS verification failed for {url} ({e}); retrying once with relaxed TLS (tls_unverified)",
+                        url = LogUrl(&url),
+                        e = LogErr(&e),
                     );
                     use_relaxed = true;
                 }
@@ -843,7 +853,9 @@ impl PageFetcher for HttpFetcher {
                         && is_connection_failure(&e) =>
                 {
                     tracing::warn!(
-                        "direct egress could not reach {url} ({e}); retrying via proxy (egress_blocked)"
+                        "direct egress could not reach {url} ({e}); retrying via proxy (egress_blocked)",
+                        url = LogUrl(&url),
+                        e = LogErr(&e),
                     );
                     use_proxy = true;
                     // Deliberately narrower than this arm's own guard. Only a
@@ -877,7 +889,9 @@ impl PageFetcher for HttpFetcher {
                 {
                     tracing::debug!(
                         "transient HTTP error to {url} ({e}), retrying (attempt {})",
-                        attempt + 1
+                        attempt + 1,
+                        url = LogUrl(&url),
+                        e = LogErr(&e),
                     );
                     attempt += 1;
                     let backoff = HTTP_RETRY_BACKOFF.min(deadline.remaining());
@@ -903,9 +917,9 @@ impl PageFetcher for HttpFetcher {
                     // at 502 because a refusal is not a timeout.
                     if e.is_connect() && use_proxy && direct_connect_failed {
                         tracing::warn!(
-                            url,
+                            url = %LogUrl(&url),
                             "direct connect-timeout and proxy attempt both failed; \
-                             reporting target_unreachable (was: http_error)"
+                             reporting target_unreachable (was: http_error)",
                         );
                     }
                     let unreachable = e.is_connect() && (!use_proxy || direct_connect_failed);
@@ -915,9 +929,12 @@ impl PageFetcher for HttpFetcher {
                     // arms name it themselves.
                     let msg = crw_core::error::reqwest_message(e);
                     return Err(if unreachable {
-                        CrwError::TargetUnreachable(format!("Could not reach {url}: {msg}"))
+                        CrwError::TargetUnreachable(format!(
+                            "Could not reach {}: {msg}",
+                            url_for_error(url)
+                        ))
                     } else {
-                        CrwError::HttpError(format!("{url}: {msg}"))
+                        CrwError::HttpError(format!("{}: {msg}", url_for_error(url)))
                     });
                 }
             }
@@ -1025,9 +1042,9 @@ impl PageFetcher for HttpFetcher {
                 .egress_latched_hosts
                 .set(eg.latched_hosts() as i64);
             tracing::info!(
-                url,
+                url = %LogUrl(&url),
                 status,
-                "direct egress hit an IP-reputation block; latching host to proxy-first"
+                "direct egress hit an IP-reputation block; latching host to proxy-first",
             );
         }
 
@@ -1125,10 +1142,10 @@ pub(crate) fn build_http_fetch_result(
         // hard error without climbing the ladder, so if a class of real
         // pages ever lands here it has to be visible in production.
         tracing::info!(
-            url,
+            url = %LogUrl(&url),
             content_type = content_type.as_deref().unwrap_or("none"),
             bytes = bytes.len(),
-            "binary body, returning unsupported content type without escalating"
+            "binary body, returning unsupported content type without escalating",
         );
         return Err(CrwError::UnsupportedContentType(format!(
             "{} ({} bytes): the body is binary, not HTML and not a PDF, \

@@ -1,5 +1,6 @@
 use async_trait::async_trait;
 use crw_core::error::{CrwError, CrwResult};
+use crw_core::log_url::LogUrl;
 use crw_core::types::{CapturedNetworkResponse, FetchResult};
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -2618,10 +2619,10 @@ impl CdpRenderer {
                     // for LightPanda's much smaller budget and sent anyone reading
                     // the logs to the wrong tier.
                     tracing::info!(
-                        url,
+                        url = %LogUrl(&url),
                         renderer = %self.name,
                         budget_ms = nav_budget.as_millis() as u64,
-                        "nav budget hit; attempting partial snapshot"
+                        "nav budget hit; attempting partial snapshot",
                     );
                     let _ = conn
                         .send_recv(
@@ -2789,7 +2790,11 @@ impl CdpRenderer {
                     .unresolved
                     .load(std::sync::atomic::Ordering::Relaxed) =>
             {
-                tracing::warn!(url, tier = %self.name, "outbound destination check unavailable");
+                tracing::warn!(
+                    url = %LogUrl(&url),
+                    tier = %self.name,
+                    "outbound destination check unavailable",
+                );
                 Err(CrwError::RendererError(format!(
                     "outbound destination check unavailable ({err})"
                 )))
@@ -2823,7 +2828,7 @@ impl CdpRenderer {
             && wait_for_ms.is_none()
             && crate::detector::looks_like_loading_placeholder(&html)
         {
-            tracing::debug!(url, "Placeholder still present after stability poll");
+            tracing::debug!(url = %LogUrl(&url), "Placeholder still present after stability poll");
         }
 
         let captured_drained = std::mem::take(&mut *captured.lock().await);
@@ -2865,7 +2870,7 @@ impl CdpRenderer {
         if let Some(wait) = wait_for_ms {
             tokio::time::sleep(Duration::from_millis(wait)).await;
         } else if !Self::wait_for_spa_selector(conn, session_id, self.page_timeout, net).await {
-            tracing::debug!(url, "SPA selector poll exhausted budget");
+            tracing::debug!(url = %LogUrl(&url), "SPA selector poll exhausted budget");
         }
 
         // 4. Get rendered HTML.
@@ -2874,8 +2879,8 @@ impl CdpRenderer {
         // 4b. SPA loading placeholder → poll for content stability.
         if wait_for_ms.is_none() && crate::detector::looks_like_loading_placeholder(&html) {
             tracing::info!(
-                url,
-                "Loading placeholder detected, polling for content stability"
+                url = %LogUrl(&url),
+                "Loading placeholder detected, polling for content stability",
             );
             match Self::poll_until_content_stable(conn, session_id, self.page_timeout).await {
                 Ok(stable) => html = stable,
@@ -2948,15 +2953,18 @@ impl CdpRenderer {
 
         // 5. Challenge retry loop for Cloudflare/anti-bot interstitials.
         if is_challenge_page(&html) {
-            tracing::info!(url, "Challenge page detected, waiting for auto-resolve");
+            tracing::info!(
+                url = %LogUrl(&url),
+                "Challenge page detected, waiting for auto-resolve",
+            );
             for attempt in 1..=CHALLENGE_MAX_RETRIES {
                 tokio::time::sleep(Duration::from_millis(CHALLENGE_POLL_INTERVAL_MS)).await;
                 html = Self::eval_html(conn, session_id, self.page_timeout).await?;
                 if !is_challenge_page(&html) {
-                    tracing::info!(url, attempt, "Challenge cleared");
+                    tracing::info!(url = %LogUrl(&url), attempt, "Challenge cleared");
                     break;
                 }
-                tracing::debug!(url, attempt, "Challenge still active, retrying");
+                tracing::debug!(url = %LogUrl(&url), attempt, "Challenge still active, retrying");
             }
         }
 

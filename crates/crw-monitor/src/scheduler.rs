@@ -17,6 +17,7 @@ use crate::store::Store;
 use crate::types::Monitor;
 #[cfg(feature = "store")]
 use crw_core::config::LlmConfig;
+use crw_core::log_url::LogErr;
 #[cfg(feature = "store")]
 use std::sync::Arc;
 
@@ -73,7 +74,11 @@ impl Scheduler {
         let due = self.store.due_monitors(now)?;
         for monitor in due {
             if let Err(e) = self.run_monitor(&monitor, now).await {
-                tracing::error!(monitor = %monitor.id, error = %e, "monitor check failed");
+                tracing::error!(
+                    monitor = %monitor.id,
+                    error = %LogErr(&e),
+                    "monitor check failed",
+                );
             }
         }
         Ok(())
@@ -104,7 +109,11 @@ impl Scheduler {
             if let Some(webhook) = &monitor.webhook
                 && let Err(e) = crate::webhook::deliver(&self.http, webhook, &check).await
             {
-                tracing::warn!(monitor = %monitor.id, error = %e, "webhook delivery failed");
+                tracing::warn!(
+                    monitor = %monitor.id,
+                    error = %LogErr(&e),
+                    "webhook delivery failed",
+                );
             }
         }
 

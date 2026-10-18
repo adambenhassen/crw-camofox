@@ -33,6 +33,18 @@ and the project uses [Semantic Versioning](https://semver.org/).
 
 ### Fixed
 
+- **Logs:** engine log lines no longer print a target URL. Paths, queries and
+  fragments can carry tokens, signed links or emails, so each line shows
+  `scheme://host[:port] (u:<12 hex>)` instead: the tag is a keyed hash of the
+  full URL, so lines for one URL still group, and its key is random per process
+  (tags change on restart, and the logs alone cannot confirm a guessed value).
+  URLs quoted inside logged error text get the same treatment, and unknown
+  schemes or unparsable input print `<redacted-url>`. Covers the HTTP,
+  impersonated, CDP and camofox tiers, scrape, crawl, map and sitemap
+  discovery, search enrichment and the monitor. Log queries that matched a
+  path or `url="..."` must match the origin and tag. The only API-visible
+  change: a fetch error for a URL containing whitespace now shows it
+  percent-encoded. No config knob. Upstream `a0ef20bf`.
 - **Extract:** the markdown rescue candidate no longer reintroduces page chrome
   under `onlyMainContent`. It used to be the raw page, so a mega menu, footer
   and cookie notice could win on word count. It now drops `nav`, site

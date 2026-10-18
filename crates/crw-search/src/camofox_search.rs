@@ -33,6 +33,7 @@ use std::time::Duration;
 use serde::Deserialize;
 use serde_json::json;
 
+use crw_core::log_url::LogErr;
 use crw_core::types::SearchEngine;
 
 use crate::client::{
@@ -387,7 +388,11 @@ impl CamofoxSearchClient {
                 Err(e) => {
                     // The API response gets only the stripped reason; the full
                     // error (with camofox's message) is only visible here.
-                    tracing::warn!(engine = label, error = %e, "camofox: engine failed");
+                    tracing::warn!(
+                        engine = label,
+                        error = %LogErr(&e),
+                        "camofox: engine failed",
+                    );
                     unresponsive.push(serde_json::json!([label, engine_failure_reason(&e)]));
                     last_err = Some(e);
                 }

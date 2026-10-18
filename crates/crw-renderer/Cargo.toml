@@ -52,3 +52,5 @@ wiremock = { workspace = true }
 tokio = { workspace = true }
 flate2 = "1"
 brotli = "8"
+# Captures log output in the target-URL redaction tests.
+tracing-subscriber = { workspace = true }
