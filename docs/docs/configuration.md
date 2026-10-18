@@ -65,7 +65,7 @@ ws_url = "ws://127.0.0.1:9222/"
 # [renderer.camofox]
 # base_url = "http://127.0.0.1:9377"
 # api_key = "..."                 # only if the camofox server runs with auth
-# challenge_wait_ms = 20000       # wait for a Cloudflare "Just a moment" page to clear; 0 = off
+# challenge_wait_ms = 20000       # wait for a Cloudflare "Just a moment" page to clear; 0 = off (default 20000, 5000 with [renderer.byparr])
 # clearance_reuse = true          # cache cf_clearance + UA per host, reuse on the HTTP tier
 
 # Byparr (FlareSolverr-compatible challenge solver, e.g. ghcr.io/thephaseless/byparr).

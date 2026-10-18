@@ -1077,9 +1077,9 @@ pub struct CamofoxEndpoint {
     /// Longest the Camofox tier waits, on the open tab, for a Cloudflare
     /// managed challenge ("Just a moment...") to clear before it snapshots
     /// whatever is on screen. `0` disables the wait. Always clamped to the
-    /// request deadline.
-    #[serde(default = "default_challenge_wait_ms")]
-    pub challenge_wait_ms: u64,
+    /// request deadline. Unset means [`Self::challenge_wait_ms`]'s default.
+    #[serde(default)]
+    pub challenge_wait_ms: Option<u64>,
     /// After a successful render that earned a `cf_clearance` cookie, cache
     /// the tab's cookies + user agent per host so the HTTP tier can reuse
     /// them and skip the browser on the next scrape of that host.
@@ -1087,8 +1087,14 @@ pub struct CamofoxEndpoint {
     pub clearance_reuse: bool,
 }
 
-fn default_challenge_wait_ms() -> u64 {
-    20_000
+impl CamofoxEndpoint {
+    /// The challenge wait in ms: the configured value, else 20 s, or 5 s when
+    /// a Byparr solver runs after Camofox. Passive clears land within seconds
+    /// or not at all, so a long wait only delays the solver.
+    pub fn challenge_wait_ms(&self, byparr_configured: bool) -> u64 {
+        self.challenge_wait_ms
+            .unwrap_or(if byparr_configured { 5_000 } else { 20_000 })
+    }
 }
 
 /// HTTP endpoint for the Byparr challenge-solver tier (a FlareSolverr-compatible
@@ -1742,14 +1748,16 @@ mod tests {
     fn camofox_endpoint_defaults_for_challenge_and_clearance() {
         let ep: CamofoxEndpoint =
             toml::from_str("base_url = \"http://camofox:9377\"").expect("minimal endpoint parses");
-        assert_eq!(ep.challenge_wait_ms, 20_000);
+        assert_eq!(ep.challenge_wait_ms(false), 20_000);
+        assert_eq!(ep.challenge_wait_ms(true), 5_000);
         assert!(ep.clearance_reuse);
 
         let ep: CamofoxEndpoint = toml::from_str(
             "base_url = \"http://camofox:9377\"\nchallenge_wait_ms = 0\nclearance_reuse = false",
         )
         .expect("explicit values parse");
-        assert_eq!(ep.challenge_wait_ms, 0);
+        assert_eq!(ep.challenge_wait_ms(false), 0);
+        assert_eq!(ep.challenge_wait_ms(true), 0);
         assert!(!ep.clearance_reuse);
     }
 

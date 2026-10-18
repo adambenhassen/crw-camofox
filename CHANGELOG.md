@@ -7,6 +7,13 @@ and the project uses [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Changed
+
+- **Renderer:** with a Byparr solver configured, the Camofox tier now waits at
+  most 5 s (was 20 s) for a Cloudflare challenge to clear before handing over.
+  Camofox clears these within seconds or not at all, so the long wait only
+  delayed the solve. An explicit `renderer.camofox.challenge_wait_ms` still wins.
+
 ## [1.8.1] - 2026-10-18
 
 A fix release: a real 403/503 page is no longer reported as a wall just

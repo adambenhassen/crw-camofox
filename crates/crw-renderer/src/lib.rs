@@ -716,7 +716,9 @@ impl FallbackRenderer {
                     cf.api_key.clone(),
                     Duration::from_millis(config.chrome_timeout()),
                 )
-                .with_challenge_wait(Duration::from_millis(cf.challenge_wait_ms));
+                .with_challenge_wait(Duration::from_millis(
+                    cf.challenge_wait_ms(config.byparr.is_some()),
+                ));
                 if cf.clearance_reuse {
                     tier = tier.with_clearance_cache(Arc::clone(&clearance));
                 }
@@ -2812,7 +2814,7 @@ mod tests {
             camofox: Some(CamofoxEndpoint {
                 base_url: "http://127.0.0.1:1".into(),
                 api_key: None,
-                challenge_wait_ms: 5_000,
+                challenge_wait_ms: Some(5_000),
                 clearance_reuse: false,
             }),
             ..Default::default()
@@ -2876,7 +2878,7 @@ mod tests {
                 camofox: Some(crw_core::config::CamofoxEndpoint {
                     base_url: "http://127.0.0.1:9377".into(),
                     api_key: None,
-                    challenge_wait_ms: 20_000,
+                    challenge_wait_ms: Some(20_000),
                     clearance_reuse: true,
                 }),
                 ..Default::default()
