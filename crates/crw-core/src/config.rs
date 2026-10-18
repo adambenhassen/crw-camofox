@@ -25,6 +25,38 @@ pub struct AppConfig {
     /// hosted SaaS. Written by `crw setup` into the user-config file.
     #[serde(default)]
     pub client: ClientConfig,
+    /// `[page_cache]` — in-memory cache of fetched pages (`maxAge` /
+    /// `storeInCache`).
+    #[serde(default)]
+    pub page_cache: PageCacheConfig,
+}
+
+/// `[page_cache]` section. The cache holds the FETCH (not the extraction) so a
+/// repeat scrape of the same page skips the network. All knobs honor
+/// `CRW_PAGE_CACHE__*` env overrides and are applied once at boot
+/// (`crw_crawl::page_cache::configure`).
+#[derive(Debug, Clone, Deserialize)]
+#[serde(default)]
+pub struct PageCacheConfig {
+    /// Master switch. When false every request fetches live, whatever
+    /// `maxAge` says, and nothing is stored.
+    pub enabled: bool,
+    /// Total capacity across all entries, in MiB (weighted by body size).
+    pub capacity_mb: u64,
+    /// How old a cached copy may be when the request sends no `maxAge`, in
+    /// milliseconds. Clamped to the 24 hour ceiling. 0 makes "no `maxAge`"
+    /// mean "always fetch"; a request can still opt in with an explicit value.
+    pub default_max_age_ms: u64,
+}
+
+impl Default for PageCacheConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            capacity_mb: 256,
+            default_max_age_ms: 60 * 60 * 1000,
+        }
+    }
 }
 
 /// `[client]` — cloud-proxy credentials populated by `crw setup` and read by

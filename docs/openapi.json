@@ -338,7 +338,9 @@
           "jsonOptions":     { "$ref": "#/components/schemas/JsonOptions" },
           "changeTracking":  { "$ref": "#/components/schemas/ChangeTrackingOptions", "description": "Activated when formats includes 'changeTracking'. The format entry is the plain string; options ride on this sibling field." },
           "goal":            { "type": "string", "maxLength": 2048, "description": "Plain-language monitor goal for the meaningful-change judge" },
-          "judgeEnabled":    { "type": "boolean", "description": "Run the LLM meaningful-change judge on a changed page (requires goal)" }
+          "judgeEnabled":    { "type": "boolean", "description": "Run the LLM meaningful-change judge on a changed page (requires goal)" },
+          "maxAge":          { "type": "integer", "format": "int64", "minimum": 0, "default": 3600000, "description": "How old a cached copy of this fetch may be, in milliseconds. 0 always fetches. Clamped to a 24 hour ceiling. Extraction options (formats, schema, selectors) are not part of the cache key, so a second pass over the same page reuses the fetch." },
+          "storeInCache":    { "type": "boolean", "default": true, "description": "Set false to read the cache without writing to it." }
         }
       },
       "ScrapeResponse": {
@@ -359,7 +361,8 @@
               "warning":  { "type": "string" },
               "warnings": { "type": "array", "items": { "type": "string" } },
               "renderDecision": { "type": "string", "description": "Which renderer ran (e.g. 'http', 'browser')" },
-              "creditCost":     { "type": "number" }
+              "creditCost":     { "type": "number" },
+              "cached":         { "type": "boolean", "description": "Present and true when the page was replayed from the fetch cache instead of fetched" }
             }
           }
         }

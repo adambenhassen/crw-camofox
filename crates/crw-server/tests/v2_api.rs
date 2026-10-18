@@ -73,6 +73,23 @@ async fn v2_scrape_tolerates_unknown_sdk_fields() {
     r.assert_status(StatusCode::BAD_REQUEST);
 }
 
+// maxAge and storeInCache used to be unknown-and-ignored. Typing them must not
+// turn an SDK that sends the wrong shape into a 400 on a request that worked.
+#[tokio::test]
+async fn v2_scrape_tolerates_a_badly_typed_max_age() {
+    let s = test_app();
+    let r = s
+        .post("/v2/scrape")
+        .json(&json!({
+            "url": "not-a-url",
+            "maxAge": "3600000",
+            "storeInCache": "false"
+        }))
+        .await;
+    // 400 from URL parse, NOT 422 from a type rejection.
+    r.assert_status(StatusCode::BAD_REQUEST);
+}
+
 #[tokio::test]
 async fn v2_map_invalid_url_400() {
     let s = test_app();

@@ -382,6 +382,7 @@ pub async fn run(args: McpArgs) -> Result<(), CmdError> {
                     map: Default::default(),
                     document: Default::default(),
                     client: Default::default(),
+                    page_cache: Default::default(),
                 }
             });
 

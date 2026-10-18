@@ -114,9 +114,13 @@ fn renderer_with_http(
 }
 
 async fn scrape(r: &Arc<FallbackRenderer>) -> CrwResult<crw_core::types::ScrapeData> {
-    let req: ScrapeRequest =
-        serde_json::from_value(serde_json::json!({ "url": "https://spa.example/listings" }))
-            .expect("request");
+    let req: ScrapeRequest = serde_json::from_value(serde_json::json!({
+        "url": "https://spa.example/listings",
+        // Every test here serves this one URL from different mock tiers, and the
+        // page cache is process-global: opt out so no test reads another's page.
+        "maxAge": 0,
+    }))
+    .expect("request");
     scrape_url(
         &req,
         r,

@@ -117,6 +117,11 @@ max_concurrency = 4          # bounded fan-out for per-result summaries in /v1/s
 # base_url = ""              # for OpenAI-compatible endpoints (DeepSeek, Azure, Ollama, …)
 # require_byok_header = ""   # tenant guard: reject LLM requests missing this header AND without llmApiKey
 
+[page_cache]
+enabled = true                  # false: every request fetches live, whatever `maxAge` says
+capacity_mb = 256               # total capacity across entries; bodies over 8 MiB are not stored
+default_max_age_ms = 3600000    # cache window when a request omits `maxAge` (capped at 24 h; 0 = always fetch)
+
 [auth]
 # api_keys = ["fc-key-1234"]
 ```
@@ -164,6 +169,9 @@ Use the `CRW_` prefix with `__` as a nesting separator:
 | `renderer.byparr.clearance_reuse` | `CRW_RENDERER__BYPARR__CLEARANCE_REUSE` |
 | `search.searxng_url` | `CRW_SEARCH__SEARXNG_URL` |
 | `search.github_token` | `CRW_SEARCH__GITHUB_TOKEN` |
+| `page_cache.enabled` | `CRW_PAGE_CACHE__ENABLED` |
+| `page_cache.capacity_mb` | `CRW_PAGE_CACHE__CAPACITY_MB` |
+| `page_cache.default_max_age_ms` | `CRW_PAGE_CACHE__DEFAULT_MAX_AGE_MS` |
 | `extraction.llm.api_key` | `CRW_EXTRACTION__LLM__API_KEY` |
 | `extraction.llm.provider` | `CRW_EXTRACTION__LLM__PROVIDER` |
 | `extraction.llm.model` | `CRW_EXTRACTION__LLM__MODEL` |

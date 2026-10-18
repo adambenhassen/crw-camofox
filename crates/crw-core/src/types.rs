@@ -299,6 +299,17 @@ pub struct ScrapeRequest {
     ///   capped via `maxPages`).
     #[serde(default)]
     pub parsers: Option<Vec<ParserSpec>>,
+    /// How old a cached copy of this fetch may be, in milliseconds. `None` is
+    /// the configured default (`[page_cache] default_max_age_ms`, one hour out
+    /// of the box), `0` always fetches, and anything above the 24 hour ceiling
+    /// is clamped. Documented at `docs/docs/scraping.md`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_age: Option<u64>,
+    /// Firecrawl's write switch: `false` reads the cache but never writes to
+    /// it. Reading stays allowed because the field is about what we keep, not
+    /// about what we may reuse.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub store_in_cache: Option<bool>,
 }
 
 /// A document parser directive (Firecrawl `parsers` entry). Accepts either the
@@ -416,6 +427,8 @@ impl Default for ScrapeRequest {
             goal: None,
             judge_enabled: None,
             parsers: None,
+            max_age: None,
+            store_in_cache: None,
         }
     }
 }
@@ -698,6 +711,13 @@ pub struct ScrapeData {
     /// silent recall regression.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub truncated: bool,
+    /// True when this page came from the fetch cache instead of the network.
+    /// Surfaces as `cacheState` on the Firecrawl-compat surface and as `cached`
+    /// on the native one, so a caller can always tell a replay from a fresh
+    /// fetch. Omitted when false, which keeps every existing response byte
+    /// identical.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub cached: bool,
 }
 
 /// Above this many bytes of body, a `>= 400` response is treated as the real page
@@ -1200,6 +1220,7 @@ mod tests {
             render_decision: None,
             credit_cost: 0,
             truncated: false,
+            cached: false,
             metadata: PageMetadata {
                 title: None,
                 description: None,
@@ -1530,6 +1551,7 @@ mod tests {
                 reason: "cloudflare challenge interstitial".into(),
             }),
             truncated: false,
+            cached: false,
         };
         data.clear_body();
         // content-shell + LLM outputs cleared

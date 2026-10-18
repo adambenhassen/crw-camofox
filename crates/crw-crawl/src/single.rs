@@ -8,6 +8,8 @@ use crw_core::types::{
 use crw_renderer::FallbackRenderer;
 use crw_renderer::http_only::HttpFetcher;
 use crw_renderer::traits::PageFetcher;
+
+use crate::page_cache;
 use regex::Regex;
 use std::sync::LazyLock;
 use std::sync::{Arc, Mutex};
@@ -150,59 +152,144 @@ async fn scrape_url_inner(
         crw_core::validate_proxy_url(p).map_err(crw_core::error::CrwError::InvalidRequest)?;
     }
 
-    let mut fetch_result = if needs_temp_fetcher {
-        let proxy = req.proxy.as_deref();
-        // Rotate UA from built-in pool when stealth is active, so the request
-        // looks like a real browser even for per-request stealth overrides.
-        let effective_ua = if inject_stealth {
-            BUILTIN_UA_POOL[rand::random_range(0..BUILTIN_UA_POOL.len())].to_string()
-        } else {
-            user_agent.to_string()
-        };
-
-        // An impersonated-http pin is a transport choice the shared renderer
-        // serves from its early pin arm; the temp HTTP fetcher must not
-        // swallow it. (The pin then ignores the per-request proxy: known gap,
-        // see docs/docs/configuration.md.)
-        if effective_render_js == Some(false) && !matches!(pinned, Some("impersonated-http")) {
-            // HTTP-only: safe to use a temp HttpFetcher with custom proxy/stealth.
-            let temp_http = HttpFetcher::new(&effective_ua, proxy, inject_stealth);
-            temp_http
-                .fetch(&req.url, &req.headers, req.wait_for, deadline)
-                .await?
-        } else {
-            // JS rendering needed (or auto-detect): use the shared renderer which
-            // has CDP backends configured. Inject stealth headers via custom headers
-            // so the shared renderer's CDP connections are still used.
-            let mut merged_headers = req.headers.clone();
-            if inject_stealth {
-                merged_headers
-                    .entry("User-Agent".to_string())
-                    .or_insert(effective_ua);
-            }
-            renderer
-                .fetch(
-                    &req.url,
-                    &merged_headers,
-                    effective_render_js_request,
-                    req.wait_for,
-                    pinned,
-                    deadline,
-                )
-                .await?
-        }
-    } else {
-        renderer
-            .fetch(
-                &req.url,
-                &req.headers,
-                effective_render_js_request,
-                req.wait_for,
-                pinned,
-                deadline,
-            )
-            .await?
+    // ---- page cache ----
+    //
+    // Reuse a page we already fetched instead of fetching it again. What is
+    // cached is the FETCH, never the extraction, so a second pass with a
+    // different schema is a hit and still runs its own extraction. The
+    // published contract (`docs/docs/scraping.md`) is one hour by default,
+    // clamped to 24 hours, `maxAge: 0` always fetches.
+    //
+    // Placed after the validation and pinned-renderer availability checks above:
+    // a pin this deployment cannot serve must still 400 rather than be answered
+    // from cache. (URL safety is checked by every caller before it gets here.)
+    let cache_max_age = page_cache::effective_max_age(req.max_age);
+    let cacheable = !cache_max_age.is_zero()
+        // Change tracking diffs a LIVE fetch against the caller's previous
+        // snapshot. Replaying a page would report `unchanged` for a page that
+        // did change: a silent wrong answer.
+        && !req.formats.contains(&OutputFormat::ChangeTracking)
+        // Caller headers are where a cookie or an authorization token lives, so
+        // a header-bearing fetch is personal to that caller: it is never stored
+        // and never read. Keying on them would technically separate callers,
+        // but it would still hold a logged-in page in memory for an hour after
+        // the session that fetched it was revoked, and it would put the token
+        // itself in the key. This is what keeps a cached page to what any
+        // anonymous caller would have received.
+        && req.headers.is_empty()
+        // A caller proxy is theirs, and the stealth-override arm draws a fresh
+        // random user agent per request, so neither fetch is reproducible from
+        // the request alone.
+        && !needs_temp_fetcher;
+    // A fetch that escalated to a browser holds a rendered DOM, which is not
+    // what a caller reading the HTTP source would have got. Requests that can
+    // escalate and requests that cannot therefore keep separate entries. This
+    // mirrors `escalation_eligible` below, minus the content type and the
+    // selector, which are not known until the page is in hand.
+    let may_escalate = effective_render_js != Some(false)
+        && !needs_temp_fetcher
+        && !renderer.js_renderer_names().is_empty()
+        && req.formats.contains(&OutputFormat::Markdown);
+    let cache_key = cacheable.then(|| {
+        page_cache::build_key(&page_cache::KeyInputs {
+            url: &req.url,
+            // The value actually handed to the renderer, not the resolved bool
+            // used for the temp-fetcher gate.
+            render_js: effective_render_js_request,
+            wait_for: req.wait_for,
+            renderer_pin: pinned,
+            user_agent,
+            may_escalate,
+        })
+    });
+    // A tight budget makes the renderer ladder skip tiers without setting any
+    // flag on the result, so the budget a fetch ran under travels with it. This
+    // is the READER's budget: what this request could have achieved on its own.
+    // The writer's is measured at commit time, from what was actually left when
+    // the page was settled, because a request can start rich and still arrive at
+    // the escalation decision with nothing.
+    let reader_budget_bucket = page_cache::budget_bucket(deadline.remaining().as_millis() as u64);
+    let cache_hit = match &cache_key {
+        Some(key) => page_cache::lookup(key, cache_max_age, reader_budget_bucket).await,
+        None => None,
     };
+    let from_cache = cache_hit.is_some();
+
+    let mut fetch_result = match cache_hit {
+        Some(hit) => hit,
+        None => {
+            if needs_temp_fetcher {
+                let proxy = req.proxy.as_deref();
+                // Rotate UA from built-in pool when stealth is active, so the request
+                // looks like a real browser even for per-request stealth overrides.
+                let effective_ua = if inject_stealth {
+                    BUILTIN_UA_POOL[rand::random_range(0..BUILTIN_UA_POOL.len())].to_string()
+                } else {
+                    user_agent.to_string()
+                };
+
+                // An impersonated-http pin is a transport choice the shared renderer
+                // serves from its early pin arm; the temp HTTP fetcher must not
+                // swallow it. (The pin then ignores the per-request proxy: known gap,
+                // see docs/docs/configuration.md.)
+                if effective_render_js == Some(false)
+                    && !matches!(pinned, Some("impersonated-http"))
+                {
+                    // HTTP-only: safe to use a temp HttpFetcher with custom proxy/stealth.
+                    let temp_http = HttpFetcher::new(&effective_ua, proxy, inject_stealth);
+                    temp_http
+                        .fetch(&req.url, &req.headers, req.wait_for, deadline)
+                        .await?
+                } else {
+                    // JS rendering needed (or auto-detect): use the shared renderer which
+                    // has CDP backends configured. Inject stealth headers via custom headers
+                    // so the shared renderer's CDP connections are still used.
+                    let mut merged_headers = req.headers.clone();
+                    if inject_stealth {
+                        merged_headers
+                            .entry("User-Agent".to_string())
+                            .or_insert(effective_ua);
+                    }
+                    renderer
+                        .fetch(
+                            &req.url,
+                            &merged_headers,
+                            effective_render_js_request,
+                            req.wait_for,
+                            pinned,
+                            deadline,
+                        )
+                        .await?
+                }
+            } else {
+                renderer
+                    .fetch(
+                        &req.url,
+                        &req.headers,
+                        effective_render_js_request,
+                        req.wait_for,
+                        pinned,
+                        deadline,
+                    )
+                    .await?
+            }
+        }
+    };
+
+    // When the network actually answered. Extraction sits between here and the
+    // commit and can take seconds, so timestamping at commit would let a slow
+    // old fetch overwrite a newer one while claiming to be fresher.
+    let fetched_at = std::time::Instant::now();
+    // Snapshot for the cache while the result is still whole: `raw_bytes` is
+    // take()n below for PDFs, and the JS escalation later overwrites only some
+    // of these fields in place. Skipped when the result already cannot be
+    // stored, so a 50MB PDF that will be rejected is not deep-copied first.
+    let worth_a_snapshot = (200..300).contains(&fetch_result.status_code)
+        && !fetch_result.truncated
+        && !fetch_result.deadline_exceeded
+        && fetch_result.wall.is_none();
+    let mut cache_candidate =
+        (cache_key.is_some() && !from_cache && worth_a_snapshot).then(|| fetch_result.clone());
 
     let warning = derive_target_warning(&fetch_result);
     // Per-request debug collector — shared across the multi-attempt JS
@@ -268,6 +355,16 @@ async fn scrape_url_inner(
     };
 
     let mut effective_warning = warning;
+    // Whether this fetch is safe to cache from a "is it actually the page"
+    // point of view. A request that cannot escalate (json-only, for instance)
+    // may be holding an unrendered shell, and pinning that shell would serve it
+    // to every later reader. Defaults true: a PDF has no shell problem, it
+    // never escalates and its bytes are the document.
+    let mut fetch_is_not_a_shell = true;
+    // Set when a JS escalation was accepted: the render that produced the body
+    // (its HTML already moved to `fetch_result`), so the entry can say which
+    // tier really produced the page.
+    let mut escalated_fetch: Option<FetchResult> = None;
     let mut data = if let Some(bytes) = pdf_bytes {
         let source = crate::pdf::PdfSource {
             source_url: fetch_result.url.clone(),
@@ -420,6 +517,13 @@ async fn scrape_url_inner(
             && escalation_eligible
             && has_escalation_target
             && has_escalation_budget;
+        // Deliberately NOT `escalation_eligible`: being allowed to escalate is
+        // not evidence that escalating happened. A thin body is treated as an
+        // unrendered shell whatever the request asked for, and so is one that
+        // is about to be escalated: until the escalation is accepted below, the
+        // body in hand is not the page, and pinning it would serve it to every
+        // later reader (and re-run the same escalation on every hit).
+        fetch_is_not_a_shell = !(md_is_byte_thin || should_escalate);
         if (md_is_byte_thin || escalate_for_quality)
             && used_low_tier
             && should_escalate_status
@@ -563,6 +667,13 @@ async fn scrape_url_inner(
                                 fetch_result.wall = js_fetch.wall.take();
                                 // So is whether it is a partial-DOM snapshot.
                                 fetch_result.truncated = js_fetch.truncated;
+                                // The accepted render is the page now, so it is
+                                // no longer a shell, and the cache entry has to
+                                // say which tier produced it: a replay that
+                                // reported the discarded tier would turn
+                                // `used_low_tier` true and re-run this whole
+                                // escalation on every hit.
+                                fetch_is_not_a_shell = true;
                                 // Replace the original "Target returned 4xx" with the JS
                                 // fetch's warning (which is None for a clean 2xx render),
                                 // so a successful escalation doesn't leak the original
@@ -577,6 +688,7 @@ async fn scrape_url_inner(
                                     quality_score_after = js_score,
                                     "JS escalation recovered content"
                                 );
+                                escalated_fetch = Some(js_fetch);
                             } else {
                                 tracing::info!(
                                     url = %req.url,
@@ -708,6 +820,89 @@ async fn scrape_url_inner(
         // The caller's budget, not the elapsed time: see `Deadline::requested_ms`.
         return Err(crw_core::error::CrwError::Timeout(deadline.requested_ms()));
     }
+
+    // ---- page cache: commit ----
+    //
+    // Here rather than at the fetch site, because only now is it known whether
+    // the page is worth replaying: the JS escalation has run and the anti-bot
+    // verdict is stamped. Here rather than at the end, because the LLM legs
+    // below can fail and the caller who retries ten seconds later should not
+    // pay for the fetch again. Every early error above (CDN origin error, empty
+    // truncated render) returns before this point, so an error is never stored.
+    let escalated = escalated_fetch.is_some();
+    if let Some(key) = cache_key.as_ref() {
+        // Assemble the entry rather than storing whichever struct is lying
+        // around. An accepted escalation lends `fetch_result` only its body,
+        // wall verdict and truncation flag, so the merged view is what a fresh
+        // request returns; the fields extraction read from the render itself
+        // come from the render, which is both true and what stops a replay from
+        // escalating again.
+        //
+        // This also runs when the base fetch was a HIT: an escalation on top of
+        // a stale entry has just produced a better page, and writing it back is
+        // the only thing that can unstick that entry before its TTL.
+        let candidate = match escalated_fetch.take() {
+            Some(render) => {
+                let mut merged = fetch_result.clone();
+                merged.rendered_with = render.rendered_with;
+                merged.render_decision = render.render_decision;
+                merged.warnings = render.warnings;
+                merged.credit_cost = render.credit_cost;
+                merged.captured_responses = render.captured_responses;
+                // An escalated page came through a browser, so it is never the
+                // PDF branch and never carries raw bytes.
+                merged.raw_bytes = None;
+                Some(merged)
+            }
+            None => cache_candidate.take(),
+        };
+        let worth_replaying = candidate.as_ref().is_some_and(|candidate| {
+            (200..300).contains(&candidate.status_code)
+            // A partial DOM snapshotted on budget expiry is a 200 with a body.
+            && !candidate.truncated
+            && !candidate.deadline_exceeded
+            // A wall is never replayed: not the classified verdict, and not the
+            // ladder-tail verdict carried on the fetch either (a vendor wall
+            // with enough prose passes the classifier, and a big wall body is
+            // not "error page sized"). Caching one would serve the wall to
+            // everyone and fight the clearance ladder.
+            && candidate.wall.is_none()
+            && data.block.is_none()
+            && data.http_error().is_none()
+            // The escalation that should have produced the page failed or was
+            // rejected, so the body is a stand-in. Transient, so not pinned.
+            && !data
+                .warning
+                .as_deref()
+                .is_some_and(|w| w.contains(crw_renderer::JS_ESCALATION_FAILED))
+            // Gated on the markdown PRODUCED, not the format requested: an
+            // extract request asks only for `json` yet computes markdown
+            // internally, and that is the path this feature exists for. An
+            // empty result also covers a selector that matched nothing, which
+            // describes the request and not the page.
+            && data.markdown.as_deref().is_some_and(|md| !md.trim().is_empty())
+            // A thin body is treated as an unrendered shell whatever the
+            // request asked for: pinning one would serve it to every later
+            // reader for the whole window.
+            && fetch_is_not_a_shell
+        });
+        // Firecrawl's write switch. Reads stay allowed: the field is about what
+        // we keep, not about what we may reuse.
+        if let (true, Some(candidate)) = (
+            worth_replaying && req.store_in_cache != Some(false),
+            candidate,
+        ) {
+            // The WRITER's bucket, measured now rather than before the fetch. A
+            // request can start with a minute and still reach the escalation
+            // decision with nothing left, and it is that remainder, not the
+            // starting budget, that decided which tier produced this page.
+            let writer_bucket = page_cache::budget_bucket(deadline.remaining().as_millis() as u64);
+            page_cache::store(key.clone(), candidate, writer_bucket, fetched_at).await;
+        }
+    }
+    // A hit that then escalated returned a body fetched live milliseconds ago,
+    // so it is not a cached answer however it started.
+    data.cached = from_cache && !escalated;
 
     // Phase 4: LLM structured extraction
     // Merge Firecrawl-compatible extract.schema into json_schema if not already set.

@@ -219,6 +219,25 @@ extra_tracking_params = []
 extra_action_params = []
 extra_preserve_params = []
 
+# ── Page cache ──────────────────────────────────────────────────────────────
+# In-memory cache of fetched pages. What is cached is the FETCH (not the
+# extraction), so a repeat scrape of the same page skips the network and a
+# second pass with a different schema or format still runs its own extraction.
+# A request controls it with `maxAge` (ms, 0 = always fetch, capped at 24 h) and
+# `storeInCache` (false = read but never write). Never cached, whatever the
+# request says: walls and blocks, errors, non-2xx pages, partial renders, thin
+# pages, change tracking, and any request that carries its own headers, proxy or
+# stealth override. Applied once at boot. All keys honor CRW_PAGE_CACHE__* env
+# overrides.
+[page_cache]
+# Master switch. When false every request fetches live, whatever `maxAge` says.
+enabled = true
+# Total capacity in MiB, weighted by body size. Entries over 8 MiB are not stored.
+capacity_mb = 256
+# How old a cached copy may be when the request sends no `maxAge`, in ms
+# (clamped to 24 h). 0 makes "no maxAge" mean "always fetch".
+default_max_age_ms = 3600000
+
 # ── Document (PDF) parsing ──────────────────────────────────────────────────
 # Controls conversion of binary documents (currently PDF) to markdown. A URL
 # that returns application/pdf is auto-converted; files can also be uploaded to

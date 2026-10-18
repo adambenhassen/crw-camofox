@@ -143,6 +143,8 @@ That is the default CRW success shape: requested content plus a compact metadata
 | `filterMode` | string | -- | `bm25` or `cosine` |
 | `topK` | number | `5` | Number of top chunks to keep |
 | `proxy` | string | -- | Per-request proxy URL |
+| `maxAge` | number | `3600000` | How old a cached copy of this fetch may be, in milliseconds. `0` forces a fresh fetch. Capped at 24 hours. See [Caching](#caching) |
+| `storeInCache` | boolean | `true` | `false` reads the cache but stores nothing |
 | `country` | string | -- | 2-letter ISO 3166-1 alpha-2 country code (lowercase, e.g. `us`, `gb`, `de`). Routes the request through the named residential pool when the `chrome_proxy` renderer tier is configured. Ignored if no proxy tier is set up. See [JS rendering — Per-request country](#js-rendering) |
 | `stealth` | boolean | -- | Override global stealth setting |
 | `jsonSchema` | object | -- | Schema for structured extraction |
@@ -154,6 +156,54 @@ That is the default CRW success shape: requested content plus a compact metadata
 | `summaryPrompt` | string | -- | Style/tone/language directive appended to the `summary` system prompt. Safety wrapper kept intact. Capped at 500 chars. |
 | `maxContentChars` | number | `[extraction.llm].max_html_bytes` (100 KB) | Per-request byte cap on content sent to the LLM for `summary`. Clamped to 200 KB server-side. |
 | `actions` | any | -- | Rejected with a clear error; use `cssSelector` or `xpath` instead |
+
+## Caching
+
+A repeat of the same fetch is served from an in-memory cache for one hour by
+default. What is cached is the FETCH, not the answer, so what counts as
+identical is what would change the page the server gets back: the URL,
+`renderJs`, `waitFor`, the `renderer` pin, and whether the request could have
+escalated to a browser (a `markdown` request can, a `json`-only or `rawHtml`-only
+one cannot, and a rendered DOM is not what an HTTP-source reader would get).
+Everything you do with the page afterwards is not part of it, so a second pass
+with different `formats`, `onlyMainContent`, selectors or a different extraction
+schema reuses the fetch instead of paying for it again.
+
+```json
+{ "url": "https://example.com", "formats": ["markdown"], "maxAge": 0 }
+```
+
+`maxAge` is how old a cached copy you will accept, in milliseconds. `0` disables
+the cache for that call and always fetches. The ceiling is 24 hours, so a page
+can never be pinned for longer than a day. `storeInCache: false` still reads
+the cache but stores nothing. The server default and capacity are set in
+[`[page_cache]`](#configuration), which can also switch the cache off.
+
+A response served from cache says so: `cached: true` on `/v1`, and
+`metadata.cacheState: "hit"` on the Firecrawl-compatible surface. It is billed
+exactly like the fetch it replays, and reports the replay time as
+`metadata.elapsedMs`. `renderedWith` is the renderer that produced the original
+page.
+
+**Never cached**, whatever you pass:
+
+- **Walls and blocks.** A challenge page, a block verdict, or a wall the renderer
+  ladder carried back is never stored or served.
+- **Errors and non-2xx pages.** A retry always gets a real attempt.
+- **Partial or stand-in bodies.** A render cut short by its budget, a thin page
+  that looks like an unrendered shell, and a body left behind by a JS escalation
+  that failed or was skipped.
+- **Selector misses.** A `cssSelector`/`xpath`/`includeTags` that matched nothing
+  describes your request, not the page.
+- **`changeTracking`.** It compares a live fetch against your `previous`
+  snapshot; a replay would report `unchanged` for a page that did change.
+- **Anything caller-specific.** A request that carries its own `headers` (where a
+  cookie or token lives), `proxy` or `stealth` override is neither read from nor
+  written to the cache, so a cached page is only ever a plain anonymous fetch.
+
+Batch scrapes and extract jobs go through the cache like a single scrape and
+honour the request's `maxAge`. Crawl and map always fetch live and never write
+to it. The `crw scrape` CLI and the monitor runner always fetch live.
 
 ## Formats
 

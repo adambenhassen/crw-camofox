@@ -473,6 +473,7 @@ async fn run() -> Result<(), CmdError> {
                     map: Default::default(),
                     document: Default::default(),
                     client: Default::default(),
+                    page_cache: Default::default(),
                 }
             });
 

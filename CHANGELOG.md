@@ -9,6 +9,18 @@ and the project uses [Semantic Versioning](https://semver.org/).
 
 ### Added
 
+- **Scrape:** a repeat scrape skips the network. The fetch (not the extraction)
+  is cached in memory for an hour, so a second pass with a different schema or
+  format reuses it. `maxAge` (ms, `0` = always fetch, capped at 24 h) and
+  `storeInCache` (`false` = read only) are honoured on `/v1/scrape` and
+  `/v2/scrape`; a replay is marked `cached: true` (`/v1`) or
+  `metadata.cacheState: "hit"` (`/v2`), bills like the fetch it replays, and
+  reports the renderer that produced the original page. Walls, errors,
+  non-2xx and partial pages, thin or stand-in bodies, selector misses,
+  `changeTracking`, and any request with its own `headers`, `proxy` or
+  `stealth` override are never cached. Crawl and map always fetch live;
+  `crw scrape` and the monitor runner opt out. Knobs: `[page_cache]` `enabled`,
+  `capacity_mb` (256), `default_max_age_ms` (3600000). Upstream `601d5f50`.
 - **MCP:** `initialize` returns server `instructions` that steer agents to the
   web tools for live or source-specific information. They name only the tools
   `tools/list` offers: `crw_search` is left out when no search backend is

@@ -168,3 +168,40 @@ fn ladder_min_deadline_counts_the_impersonated_tier_only_when_in_chain() {
         assert_eq!(delta, 0);
     }
 }
+
+#[test]
+fn page_cache_defaults_to_on_with_a_one_hour_window() {
+    let c = AppConfig::default().page_cache;
+    assert!(c.enabled);
+    assert_eq!(c.capacity_mb, 256);
+    assert_eq!(c.default_max_age_ms, 3_600_000);
+}
+
+#[test]
+fn page_cache_section_overrides_each_knob_independently() {
+    let c: AppConfig = toml::from_str(
+        r#"
+[page_cache]
+enabled = false
+capacity_mb = 32
+"#,
+    )
+    .unwrap();
+    assert!(!c.page_cache.enabled);
+    assert_eq!(c.page_cache.capacity_mb, 32);
+    assert_eq!(c.page_cache.default_max_age_ms, 3_600_000);
+}
+
+/// The bundled `config.default.toml` documents the knobs with their shipped
+/// values; if the two drift, the file lies about what an unconfigured server does.
+#[test]
+fn bundled_config_page_cache_matches_the_defaults() {
+    let bundled: AppConfig = toml::from_str(include_str!("../../../config.default.toml")).unwrap();
+    let defaults = PageCacheConfig::default();
+    assert_eq!(bundled.page_cache.enabled, defaults.enabled);
+    assert_eq!(bundled.page_cache.capacity_mb, defaults.capacity_mb);
+    assert_eq!(
+        bundled.page_cache.default_max_age_ms,
+        defaults.default_max_age_ms
+    );
+}

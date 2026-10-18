@@ -18,6 +18,7 @@ crw-extract = { workspace = true }
 reqwest = { workspace = true }
 serde_json = { workspace = true }
 scraper = { workspace = true }
+moka = { workspace = true }
 tokio = { workspace = true }
 tracing = { workspace = true }
 url = { workspace = true }

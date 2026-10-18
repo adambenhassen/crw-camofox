@@ -981,6 +981,7 @@ pub fn extract(opts: ExtractOptions<'_>) -> CrwResult<ScrapeData> {
         block: None,
         // Copied post-extract from FetchResult.truncated, same as content_type.
         truncated: false,
+        cached: false,
     })
 }
 

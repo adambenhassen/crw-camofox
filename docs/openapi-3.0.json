@@ -566,6 +566,18 @@
           "judgeEnabled": {
             "type": "boolean",
             "description": "Run the LLM meaningful-change judge on a changed page (requires goal)"
+          },
+          "maxAge": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0,
+            "default": 3600000,
+            "description": "How old a cached copy of this fetch may be, in milliseconds. 0 always fetches. Clamped to a 24 hour ceiling. Extraction options (formats, schema, selectors) are not part of the cache key, so a second pass over the same page reuses the fetch."
+          },
+          "storeInCache": {
+            "type": "boolean",
+            "default": true,
+            "description": "Set false to read the cache without writing to it."
           }
         }
       },
@@ -624,6 +636,10 @@
               },
               "creditCost": {
                 "type": "number"
+              },
+              "cached": {
+                "type": "boolean",
+                "description": "Present and true when the page was replayed from the fetch cache instead of fetched"
               }
             }
           }

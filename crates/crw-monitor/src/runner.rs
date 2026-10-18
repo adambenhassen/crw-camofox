@@ -301,6 +301,12 @@ impl EngineSource {
             goal: None,
             judge_enabled: None,
             parsers: None,
+            // A check diffs a LIVE fetch against the previous one, so a replayed
+            // page would report "unchanged" for a page that did change (the same
+            // reason `changeTracking` bypasses the cache). It also must not seed
+            // the cache for callers who never asked for this fetch.
+            max_age: Some(0),
+            store_in_cache: Some(false),
         }
     }
 }

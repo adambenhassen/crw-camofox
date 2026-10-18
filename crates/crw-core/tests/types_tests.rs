@@ -182,6 +182,7 @@ fn scrape_data_skip_serializing_none() {
         change_tracking: None,
         block: None,
         truncated: false,
+        cached: false,
     };
 
     let json = serde_json::to_value(&data).unwrap();
@@ -297,6 +298,7 @@ fn scrape_data_serializes_debug_extraction_as_camel_case() {
         change_tracking: None,
         block: None,
         truncated: false,
+        cached: false,
     };
     let v = serde_json::to_value(&data).unwrap();
     assert!(v.get("debugExtraction").is_none(), "absent when None");
@@ -442,4 +444,30 @@ fn requested_renderer_implies_js_is_false_only_for_wire_level_pins() {
     assert!(RequestedRenderer::Lightpanda.implies_js());
     assert!(RequestedRenderer::Camofox.implies_js());
     assert!(RequestedRenderer::Chrome.implies_js());
+}
+
+#[test]
+fn scrape_request_max_age_and_store_in_cache_are_camel_case() {
+    let req: ScrapeRequest =
+        serde_json::from_str(r#"{"url":"https://example.com","maxAge":5000,"storeInCache":false}"#)
+            .unwrap();
+    assert_eq!(req.max_age, Some(5000));
+    assert_eq!(req.store_in_cache, Some(false));
+
+    let unset: ScrapeRequest = serde_json::from_str(r#"{"url":"https://example.com"}"#).unwrap();
+    assert_eq!((unset.max_age, unset.store_in_cache), (None, None));
+}
+
+#[test]
+fn scrape_data_cached_is_omitted_unless_true() {
+    let mut data = ScrapeData::default();
+    let v = serde_json::to_value(&data).unwrap();
+    assert!(
+        v.get("cached").is_none(),
+        "a live fetch must serialize as before"
+    );
+
+    data.cached = true;
+    let v = serde_json::to_value(&data).unwrap();
+    assert_eq!(v["cached"], true);
 }

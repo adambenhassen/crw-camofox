@@ -75,6 +75,10 @@ async fn run_server() {
     // defaults — this is the real capacity bound.
     crw_crawl::extract_pool::configure_extract_limit(config.extraction.max_concurrent_extracts);
 
+    // Size and switch the fetch cache from [page_cache] before any request can
+    // scrape; the first call wins, so this must precede the first scrape.
+    crw_crawl::page_cache::configure(&config.page_cache);
+
     let addr = format!("{}:{}", config.server.host, config.server.port);
     tracing::info!("Starting CRW on {addr}");
     tracing::info!("Renderer mode: {:?}", config.renderer.mode);

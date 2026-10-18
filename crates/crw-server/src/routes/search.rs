@@ -1392,6 +1392,13 @@ async fn enrich_with_scrape(
                 goal: None,
                 judge_enabled: None,
                 parsers: None,
+                // Search enrichment takes the configured cache default like any
+                // other scrape: a SERP URL fetched twice in a minute is the
+                // same page. Its short per-URL budget is recorded with the
+                // entry, so a longer-budget caller is never served a page this
+                // path had to cut short.
+                max_age: None,
+                store_in_cache: None,
             };
             let deadline = Deadline::from_request_ms(deadline_ms);
             let result = scrape_url(
