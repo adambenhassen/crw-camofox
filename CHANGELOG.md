@@ -7,6 +7,11 @@ and the project uses [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [1.8.2] - 2026-10-18
+
+A latency fix: a Cloudflare-challenged page reaches the Byparr solver about
+15 s sooner.
+
 ### Changed
 
 - **Renderer:** with a Byparr solver configured, the Camofox tier now waits at
@@ -554,6 +559,7 @@ machinery is removed.
 - Structured-extraction (Anthropic) chat URL no longer doubles `/v1`.
 - Engine cap and camofox-mcp configuration corrected against a live Docker stack.
 
+[1.8.2]: https://github.com/adambenhassen/crw-camofox/compare/v1.8.1...v1.8.2
 [1.8.1]: https://github.com/adambenhassen/crw-camofox/compare/v1.8.0...v1.8.1
 [1.8.0]: https://github.com/adambenhassen/crw-camofox/compare/v1.7.0...v1.8.0
 [1.7.0]: https://github.com/adambenhassen/crw-camofox/compare/v1.6.1...v1.7.0
