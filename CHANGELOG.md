@@ -7,6 +7,12 @@ and the project uses [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [1.8.1] - 2026-10-18
+
+A fix release: a real 403/503 page is no longer reported as a wall just
+because no markdown was requested, and `[extraction] only_main_content` is
+honoured as the request default.
+
 ### Fixed
 
 - **Scrape and crawl:** a 403 or 503 page with real content is no longer
@@ -541,6 +547,7 @@ machinery is removed.
 - Structured-extraction (Anthropic) chat URL no longer doubles `/v1`.
 - Engine cap and camofox-mcp configuration corrected against a live Docker stack.
 
+[1.8.1]: https://github.com/adambenhassen/crw-camofox/compare/v1.8.0...v1.8.1
 [1.8.0]: https://github.com/adambenhassen/crw-camofox/compare/v1.7.0...v1.8.0
 [1.7.0]: https://github.com/adambenhassen/crw-camofox/compare/v1.6.1...v1.7.0
 [1.6.1]: https://github.com/adambenhassen/crw-camofox/compare/v1.6.0...v1.6.1
