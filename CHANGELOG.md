@@ -7,6 +7,12 @@ and the project uses [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [1.8.0] - 2026-10-18
+
+A repeat scrape is served from an in-memory page cache, the MCP server
+advertises instructions and `maxAge`, and log lines no longer print target
+URLs.
+
 ### Added
 
 - **Scrape:** a repeat scrape skips the network. The fetch (not the extraction)
@@ -515,6 +521,7 @@ machinery is removed.
 - Structured-extraction (Anthropic) chat URL no longer doubles `/v1`.
 - Engine cap and camofox-mcp configuration corrected against a live Docker stack.
 
+[1.8.0]: https://github.com/adambenhassen/crw-camofox/compare/v1.7.0...v1.8.0
 [1.7.0]: https://github.com/adambenhassen/crw-camofox/compare/v1.6.1...v1.7.0
 [1.6.1]: https://github.com/adambenhassen/crw-camofox/compare/v1.6.0...v1.6.1
 [1.6.0]: https://github.com/adambenhassen/crw-camofox/compare/v1.5.0...v1.6.0
