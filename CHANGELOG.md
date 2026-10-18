@@ -20,6 +20,9 @@ and the project uses [Semantic Versioning](https://semver.org/).
   ignored and the default was always `true`. An explicit value on the request
   still wins, `crw scrape`/`crw crawl` follow the config unless `--raw` is
   passed, and the shipped default stays `true`. Upstream `53a6baf2`.
+- **Walls:** Cloudflare's current block page (no `cf-error-code` span) is
+  reported with vendor `cloudflare` instead of `generic_block`. Only the
+  vendor label changes. Upstream `139a21d6`.
 
 ## [1.8.0] - 2026-10-18
 
