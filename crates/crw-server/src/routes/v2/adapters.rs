@@ -159,16 +159,15 @@ pub fn to_v2_document(data: ScrapeData, proxy_used: &str, scrape_id: String) -> 
         //
         // `selector_no_match` rides in the plural `warnings` (which `V2Document`
         // has no field for); an empty document from a selector that matched
-        // nothing would otherwise carry no hint of why.
+        // nothing would otherwise carry no hint of why. It goes first: it is
+        // the reason the document is empty, which outranks a render warning.
         warning: data
-            .warning
-            .or_else(|| data.block.as_ref().map(|b| b.reason.clone()))
-            .or_else(|| {
-                data.warnings
-                    .iter()
-                    .find(|w| *w == "selector_no_match")
-                    .cloned()
-            }),
+            .warnings
+            .iter()
+            .find(|w| *w == "selector_no_match")
+            .cloned()
+            .or(data.warning)
+            .or_else(|| data.block.as_ref().map(|b| b.reason.clone())),
         llm_usage: data.llm_usage,
         metadata,
     }
@@ -421,6 +420,15 @@ mod tests {
     fn selector_no_match_reaches_the_v2_document_warning() {
         let mut data = fake_doc("https://x");
         data.markdown = Some(String::new());
+        data.warnings = vec!["selector_no_match".to_string()];
+        let doc = to_v2_document(data, "basic", "sid".to_string());
+        assert_eq!(doc.warning.as_deref(), Some("selector_no_match"));
+
+        // It is why the document is empty, so it outranks a render warning
+        // such as a partial LightPanda snapshot.
+        let mut data = fake_doc("https://x");
+        data.markdown = Some(String::new());
+        data.warning = Some("lightpanda_budget_truncated".to_string());
         data.warnings = vec!["selector_no_match".to_string()];
         let doc = to_v2_document(data, "basic", "sid".to_string());
         assert_eq!(doc.warning.as_deref(), Some("selector_no_match"));
