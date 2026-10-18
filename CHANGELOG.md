@@ -22,6 +22,10 @@ and the project uses [Semantic Versioning](https://semver.org/).
   `crw scrape`, the monitor runner, the embedded MCP `crw_scrape` tool and
   search enrichment opt out. Knobs: `[page_cache]` `enabled`, `capacity_mb`
   (256), `default_max_age_ms` (3600000). Upstream `601d5f50`, `e0a583b6`.
+- **MCP:** `crw_scrape` advertises `maxAge` (ms, `0` = always fetch) in proxy
+  mode, where the arguments are forwarded to the remote `/v1/scrape`. It is not
+  advertised in embedded mode, which always fetches live. Upstream `c34da2d6`,
+  `ee87661d`, `af60e64f`.
 - **MCP:** `initialize` returns server `instructions` that steer agents to the
   web tools for live or source-specific information. They name only the tools
   `tools/list` offers: `crw_search` is left out when no search backend is

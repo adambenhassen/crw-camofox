@@ -230,6 +230,7 @@ For cloud mode and file-based configs, continue in [MCP Client Setup](#mcp-clien
 | `onlyMainContent` | boolean | no | Strip nav/footer (default: true) |
 | `includeTags` | string[] | no | CSS selectors to keep |
 | `excludeTags` | string[] | no | CSS selectors to remove |
+| `maxAge` | integer | no | Max age of a cached copy of the fetch, in ms (default 3600000 = 1h; `0` = always fetch; cap 24h). Proxy mode only |
 
 ### crw_crawl
 

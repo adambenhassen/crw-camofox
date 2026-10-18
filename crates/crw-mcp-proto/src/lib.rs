@@ -415,6 +415,16 @@ pub fn tool_definitions(proxy_mode: bool) -> Value {
         }
     }));
 
+    // Proxy mode only: the embedded dispatcher (`crw-server/src/routes/mcp.rs`)
+    // forces `max_age = Some(0)`, so `maxAge` would be a silent no-op there.
+    if proxy_mode && let Some(scrape) = tools.iter_mut().find(|t| t["name"] == "crw_scrape") {
+        scrape["inputSchema"]["properties"]["maxAge"] = json!({
+            "type": "integer",
+            "minimum": 0,
+            "description": "Max cache age in ms (default 3600000; 0 = always fetch; cap 24h)"
+        });
+    }
+
     json!({ "tools": tools })
 }
 
@@ -828,20 +838,26 @@ mod tests {
     /// were added to crw_scrape and crw_crawl): ~6893 bytes (~2363 est-tok). The
     /// ceiling at 2400 is intentionally tight (1.6% above floor) because the tool
     /// list is weight-optimised; any further growth should be a conscious choice.
+    ///
+    /// Proxy mode adds `maxAge` to `crw_scrape` and is gated against the same
+    /// ceiling: embedded 7069 bytes (2357 est-tok), proxy 7190 bytes (2397).
     const TOOLS_LIST_TOKEN_CEILING: usize = 2400;
 
     #[test]
     fn tools_list_token_budget() {
-        let json = serde_json::to_string(&tool_definitions(false)).unwrap();
-        let est_tokens = json.len().div_ceil(3);
-        assert!(
-            est_tokens <= TOOLS_LIST_TOKEN_CEILING,
-            "tools/list footprint regressed: {} bytes ≈ {} est-tokens (ceiling {}). \
-             Trim descriptions/schemas before raising the ceiling.",
-            json.len(),
-            est_tokens,
-            TOOLS_LIST_TOKEN_CEILING
-        );
+        // Both modes: proxy mode advertises `maxAge` on top of the embedded set.
+        for proxy_mode in [false, true] {
+            let json = serde_json::to_string(&tool_definitions(proxy_mode)).unwrap();
+            let est_tokens = json.len().div_ceil(3);
+            assert!(
+                est_tokens <= TOOLS_LIST_TOKEN_CEILING,
+                "tools/list footprint regressed (proxy_mode={proxy_mode}): {} bytes ≈ {} \
+                 est-tokens (ceiling {}). Trim descriptions/schemas before raising the ceiling.",
+                json.len(),
+                est_tokens,
+                TOOLS_LIST_TOKEN_CEILING
+            );
+        }
     }
 
     fn initialize_result(search_available: bool) -> Value {
@@ -924,6 +940,25 @@ mod tests {
         let scrape = tool_by_name(&defs, "crw_scrape");
         let props = &scrape["inputSchema"]["properties"];
         assert_eq!(props["waitFor"]["type"], "integer");
+    }
+
+    #[test]
+    fn crw_scrape_schema_advertises_max_age_in_proxy_mode_only() {
+        let proxy_defs = tool_definitions(true);
+        let props = &tool_by_name(&proxy_defs, "crw_scrape")["inputSchema"]["properties"];
+        assert_eq!(
+            props["maxAge"]["type"], "integer",
+            "proxy mode forwards args verbatim, so the remote's maxAge must be advertised"
+        );
+        assert_eq!(props["maxAge"]["minimum"], 0);
+
+        let embedded_defs = tool_definitions(false);
+        assert!(
+            tool_by_name(&embedded_defs, "crw_scrape")["inputSchema"]["properties"]
+                .get("maxAge")
+                .is_none(),
+            "embedded mode discards maxAge (routes/mcp.rs forces a fresh fetch); do not advertise it"
+        );
     }
 
     #[test]
