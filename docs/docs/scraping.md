@@ -203,7 +203,8 @@ page.
 
 Batch scrapes and extract jobs go through the cache like a single scrape and
 honour the request's `maxAge`. Crawl and map always fetch live and never write
-to it. The `crw scrape` CLI and the monitor runner always fetch live.
+to it. The `crw scrape` CLI, the monitor runner, the MCP `crw_scrape` tool and
+search enrichment (`/v1/search` with `scrapeOptions`) always fetch live.
 
 ## Formats
 

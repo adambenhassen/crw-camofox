@@ -19,8 +19,9 @@ and the project uses [Semantic Versioning](https://semver.org/).
   non-2xx and partial pages, thin or stand-in bodies, selector misses,
   `changeTracking`, and any request with its own `headers`, `proxy` or
   `stealth` override are never cached. Crawl and map always fetch live;
-  `crw scrape` and the monitor runner opt out. Knobs: `[page_cache]` `enabled`,
-  `capacity_mb` (256), `default_max_age_ms` (3600000). Upstream `601d5f50`.
+  `crw scrape`, the monitor runner, the embedded MCP `crw_scrape` tool and
+  search enrichment opt out. Knobs: `[page_cache]` `enabled`, `capacity_mb`
+  (256), `default_max_age_ms` (3600000). Upstream `601d5f50`, `e0a583b6`.
 - **MCP:** `initialize` returns server `instructions` that steer agents to the
   web tools for live or source-specific information. They name only the tools
   `tools/list` offers: `crw_search` is left out when no search backend is

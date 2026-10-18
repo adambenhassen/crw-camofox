@@ -42,8 +42,13 @@ pub async fn validate_url(url: &str) -> Result<(), String> {
 pub async fn call_tool(state: &AppState, tool_name: &str, args: Value) -> Result<Value, String> {
     match tool_name {
         "crw_scrape" => {
-            let req: ScrapeRequest =
+            let mut req: ScrapeRequest =
                 serde_json::from_value(args).map_err(|e| format!("invalid arguments: {e}"))?;
+            // No page cache on this path: an agent calling a tool expects the page
+            // as it is now, and nothing it fetches should seed a cache that REST
+            // callers then read.
+            req.max_age = Some(0);
+            req.store_in_cache = Some(false);
             validate_url(&req.url).await?;
             let llm_config = state.config.extraction.llm.as_ref();
             let user_agent = &state.config.crawler.user_agent;
