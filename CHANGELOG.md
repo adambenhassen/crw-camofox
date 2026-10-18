@@ -13,7 +13,7 @@ and the project uses [Semantic Versioning](https://semver.org/).
   reported as `generic_block` when the request asks for no markdown format
   (for example `rawHtml` or `links` only). The block check now judges the
   page by the markdown it would have extracted to, as it does for a markdown
-  request.
+  request. Error pages under 2.5 KB are judged as before.
 - **Config:** `[extraction] only_main_content` (env
   `CRW_EXTRACTION__ONLY_MAIN_CONTENT`) is now the default for a scrape, crawl
   or search request that omits `onlyMainContent`, on `/v1` and `/v2`. It was
