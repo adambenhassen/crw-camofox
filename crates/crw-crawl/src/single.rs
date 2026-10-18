@@ -1646,12 +1646,27 @@ pub(crate) fn classify_block(
             reason: "parked domain / placeholder page".to_string(),
         });
     }
-    if markdown.map(|m| m.trim().len()).unwrap_or(0) >= threshold {
+    if markdown.is_some_and(|m| m.trim().len() >= threshold) {
         return None;
     }
     let r = crw_extract::antibot::classify(Some(status), html);
     if !r.signal.is_blocked() {
         return None;
+    }
+    // A request without a markdown format (rawHtml, links) carries no markdown,
+    // which used to read as empty: every 403/503 with a real page came back
+    // `generic_block`. Judge it by the markdown it would have extracted to.
+    // Only reached on a blocked verdict, so clean pages never pay for the pass.
+    if markdown.is_none() {
+        let cleaned = crw_extract::clean::clean_html(html, true, &[], &[])
+            .unwrap_or_else(|_| html.to_string());
+        if crw_extract::markdown::html_to_markdown(&cleaned)
+            .trim()
+            .len()
+            >= threshold
+        {
+            return None;
+        }
     }
     // A non-HTML body is CONTENT, so the HTML SHAPE heuristics do not apply to it:
     // the HTTP tier decodes every non-PDF response as HTML, so a 68-byte
@@ -2512,6 +2527,41 @@ mod tests {
             )
             .is_none()
         );
+    }
+
+    #[test]
+    fn classify_block_no_block_on_real_403_page_without_markdown_format() {
+        // A request for rawHtml or links only carries no markdown. The guard used
+        // to read that as empty, so every 403 page with real content came back
+        // `generic_block` while the same page with `formats: ["markdown"]` passed.
+        let html = "<!doctype html><html><head><title>Members only</title></head><body>\
+            <article><h1>Members only</h1><p>This article is part of our archive. \
+            It describes the history of the project at length, with enough prose \
+            to be a real page rather than a deny stub.</p></article></body></html>";
+        assert!(
+            classify_block(
+                403,
+                Some("text/html"),
+                html,
+                None,
+                THRESH,
+                "https://example.com/",
+                None,
+            )
+            .is_none()
+        );
+        // A bare 403 stub with no markdown format is still a block.
+        let b = classify_block(
+            403,
+            Some("text/html"),
+            "<html><body>Forbidden</body></html>",
+            None,
+            THRESH,
+            "https://example.com/",
+            None,
+        )
+        .expect("near-empty 403 must stay a block");
+        assert_eq!(b.vendor, "generic_block");
     }
 
     #[test]

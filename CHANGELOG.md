@@ -7,6 +7,14 @@ and the project uses [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Fixed
+
+- **Scrape and crawl:** a 403 or 503 page with real content is no longer
+  reported as `generic_block` when the request asks for no markdown format
+  (for example `rawHtml` or `links` only). The block check now judges the
+  page by the markdown it would have extracted to, as it does for a markdown
+  request.
+
 ## [1.8.0] - 2026-10-18
 
 A repeat scrape is served from an in-memory page cache, the MCP server
