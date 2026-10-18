@@ -23,6 +23,9 @@ and the project uses [Semantic Versioning](https://semver.org/).
 - **Walls:** Cloudflare's current block page (no `cf-error-code` span) is
   reported with vendor `cloudflare` instead of `generic_block`. Only the
   vendor label changes. Upstream `139a21d6`.
+- **MCP:** shorter `jsonSchema` and `renderer` descriptions on `crw_scrape`
+  and `crw_crawl` (same meaning), leaving room under the `tools/list` size
+  limit: proxy mode drops from 2397 to 2351 of 2400 estimated tokens.
 
 ## [1.8.0] - 2026-10-18
 

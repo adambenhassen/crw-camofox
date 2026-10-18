@@ -138,7 +138,7 @@ pub fn tool_definitions(proxy_mode: bool) -> Value {
                     "renderer": {
                         "type": "string",
                         "enum": ["auto", "lightpanda", "camofox", "impersonated-http"],
-                        "description": "Pin renderer; browser tiers hard-pin and imply renderJs:true (default auto). 'impersonated-http' is JS-less Chrome-TLS impersonation, never renderJs."
+                        "description": "Pin renderer (default auto); browser tiers hard-pin and imply renderJs:true. 'impersonated-http' is Chrome-TLS HTTP, no JS."
                     }
                 },
                 "required": ["url"]
@@ -174,7 +174,7 @@ pub fn tool_definitions(proxy_mode: bool) -> Value {
                     "jsonSchema": {
                         "type": "object",
                         "additionalProperties": true,
-                        "description": "Optional. A JSON Schema (draft 2020-12) describing fields to extract from each page via an LLM, e.g. {\"type\":\"object\",\"properties\":{\"title\":{\"type\":\"string\"}}}. Free-form object. Omit to crawl without structured extraction."
+                        "description": "JSON Schema (draft 2020-12) of fields to extract from each page via an LLM, e.g. {\"type\":\"object\",\"properties\":{\"title\":{\"type\":\"string\"}}}. Omit to crawl without extraction."
                     },
                     "renderJs": {
                         "type": "boolean",
@@ -187,7 +187,7 @@ pub fn tool_definitions(proxy_mode: bool) -> Value {
                     "renderer": {
                         "type": "string",
                         "enum": ["auto", "lightpanda", "camofox", "impersonated-http"],
-                        "description": "Pin renderer; browser tiers hard-pin and imply renderJs:true (default auto). 'impersonated-http' is JS-less Chrome-TLS impersonation, never renderJs."
+                        "description": "Pin renderer (default auto); browser tiers hard-pin and imply renderJs:true. 'impersonated-http' is Chrome-TLS HTTP, no JS."
                     }
                 },
                 "required": ["url"]
@@ -398,7 +398,7 @@ pub fn tool_definitions(proxy_mode: bool) -> Value {
                 "jsonSchema": {
                     "type": "object",
                     "additionalProperties": true,
-                    "description": "Optional. A JSON Schema (draft 2020-12) describing fields to extract when formats includes \"json\", e.g. {\"type\":\"object\",\"properties\":{\"title\":{\"type\":\"string\"}}}. Free-form object."
+                    "description": "JSON Schema (draft 2020-12) of fields to extract when formats includes \"json\", e.g. {\"type\":\"object\",\"properties\":{\"title\":{\"type\":\"string\"}}}."
                 },
                 "parsers": {
                     "type": "array",
@@ -840,7 +840,8 @@ mod tests {
     /// list is weight-optimised; any further growth should be a conscious choice.
     ///
     /// Proxy mode adds `maxAge` to `crw_scrape` and is gated against the same
-    /// ceiling: embedded 7069 bytes (2357 est-tok), proxy 7190 bytes (2397).
+    /// ceiling. After trimming the jsonSchema and renderer descriptions:
+    /// embedded 6930 bytes (2310 est-tok), proxy 7051 bytes (2351).
     const TOOLS_LIST_TOKEN_CEILING: usize = 2400;
 
     #[test]
