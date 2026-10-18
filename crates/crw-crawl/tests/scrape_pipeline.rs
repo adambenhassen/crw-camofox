@@ -235,6 +235,36 @@ async fn empty_truncated_render_fails_with_the_requested_budget() {
     }
 }
 
+/// A partial render whose page had content the caller's selector excluded is
+/// not "ran out of time with nothing extracted": the empty result is the
+/// selector's answer, so it ships with `selector_no_match` and keeps the
+/// render's `truncated` flag rather than failing as a timeout.
+#[tokio::test]
+async fn unmatched_selector_on_a_truncated_render_is_not_a_timeout() {
+    let r = renderer(vec![tier_truncated("lightpanda", article(30), true)]);
+    let data = scrape_with(&r, serde_json::json!({ "includeTags": [".missing"] }))
+        .await
+        .expect("an unmatched selector is an answer, not a timeout");
+    assert!(
+        data.markdown
+            .as_deref()
+            .unwrap_or_default()
+            .trim()
+            .is_empty(),
+        "{:?}",
+        data.markdown
+    );
+    assert!(
+        data.warnings.iter().any(|w| w == "selector_no_match"),
+        "{:?}",
+        data.warnings
+    );
+    assert!(
+        data.truncated,
+        "the partial render stays visible to the caller"
+    );
+}
+
 fn tier_truncated(name: &'static str, body: String, truncated: bool) -> Arc<dyn PageFetcher> {
     Arc::new(Tier {
         name,

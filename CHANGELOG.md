@@ -59,7 +59,8 @@ and the project uses [Semantic Versioning](https://semver.org/).
 - **Scrape:** a selector that matches nothing (`includeTags`, `cssSelector`,
   `xpath`) returns `success: true` with an empty document and the
   `selector_no_match` warning, billed normally. It no longer fails as
-  `no_usable_content` and no longer triggers a JS-render escalation.
+  `no_usable_content` or, on a partial render, as a timeout, and no longer
+  triggers a JS-render escalation.
 
 ## [1.7.0] - 2026-10-18
 

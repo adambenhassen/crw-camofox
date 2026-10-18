@@ -813,11 +813,16 @@ async fn scrape_url_inner(
     //
     // Scoped deliberately: only when markdown was ASKED FOR (a `rawHtml`/`links`
     // caller can still use a partial DOM) and only when it is entirely empty.
-    if is_empty_truncated_render(
-        fetch_result.truncated,
-        &req.formats,
-        data.markdown.as_deref(),
-    ) {
+    // Not when the caller's selector matched nothing: the DOM had content and
+    // the selector excluded it, so the empty result is its answer. `truncated`
+    // still tells the caller the render was partial.
+    if !data.selector_matched_nothing()
+        && is_empty_truncated_render(
+            fetch_result.truncated,
+            &req.formats,
+            data.markdown.as_deref(),
+        )
+    {
         tracing::warn!(
             url = %LogUrl(&req.url),
             elapsed_ms = fetch_result.elapsed_ms,
